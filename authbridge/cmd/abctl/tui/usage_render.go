@@ -349,16 +349,21 @@ func renderCostSummary(snap *usage.Snapshot) string {
 		// only one of them means the traffic was free.
 		return "COST unavailable"
 	}
-	// Two decimals on the grand total; four-decimal precision belongs on the
-	// per-event cells (see formatUSDCell). A positive-but-sub-cent total falls
-	// back to "<$0.01" so small does not read as free — the same floor rule
-	// formatUSDCell applies at $0.0001.
-	usd := float64(snap.Totals.CostMicros) / 1e6
+	// Integer cent rounding, not %.2f on float64(micros)/1e6: 1_005_000 micros
+	// is exactly $1.005 but the float is 1.0049999… so %.2f prints $1.00.
+	// A positive-but-sub-cent total falls back to "<$0.01" so small does not
+	// read as free — same floor rule formatUSDCell applies at $0.0001.
+	micros := snap.Totals.CostMicros
 	var cell string
-	if usd > 0 && usd < 0.005 {
+	switch {
+	case micros > 0 && micros < 5_000:
 		cell = "COST <$0.01"
-	} else {
-		cell = fmt.Sprintf("COST $%.2f", usd)
+	default:
+		cents := micros / 10_000
+		if micros%10_000 >= 5_000 {
+			cents++
+		}
+		cell = fmt.Sprintf("COST $%d.%02d", cents/100, cents%100)
 	}
 	// Compared against PRICEABLE requests, not all of them. Requests counts every
 	// proxied response — MCP tool calls, health checks, anything else the sidecar

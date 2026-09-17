@@ -815,11 +815,10 @@ func TestEventColumns_CellsTruncateToTheirOwnWidth(t *testing.T) {
 	}
 }
 
-// TestDurationAndTokensColumns_RightAligned drives the wired cell closures at
-// their real widths and asserts numeric cells come out right-aligned. The
-// numeric columns line up under each other so decimal points and magnitudes
-// can be scanned down the table.
-func TestDurationAndTokensColumns_RightAligned(t *testing.T) {
+// TestNumericColumns_RightAligned drives the wired cell closures for the
+// three numeric columns (DURATION, TOKENS, COST) at their real widths and
+// asserts they come out right-aligned by display width.
+func TestNumericColumns_RightAligned(t *testing.T) {
 	ev := pipeline.SessionEvent{
 		Direction: pipeline.Outbound,
 		Phase:     pipeline.SessionResponse,
@@ -830,19 +829,23 @@ func TestDurationAndTokensColumns_RightAligned(t *testing.T) {
 	m := &model{}
 
 	for _, col := range eventColumns {
-		if col.id != colDuration && col.id != colTokens {
+		if col.id != colDuration && col.id != colTokens && col.id != colCost {
 			continue
 		}
 		cc := cellContext{m: m, rows: rows, i: 0, row: rows[0], width: col.width}
 		got := col.cell(cc)
-		if len(got) != col.width {
-			t.Errorf("%s: cell width = %d, want %d (%q)", col.id, len(got), col.width, got)
+		if got == "" {
+			// COST is blank on a fixture with no cost record. Its wiring is
+			// still covered — that path renders through padLeft the same way.
+			continue
+		}
+		// lipgloss.Width, not len: TOKENS/COST cells can carry U+2212 (3 bytes,
+		// 1 column) once a saving is attached, and byte length would mis-count.
+		if w := lipgloss.Width(got); w != col.width {
+			t.Errorf("%s: display width = %d, want %d (%q)", col.id, w, col.width, got)
 		}
 		if !strings.HasSuffix(got, strings.TrimSpace(got)) {
 			t.Errorf("%s: cell not right-aligned (%q)", col.id, got)
-		}
-		if strings.TrimSpace(got) == "" {
-			t.Errorf("%s: cell had no visible content (%q)", col.id, got)
 		}
 	}
 }

@@ -328,6 +328,16 @@ func TestRenderCostSummary(t *testing.T) {
 			},
 			want: "COST <$0.01 (1/100 priced)",
 		},
+		{
+			// float64(1_005_000)/1e6 is 1.0049999…; %.2f on it prints $1.00.
+			// Integer cent rounding rounds the half-cent up to $1.01.
+			name: "half-cent boundary rounds up under integer rounding",
+			snap: usage.Snapshot{
+				Totals: usage.Counts{Requests: 1, PriceableRequests: 1, PricedRequests: 1, CostMicros: 1_005_000},
+				Priced: true,
+			},
+			want: "COST $1.01",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

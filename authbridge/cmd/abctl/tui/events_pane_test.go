@@ -1151,6 +1151,10 @@ func TestPadLeft(t *testing.T) {
 		{"", 10, ""},
 		{"exactly10c", 10, "exactly10c"},
 		{"toolongforthisfield", 10, "toolongforthisfield"},
+		// Display-width padding: "1,048,576(−12.3k)" is 19 bytes but 17
+		// display columns (U+2212 is 3 bytes, 1 column). A byte-length guard
+		// would skip padding at width 19 and leave the cell left-shifted.
+		{"1,048,576(−12.3k)", 19, "  1,048,576(−12.3k)"},
 	}
 	for _, tc := range cases {
 		if got := padLeft(tc.in, tc.width); got != tc.want {

@@ -240,8 +240,10 @@ var eventColumns = []eventColumn{
 	// where both halves fell under the four-decimal floor. The ordinary shape is
 	// "$0.2546(−$0.0037)" at 17.
 	{id: colCost, width: 19, defaultOn: true, keep: keepLow,
-		desc:    "estimated cost, and what tool-prune saved",
-		cell:    func(c cellContext) string { return c.m.costCell(c.rows, c.partner, c.i, c.row.event) },
+		desc: "estimated cost, and what tool-prune saved",
+		cell: func(c cellContext) string {
+			return padLeft(c.m.costCell(c.rows, c.partner, c.i, c.row.event), c.width)
+		},
 		sortKey: func(c cellContext) sortValue { return numKey(rowCostUSD(c)) }},
 	// keepHigh: the column #866 was filed about. Last in display order, so without
 	// a rank it is the first thing a narrow terminal drops — which is how it came

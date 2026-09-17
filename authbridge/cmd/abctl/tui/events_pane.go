@@ -755,14 +755,16 @@ func truncStr(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
-// padLeft right-aligns s in a field of the given width via fmt's %*s. An
-// empty cell stays blank rather than becoming a column of spaces, and an
-// over-wide cell is left to the table's own truncation.
+// padLeft right-aligns s in a field of the given display width. Uses
+// lipgloss.Width (matching padRight in help_overlay.go) so the saving sign
+// (U+2212, 3 bytes / 1 column) in TOKENS/COST cells doesn't cause padding to
+// mis-count. An empty cell stays blank.
 func padLeft(s string, width int) string {
-	if s == "" || len(s) >= width {
+	w := lipgloss.Width(s)
+	if s == "" || w >= width {
 		return s
 	}
-	return fmt.Sprintf("%*s", width, s)
+	return strings.Repeat(" ", width-w) + s
 }
 
 // computeEventPairs matches each response row to its request row and returns
