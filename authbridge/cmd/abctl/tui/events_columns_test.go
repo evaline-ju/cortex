@@ -812,3 +812,35 @@ func TestEventColumns_CellsTruncateToTheirOwnWidth(t *testing.T) {
 		}
 	}
 }
+
+// TestDurationAndTokensColumns_RightAligned drives the wired cell closures at
+// their real widths and asserts numeric cells come out right-aligned. The
+// numeric columns line up under each other so decimal points and magnitudes
+// can be scanned down the table.
+func TestDurationAndTokensColumns_RightAligned(t *testing.T) {
+	ev := pipeline.SessionEvent{
+		Direction: pipeline.Outbound,
+		Phase:     pipeline.SessionResponse,
+		Duration:  1230 * time.Millisecond,
+		Inference: &pipeline.InferenceExtension{OutputTokens: 42},
+	}
+	rows := []eventRow{{event: &ev}}
+	m := &model{}
+
+	for _, col := range eventColumns {
+		if col.id != colDuration && col.id != colTokens {
+			continue
+		}
+		cc := cellContext{m: m, rows: rows, i: 0, row: rows[0], width: col.width}
+		got := col.cell(cc)
+		if len(got) != col.width {
+			t.Errorf("%s: cell width = %d, want %d (%q)", col.id, len(got), col.width, got)
+		}
+		if !strings.HasSuffix(got, strings.TrimSpace(got)) {
+			t.Errorf("%s: cell not right-aligned (%q)", col.id, got)
+		}
+		if strings.TrimSpace(got) == "" {
+			t.Errorf("%s: cell had no visible content (%q)", col.id, got)
+		}
+	}
+}

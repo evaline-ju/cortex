@@ -20,14 +20,14 @@ func TestRenderCostSummary_ThreeCoverageStates(t *testing.T) {
 		snap: usage.Snapshot{Totals: usage.Counts{Requests: 5}},
 		want: []string{"unavailable"},
 		// $0.00 would read as "this traffic was free", which is a different claim.
-		deny: []string{"$0.0000"},
+		deny: []string{"$0.00"},
 	}, {
 		name: "fully priced shows a bare total",
 		snap: usage.Snapshot{
 			Priced: true,
 			Totals: usage.Counts{Requests: 5, PricedRequests: 5, PriceableRequests: 5, CostMicros: 1_250_000},
 		},
-		want: []string{"$1.2500"},
+		want: []string{"$1.25"},
 		deny: []string{"priced", "unpriced"},
 	}, {
 		name: "partially priced discloses the gap and names it",
@@ -36,7 +36,7 @@ func TestRenderCostSummary_ThreeCoverageStates(t *testing.T) {
 			Totals:     usage.Counts{Requests: 10, PricedRequests: 4, PriceableRequests: 10, CostMicros: 500_000},
 			UnpricedBy: map[string]int64{"api.openai.com gpt-5": 6},
 		},
-		want: []string{"$0.5000", "4/10", "api.openai.com gpt-5"},
+		want: []string{"$0.50", "4/10", "api.openai.com gpt-5"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := renderCostSummary(&tc.snap)
@@ -118,7 +118,7 @@ func TestRenderCostSummary_NonInferenceTrafficDoesNotLookLikeAGap(t *testing.T) 
 	if strings.Contains(got, "priced") {
 		t.Errorf("rendered %q — full coverage must not disclose a gap", got)
 	}
-	if !strings.Contains(got, "$0.2500") {
+	if !strings.Contains(got, "$0.25") {
 		t.Errorf("rendered %q, want the total", got)
 	}
 }

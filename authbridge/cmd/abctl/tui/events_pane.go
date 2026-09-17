@@ -639,6 +639,16 @@ func truncStr(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
+// padLeft right-aligns s in a field of the given width via fmt's %*s. An
+// empty cell stays blank rather than becoming a column of spaces, and an
+// over-wide cell is left to the table's own truncation.
+func padLeft(s string, width int) string {
+	if s == "" || len(s) >= width {
+		return s
+	}
+	return fmt.Sprintf("%*s", width, s)
+}
+
 // computeEventPairs matches each response row to its request row and returns
 // two views of the result:
 //

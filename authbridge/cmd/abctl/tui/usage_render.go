@@ -349,7 +349,19 @@ func renderCostSummary(snap *usage.Snapshot) string {
 		// only one of them means the traffic was free.
 		return "COST unavailable"
 	}
-	cell := fmt.Sprintf("COST $%.4f", float64(snap.Totals.CostMicros)/1e6)
+	// Two decimals, not four: this is a summed grand total, so anything under a
+	// cent has been averaged out. The four-decimal precision belongs on the
+	// per-event cells, where a single cache-heavy call really can cost $0.0038.
+	// Positive amounts that round to zero cents render as "<$0.01" so a small
+	// but real total reads as small rather than free — same reason formatUSDCell
+	// has its $0.0001 floor at the per-event layer.
+	usd := float64(snap.Totals.CostMicros) / 1e6
+	var cell string
+	if usd > 0 && usd < 0.005 {
+		cell = "COST <$0.01"
+	} else {
+		cell = fmt.Sprintf("COST $%.2f", usd)
+	}
 	// Compared against PRICEABLE requests, not all of them. Requests counts every
 	// proxied response — MCP tool calls, health checks, anything else the sidecar
 	// handled — while only inference can ever be priced, so the old ratio left a

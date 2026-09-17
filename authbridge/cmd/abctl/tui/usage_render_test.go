@@ -306,7 +306,7 @@ func TestRenderCostSummary(t *testing.T) {
 				Totals: usage.Counts{Requests: 40, PriceableRequests: 40, PricedRequests: 40, CostMicros: 1_842_100},
 				Priced: true,
 			},
-			want: "COST $1.8421",
+			want: "COST $1.84",
 		},
 		// PriceableRequests is the denominator now, not Requests: the latter counts
 		// non-inference traffic that can never be priced, so a correct deployment read
@@ -318,7 +318,7 @@ func TestRenderCostSummary(t *testing.T) {
 				Totals: usage.Counts{Requests: 57, PriceableRequests: 57, PricedRequests: 42, CostMicros: 1_842_100},
 				Priced: true,
 			},
-			want: "COST $1.8421 (42/57 priced)",
+			want: "COST $1.84 (42/57 priced)",
 		},
 		{
 			name: "one priced request out of many",
@@ -326,7 +326,7 @@ func TestRenderCostSummary(t *testing.T) {
 				Totals: usage.Counts{Requests: 100, PriceableRequests: 100, PricedRequests: 1, CostMicros: 500},
 				Priced: true,
 			},
-			want: "COST $0.0005 (1/100 priced)",
+			want: "COST <$0.01 (1/100 priced)",
 		},
 	}
 	for _, tc := range tests {

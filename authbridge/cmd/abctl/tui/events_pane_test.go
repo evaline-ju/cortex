@@ -1134,3 +1134,24 @@ func TestKeyOf_SameInstantSameKey(t *testing.T) {
 		t.Errorf("keys differ for same instant:\n  a: %+v\n  b: %+v", a, b)
 	}
 }
+
+// TestPadLeft — right-aligns numeric cells so decimal points and digit
+// magnitudes line up under each other. Blank stays blank so the eye can
+// still scan for missing values.
+func TestPadLeft(t *testing.T) {
+	cases := []struct {
+		in    string
+		width int
+		want  string
+	}{
+		{"1.23s", 10, "     1.23s"},
+		{"", 10, ""},
+		{"exactly10c", 10, "exactly10c"},
+		{"toolongforthisfield", 10, "toolongforthisfield"},
+	}
+	for _, tc := range cases {
+		if got := padLeft(tc.in, tc.width); got != tc.want {
+			t.Errorf("padLeft(%q, %d) = %q, want %q", tc.in, tc.width, got, tc.want)
+		}
+	}
+}

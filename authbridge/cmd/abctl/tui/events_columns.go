@@ -147,14 +147,16 @@ var eventColumns = []eventColumn{
 		cell: func(c cellContext) string { return statusCell(*c.row.event) }},
 	{id: colDuration, width: 10, defaultOn: true, keep: keepLow,
 		desc: "how long the exchange took",
-		cell: func(c cellContext) string { return durationCell(*c.row.event) }},
+		cell: func(c cellContext) string { return padLeft(durationCell(*c.row.event), c.width) }},
 	// 17, not 15: sized for a SEVEN-digit prompt, "1,048,576(−12.3k)". Million-token
 	// contexts are in service, and bubbles truncates a cell at the column width, so
 	// 15 rendered "1,048,576(−1…" — dropping the saving, which is the half of this
 	// cell that appears nowhere else.
 	{id: colTokens, width: 17, defaultOn: true, keep: keepLow,
 		desc: "tokens used, and what tool-prune saved",
-		cell: func(c cellContext) string { return c.m.tokensCell(c.rows, c.partner, c.i, c.row.event) }},
+		cell: func(c cellContext) string {
+			return padLeft(c.m.tokensCell(c.rows, c.partner, c.i, c.row.event), c.width)
+		}},
 	// 19 fits the widest cell the formatter can produce: "<$0.0001(−<$0.0001)",
 	// where both halves fell under the four-decimal floor. The ordinary shape is
 	// "$0.2546(−$0.0037)" at 17.
