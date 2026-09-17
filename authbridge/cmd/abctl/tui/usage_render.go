@@ -356,6 +356,10 @@ func renderCostSummary(snap *usage.Snapshot) string {
 	micros := snap.Totals.CostMicros
 	var cell string
 	switch {
+	case micros < 0:
+		// Go's / and % truncate toward zero, so a negative would render
+		// "$0.-1" through the integer-cents branch below.
+		cell = "COST unavailable"
 	case micros > 0 && micros < 5_000:
 		cell = "COST <$0.01"
 	default:

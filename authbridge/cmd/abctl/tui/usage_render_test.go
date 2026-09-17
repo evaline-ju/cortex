@@ -338,6 +338,16 @@ func TestRenderCostSummary(t *testing.T) {
 			},
 			want: "COST $1.01",
 		},
+		{
+			// Go's / and % truncate toward zero, so integer-cent rendering
+			// on a negative would print "$0.-1".
+			name: "negative micros renders unavailable rather than malformed",
+			snap: usage.Snapshot{
+				Totals: usage.Counts{Requests: 1, PriceableRequests: 1, PricedRequests: 1, CostMicros: -10_000},
+				Priced: true,
+			},
+			want: "COST unavailable",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
