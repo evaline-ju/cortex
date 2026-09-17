@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,7 +173,7 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.server.Shutdown(
 const indexBody = `Cortex / AuthBridge Session API
 
   GET /v1/sessions        list active sessions
-  GET /v1/sessions/{id}   one session's events
+  GET /v1/sessions/{id}   recent events (?limit=N, max 2000)
   GET /v1/events          SSE stream of new events (?session=<id> to filter)
   GET /v1/pipeline        active plugin pipeline
   GET /v1/plugins         catalog of registered plugins
@@ -307,15 +308,53 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
+// Snapshot response bounds.
+//
+// The store keeps every event a session produces (session.max_events is unset by
+// default), so "the whole session" is not a bounded quantity: one real session reached
+// 5078 events, 1.1GB of JSON, 17s to write on loopback — against a client with a 10s
+// timeout, which is 17s of encoding for a response nobody received and an empty
+// timeline for the operator.
+//
+// So the response is a tail, and ?limit says how long a one. The default matches the
+// max_events cap this store used to carry, so any session that was servable before is
+// servable unchanged; the maximum is what stops an unauthenticated endpoint from being
+// asked for a gigabyte. Over-large limits clamp rather than 400, because a curl user
+// asking for more than we will give should get the most we will give.
+const (
+	defaultEventLimit = 500
+	maxEventLimit     = 2000
+)
+
+// eventLimit reads ?limit, clamped to [1, maxEventLimit]. Anything unparseable falls
+// back to the default rather than erroring: this endpoint is a debugging surface, and
+// refusing to answer "limit=abc" helps nobody who typed it.
+func eventLimit(r *http.Request) int {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return defaultEventLimit
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultEventLimit
+	}
+	if n > maxEventLimit {
+		return maxEventLimit
+	}
+	return n
+}
+
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	view := s.store.View(id)
+	view := s.store.ViewTail(id, eventLimit(r))
 	if view == nil {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(view); err != nil {
+	// Streamed per event rather than Encoded whole: see writeSessionView for the heap
+	// this one response used to cost.
+	if err := writeSessionView(w, view); err != nil {
 		slog.Debug("sessionapi: get encode failed", "error", err, "sessionID", id)
 	}
 }

@@ -36,6 +36,9 @@ import (
 // message — the proxy gives up rather than buffering it.
 var ErrFrameTooLarge = errors.New("sseframe: frame exceeds per-frame size cap")
 
+// utf8BOM is U+FEFF encoded in UTF-8, which is how it arrives on the wire.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
 // Reader scans an io.Reader for complete SSE events and returns the
 // concatenated data lines of each. Construct with NewReader; call
 // ReadFrame repeatedly until io.EOF.
@@ -46,6 +49,10 @@ type Reader struct {
 	// Reused across ReadFrame calls to avoid per-frame allocation in
 	// the common steady-state case.
 	scratch []byte
+	// bomChecked records that the one-time byte-order-mark check has run. The BOM is a
+	// property of the STREAM's first bytes, not of each frame, so this must not be reset
+	// between frames — see ReadFrame.
+	bomChecked bool
 	// lastEvent holds the "event:" field value of the frame most
 	// recently returned by ReadFrame (empty if the frame named no
 	// event type). Reused across calls; valid until the next ReadFrame.
@@ -96,6 +103,38 @@ func (r *Reader) ReadFrame() ([]byte, error) {
 	r.scratch = r.scratch[:0]
 	r.lastEvent = r.lastEvent[:0]
 	hasData := false
+
+	// ONE LEADING BYTE-ORDER MARK IS REMOVED, and the spec requires it: "If the stream begins
+	// with a U+FEFF BYTE ORDER MARK character, then remove it."
+	//
+	// WHAT IT COSTS DEPENDS ON THE SHAPE, and on the shape gateways actually send it costs the first
+	// frame its TYPE. Without this, the first LINE reads as a field whose name begins with those
+	// three bytes, matching neither "data" nor "event", and is skipped:
+	//
+	//	event:-first (Anthropic, LiteLLM)  the "event:" line is skipped, so the frame and its
+	//	                                   payload survive and LastEvent comes back empty
+	//	data:-only                         the "data:" line is skipped, so the whole FIRST EVENT
+	//	                                   goes with it
+	//
+	// The first row is the one that matters, because it is what this repo's traffic and every other
+	// SSE fixture in it look like. An empty LastEvent is not cosmetic: a re-framing proxy
+	// reproduces the upstream "event:" line from it, and clients like the Anthropic SDK type each
+	// event from that field rather than from the payload, so event #1 arrives untyped.
+	//
+	// HERE RATHER THAN IN THE PARSERS, because this reader is what every PER-FRAME path uses —
+	// ext_proc's buffered re-parse and both proxies' streaming paths. inferenceparser's
+	// normalizeSSE strips a BOM too, but only for the two whole-body parsers that never touch
+	// this reader, so a fix there covers none of the streaming traffic.
+	//
+	// ONCE, at the stream's start, which is why the flag is on the Reader and not a local: a BOM
+	// arriving mid-stream is an upstream error this does not paper over, and scanning for one
+	// would corrupt any payload legitimately containing those bytes.
+	if !r.bomChecked {
+		r.bomChecked = true
+		if first, err := r.br.Peek(len(utf8BOM)); err == nil && bytes.Equal(first, utf8BOM) {
+			_, _ = r.br.Discard(len(utf8BOM))
+		}
+	}
 
 	for {
 		line, err := r.readLine()

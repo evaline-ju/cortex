@@ -145,15 +145,23 @@ func relTime(now, t time.Time) string {
 	}
 }
 
-// sessionTokens reports the total tokens for a session. Prefers the
-// server-computed count from SessionSummary (authoritative, covers the
+// sessionTokens reports the total tokens for a session, compactly: 137,156,234 renders
+// as "137.2M".
+//
+// Grouped digits overflowed the 10-column cell at 100M and were truncated to
+// "137,156,2…", which is worse than a rounded figure in every way — it is longer, less
+// readable, and its last digits are the ones that got cut. A session total is a
+// magnitude, not something anyone reconciles: the exact per-event counts are in the
+// events pane, and the exact total is one curl away on /v1/sessions.
+//
+// Prefers the server-computed count from SessionSummary (authoritative, covers the
 // full event backlog even before we've streamed anything for this
 // session). Falls back to a client-side sum over the cached events when
 // the server returned zero (older authbridge server without token
 // aggregation). Returns "—" when neither source has data.
 func sessionTokens(serverTotal int, cached []pipeline.SessionEvent) string {
 	if serverTotal > 0 {
-		return formatCount(serverTotal)
+		return formatCompact(float64(serverTotal))
 	}
 	var total int
 	for i := range cached {
@@ -168,7 +176,7 @@ func sessionTokens(serverTotal int, cached []pipeline.SessionEvent) string {
 	if total == 0 {
 		return "—"
 	}
-	return formatCount(total)
+	return formatCompact(float64(total))
 }
 
 // selectedSessionID returns the cursor row's session ID, or "".

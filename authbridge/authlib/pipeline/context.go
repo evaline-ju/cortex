@@ -130,6 +130,24 @@ type Context struct {
 	// requestid.go for why it is lazy rather than a constructor argument.
 	requestID string
 
+	// client and clientParsed memoize ClientInfo's answer.
+	//
+	// A separate flag rather than a nil check on client, because nil IS a valid
+	// answer — a request with no User-Agent — and a nil-guard memo would re-parse
+	// on every call for precisely those requests. Each turn calls this at least
+	// twice, once per session event, on the request path.
+	//
+	// Unexported so this stays ONE resolution with one owner. A plugin that could
+	// write it could re-file another program's spend under a name of its choosing,
+	// and a listener that could write it would be a second source of a truth the
+	// context already holds in Headers.
+	//
+	// WHEN the memo is filled is part of the guarantee rather than an implementation
+	// detail: see ResolveClient, which listeners call at construction so the answer
+	// predates every plugin.
+	client       *EventClient
+	clientParsed bool
+
 	Agent    *AgentIdentity
 	Identity Identity // nil before an auth plugin runs
 
@@ -199,6 +217,12 @@ type Context struct {
 
 	Extensions Extensions
 
+	// responseDelivered says the response has already reached the client, so a refusal
+	// recorded after it cannot be in effect; rejectedAfterDelivery remembers that the
+	// rejection on record is one of those. See MarkResponseDelivered.
+	responseDelivered     bool
+	rejectedAfterDelivery bool
+
 	// currentPlugin, currentPhase, and currentPolicy are framework-owned
 	// fields set by Pipeline.Run / RunResponse around each plugin
 	// dispatch. They feed the Record / Allow / Skip / Observe / Modify /
@@ -266,6 +290,116 @@ type Context struct {
 	// double-releasing every Finisher's state.
 	finished bool
 }
+
+// ClientInfo returns the calling coding agent, parsed from this request's
+// User-Agent and memoized.
+//
+// CLIENT-ASSERTED AND TRIVIALLY SPOOFABLE — an observability and cost-attribution
+// key, never an authorization subject. See EventClient, and note that this is NOT
+// Identity: that field is the authenticated principal, this one is a self-reported
+// software label.
+//
+// Nil means no User-Agent was sent. Callers do not nil-check: EventClient.Label()
+// is nil-safe and answers "unknown".
+//
+// Resolved HERE — once, on the context — rather than assigned by each listener or
+// re-derived by each consumer. That follows the same doctrine Session states: the
+// value is resolved in one place and never re-derived downstream, because two
+// derivations of one fact are how the two drift apart. Session needs a listener to
+// assign it since it comes from a store lookup; this one does not, because Context
+// already carries the request headers, so an assignment would be a second source
+// of a truth already present. It is also stronger than an assignment for the
+// failure that actually happens: a listener-populated field can be forgotten at
+// one of several context-construction sites and serialize a clean empty value,
+// whereas an accessor over Headers cannot be.
+//
+// "Once" is a claim about WHICH ANSWER, and on its own it is weaker than it sounds:
+// the memo fills on the FIRST CALL, and the first call is at an event-construction
+// site downstream of the pipeline. Headers is mutable and plugins write to it, so a
+// plugin that rewrote User-Agent would change what an event is attributed to, and
+// which recording site asked first would decide the answer. What makes "once" an
+// ordering guarantee too is ResolveClient, which the listeners call at construction:
+// see there for the guarantee in full, and for what holds on a Context that skips it.
+//
+// NOT goroutine-safe, and that is correct: a Context belongs to one request and
+// the pipeline runs its phases sequentially. Said explicitly because the
+// surrounding type does have fields other goroutines read.
+//
+// THE PIN IS WHAT MAKES THAT SAFE FOR RECORDING SITES, WHICH ARE NOT PIPELINE PHASES. The
+// first call writes clientParsed and client, unsynchronised, and the callers are recorders —
+// a response-path recorder, and on ext_proc a streaming-response append — so two of them
+// reaching a FIRST ClientInfo() on one Context is a data race, not merely a wrong label.
+// ResolveClient having already filled the memo is what rules that out: after it, every call
+// here is a pure read.
+//
+// A nil Headers map is fine and answers nil. A nil RECEIVER panics, unlike
+// PeerCertificate above, and that difference is deliberate rather than an
+// oversight: this mutates the memo, so it cannot be a no-op on nil, and every
+// caller is an event-construction site that already dereferences pctx for Host and
+// Method on adjacent lines. A guard here would convert a programming error into a
+// silently unattributed event instead of a stack trace.
+//
+// A COPY IS RETURNED, NOT THE MEMO. Every caller is an event-construction site that stores
+// the result on a SessionEvent, so handing out the memoized pointer would make ten events
+// share one mutable struct, and a single write through it would relabel events already
+// appended to the store and already being served by the session API. See snapshotClient: the
+// same rule every other extension on that event follows. The memo is what stops the header
+// being parsed ten times; it does not escape.
+//
+// THE COPY IS AN ALLOCATION PER CALL, roughly ten per request, and that is the price of the
+// line above. sanitizeUA's fast path is written not to allocate, which bounds what a hostile
+// header costs; this one is unconditional and buys the integrity claim instead.
+func (c *Context) ClientInfo() *EventClient {
+	if c.clientParsed {
+		return snapshotClient(c.client)
+	}
+	c.clientParsed = true
+	if c.Headers != nil {
+		c.client = ParseUserAgent(c.Headers.Get("User-Agent"))
+	}
+	return snapshotClient(c.client)
+}
+
+// ResolveClient pins ClientInfo's answer to the User-Agent AS THE CLIENT SENT IT.
+//
+// Listeners call it immediately after building a Context from the request, and that call
+// is the whole of the ordering guarantee: the label is resolved before the pipeline runs,
+// so no plugin can change what an event is attributed to, and no recording site can get a
+// different answer by asking first or last. Attribution keys cost — see EventClient — and
+// "which program spent this" must not depend on call order.
+//
+// A named call rather than a bare `_ = pctx.ClientInfo()` at each site, so the line reads
+// as the invariant it is and a later reader cannot mistake it for a leftover. Deleting it
+// is a behaviour change, and the tests in forwardproxy's client_test.go say so.
+//
+// It does NOT replace the memo, and the memo is deliberately still lazy. An accessor over
+// Headers answers correctly at a construction site that forgets this call — one answer,
+// for the life of the context, from the headers as they stood when something first asked —
+// where a listener-assigned field would have serialized a clean empty value instead.
+//
+// What a forgotten call costs is TWO things, not one. The ordering half: on such a Context the
+// answer is pre-plugin by coincidence rather than by construction. And the concurrency half:
+// this call is a pure read only AFTER the memo is filled, so without the pin whichever
+// recording site asks first performs the write instead — see ClientInfo.
+//
+// Call it AFTER Headers is populated. Called before, it pins nil and the request's own
+// User-Agent is lost — which is why this is a listener's call to make at construction and
+// not something a constructor could do earlier.
+//
+// WHICH LISTENERS CALL IT, stated precisely because this is the authoritative answer to what
+// "unknown" means on a given listener. In THIS change: the forward proxy, at three
+// construction sites — serveOutbound, handleConnect and HandleTransparentConn. Arriving with
+// the cost work later in this series: ext_proc, at its four, and the reverse proxy, at its
+// one. extauthz builds no session events, so it has nothing to attribute.
+//
+// Until the second half lands, an inbound event records no client and Label() answers
+// "unknown" for it — while that string is documented as "this request carried no
+// User-Agent". For those events nil means "this listener is not wired yet", which an
+// operator reading a per-agent breakdown cannot tell from absence. Read "unknown" on
+// inbound traffic as unattributed rather than as absent until then.
+//
+// Idempotent: the second call is the memo's own no-op.
+func (c *Context) ResolveClient() { _ = c.ClientInfo() }
 
 // PeerCertificate returns the verified peer leaf certificate from
 // the TLS connection state, or nil when the connection was plaintext
@@ -350,8 +484,31 @@ func (c *Context) CurrentPhase() InvocationPhase { return c.currentPhase }
 func (c *Context) setRejectingPlugin(name string) {
 	if c.rejectingPlugin == "" {
 		c.rejectingPlugin = name
+		// Remember that this refusal arrived too late to take effect, so the outcome can say
+		// what happened rather than what a plugin wanted. See MarkResponseDelivered.
+		c.rejectedAfterDelivery = c.responseDelivered
 	}
 }
+
+// MarkResponseDelivered records that the response has already gone downstream, so any refusal
+// from here on cannot take effect.
+//
+// A LISTENER'S STATEMENT OF FACT, and only a listener can make it: the pipeline has no idea
+// whether bytes reached a client. ext_proc calls it before its teardown flush — Envoy has
+// finished with the stream by then — and the proxies' finalization paths are the same shape.
+//
+// WHAT IT CHANGES IS THE OUTCOME, NOT THE RECORD. Invocations appended afterwards are still
+// recorded, and still say deny; they are marked Late so a reader can tell "a plugin refused
+// this" from "this request was refused". What stops being true is the outcome:
+// OutcomeFromContext no longer reports OutcomeDeny on the strength of a refusal that arrived
+// after the response, because a request answered with a 200 was not denied — and every Finisher,
+// every audit row and every dashboard that reads the outcome would otherwise say it was.
+//
+// Idempotent, and one-way: a response cannot become undelivered.
+func (c *Context) MarkResponseDelivered() { c.responseDelivered = true }
+
+// ResponseDelivered reports whether the response has already gone downstream.
+func (c *Context) ResponseDelivered() bool { return c.responseDelivered }
 
 // Record appends an Invocation to pctx under the current pipeline
 // direction and framework-stamped plugin + phase. The author supplies
@@ -382,6 +539,13 @@ func (c *Context) Record(inv Invocation) {
 	}
 	if inv.Path == "" {
 		inv.Path = c.Path
+	}
+	// Stamped by the framework, like Shadow, and for the same reason: plugin code is identical
+	// before and after delivery, so the plugin cannot know. Recorded rather than dropped —
+	// "a plugin refused this after it shipped" is a real fact about a rollout — and read by
+	// OutcomeFromContext, which must not turn it into a denial.
+	if c.responseDelivered {
+		inv.Late = true
 	}
 	c.appendInvocation(inv)
 }

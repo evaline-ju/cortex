@@ -55,7 +55,8 @@ endif
 
 abctl: ## Build abctl to ./bin/abctl
 	@mkdir -p $(BIN_DIR)
-	cd authbridge/cmd/abctl && GOWORK=off go build -o $(BIN_DIR)/abctl .
+	@echo "→ building abctl"
+	@cd authbridge/cmd/abctl && GOWORK=off go build -o $(BIN_DIR)/abctl .
 
 authbridge-proxy: ## Build authbridge-proxy to ./bin/authbridge-proxy (PROFILE=full|lite|local, default full)
 	@mkdir -p $(BIN_DIR)
@@ -66,7 +67,11 @@ authbridge-proxy: ## Build authbridge-proxy to ./bin/authbridge-proxy (PROFILE=f
 	fi
 	@# GOWORK=off matches CI and the Dockerfile — workspace mode can select a
 	@# higher third-party version than this binary's own go.mod requires.
-	TAGS=$$(go -C authbridge/scripts/profile-tags run . $(or $(PROFILE),full)) && \
+	@# The resolved tags, not just the profile name: "why is plugin X missing from my
+	@# binary" is answered by the tag list, and quieting the command removed the only
+	@# place it appeared.
+	@TAGS=$$(go -C authbridge/scripts/profile-tags run . $(or $(PROFILE),full)) && \
+		echo "→ building authbridge-proxy (profile $(or $(PROFILE),full)): $$TAGS" && \
 		cd authbridge/cmd/authbridge-proxy && \
 		GOWORK=off go build -tags "$$TAGS" -o $(BIN_DIR)/authbridge-proxy .
 
@@ -91,32 +96,35 @@ dev-install: authbridge-proxy abctl ## Build from this tree, install to ~/.local
 		mv -f $(DEV_BIN_DIR)/$$b.new $(DEV_BIN_DIR)/$$b || \
 		{ rm -f $(DEV_BIN_DIR)/$$b.new; exit 1; }; \
 	done
-	@echo "installed -> $(DEV_BIN_DIR)"
+	@echo "→ installed to $(DEV_BIN_DIR)"
 	@# Everything below runs by absolute path, so a missing PATH entry does not fail
 	@# this target — it fails the NEXT thing the developer types. install.sh checks the
 	@# same thing and offers to fix the shell profile; a build target should not edit
 	@# dotfiles, so it says so and stops there.
 	@case ":$$PATH:" in \
 		*":$(DEV_BIN_DIR):"*) ;; \
-		*) echo "note: $(DEV_BIN_DIR) is not on PATH; \`abctl\` will not resolve until you add it";; \
+		*) echo >&2; echo "!  $(DEV_BIN_DIR) is not on PATH — \`abctl\` will not resolve until you add it" >&2; echo >&2;; \
 	esac
 	@# A machine that has never run Cortex has no config, and `service install` refuses
 	@# without one. Minting it here is what makes this work on a clean checkout rather
 	@# than only as an upgrade.
 	@if [ ! -f "$(HOME)/.cortex/config.yaml" ]; then \
-		echo "no config at ~/.cortex/config.yaml; writing the built-in one"; \
+		echo "→ no config at ~/.cortex/config.yaml; writing the built-in one"; \
 		$(DEV_BIN_DIR)/authbridge-proxy --local --write-config || exit 1; \
 	fi
 	@# Absolute path, not bare `abctl`: PATH may resolve to a different copy, and the
 	@# unit records which abctl wrote it. --yes because a build command that stops to
 	@# ask is not a one-liner; --restart because install is otherwise free to re-run and
 	@# would skip the restart whenever the rebuild happened to be byte-identical.
-	$(DEV_BIN_DIR)/abctl service install --yes --restart
+	@# Quiet: make would otherwise echo an absolute path and a flag list immediately
+	@# after the previous line's output, which read as one run-together sentence.
+	@#
+	@# "installing and starting" rather than "restarting": serviceInstall is also the
+	@# first-install path, where there is nothing to restart and no captured history to
+	@# clear. Both consequences are abctl's to report — it can tell whether anything was
+	@# running, and a Makefile echo cannot — so the session-store line moved there and
+	@# this says only what is true on both paths.
+	@echo "→ installing and starting the service"
+	@$(DEV_BIN_DIR)/abctl service install --yes --restart
 	@echo
-	@# Only what abctl does not already say. It prints the attached-connection count
-	@# and what to do about it, so repeating that here would be a second voice on the
-	@# same subject — and an earlier draft of this line contradicted it outright.
-	@# The session store is the one consequence nothing else reports.
-	@echo "The restart also cleared captured session history: the store is in-memory,"
-	@echo "so any timeline you were reading in abctl starts over."
 	@$(DEV_BIN_DIR)/abctl service status

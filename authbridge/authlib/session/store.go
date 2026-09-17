@@ -25,6 +25,11 @@ type entry struct {
 	Events    []pipeline.SessionEvent
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// intern collapses the message content this session repeats on every turn. Per
+	// session, so it is freed with the session and never shares content between two
+	// conversations. See intern.go for why the table only holds one event's strings.
+	intern interner
 }
 
 // MaxSessionIDLen is the longest session ID the store keeps intact; longer ids
@@ -211,6 +216,11 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	// outbound events that have no protocol-native session field.
 	event.SessionID = sessionID
 
+	// Before the copy is taken: an LLM request re-sends the whole conversation, so most
+	// of this event's message text is already in the session. Point at what is there
+	// rather than keeping a second copy of it.
+	sess.intern.internEvent(&event)
+
 	sess.Events = append(sess.Events, event)
 	sess.UpdatedAt = now
 	s.activeID = sessionID
@@ -332,6 +342,51 @@ func (s *Store) View(sessionID string) *pipeline.SessionView {
 	events := make([]pipeline.SessionEvent, len(sess.Events))
 	copy(events, sess.Events)
 	return &pipeline.SessionView{ID: sessionID, Events: events}
+}
+
+// ViewTail returns the most recent limit events of a session, and reports how many
+// the session holds in total.
+//
+// It exists because View copies every event a session has, and with max_events unset
+// that is unbounded: one session reached 5078 events, whose JSON encoding is 1.1GB and
+// takes 17s to write on loopback. The only consumer of that response is a TUI with a
+// 10s client timeout, so the whole of it was spent producing bytes nobody received.
+//
+// limit <= 0 is treated as 1, not as "unlimited": an accidental zero from a caller
+// that forgot to set it should return a small answer, not the largest one the store
+// can produce. Callers that genuinely want everything call View.
+//
+// TotalEvents on the returned view is set only when events were left out, so a tail
+// that happens to cover the whole session is byte-identical to what View produces.
+func (s *Store) ViewTail(sessionID string, limit int) *pipeline.SessionView {
+	if limit <= 0 {
+		limit = 1
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	if s.isExpired(sess, time.Now()) {
+		return nil
+	}
+
+	total := len(sess.Events)
+	start := total - limit
+	if start < 0 {
+		start = 0
+	}
+	tail := sess.Events[start:]
+	events := make([]pipeline.SessionEvent, len(tail))
+	copy(events, tail)
+
+	view := &pipeline.SessionView{ID: sessionID, Events: events}
+	if start > 0 {
+		view.TotalEvents = total
+	}
+	return view
 }
 
 // SessionSummary is a metadata-only view of a session, suitable for list

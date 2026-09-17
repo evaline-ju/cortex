@@ -419,6 +419,16 @@ type Invocation struct {
 	// framework, not the plugin, sets this — plugin code looks
 	// identical under enforce and observe.
 	Shadow bool `json:"shadow,omitempty"`
+
+	// Late reports that this Invocation was appended AFTER the response had already gone
+	// downstream — a teardown flush, a finalization pass — so a deny recorded here could not
+	// have taken effect whatever it says. Kept rather than dropped: a plugin that would have
+	// refused a response that already shipped is exactly what a rollout wants to see, and it
+	// is the same distinction Shadow draws for on_error: observe.
+	//
+	// Read by OutcomeFromContext, which does not let a late deny make the request a denial.
+	// The framework sets it, from Context.MarkResponseDelivered.
+	Late bool `json:"late,omitempty"`
 }
 
 // DelegationExtension tracks the token delegation chain across hops.

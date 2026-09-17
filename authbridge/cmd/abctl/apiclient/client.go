@@ -61,11 +61,33 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.SessionSummary, er
 	return body.Sessions, nil
 }
 
-// GetSession fetches /v1/sessions/{id}. Returns an error whose Unwrap chain
-// includes ErrNotFound if the server returned 404.
+// SnapshotEventLimit is how many events a snapshot asks for.
+//
+// Sent explicitly rather than relying on the server's default, so what this client is
+// willing to hold is visible here and tunable without a server change. 500 is what the
+// store capped every session at until session.max_events became unset, so it is a
+// window abctl is known to handle; the events it does not cover are counted for the
+// operator rather than silently missing.
+//
+// The reason there is a number at all: the server will encode as much as it is asked
+// for, and a session that has been running for a day is 5000 events and a gigabyte of
+// JSON — 17s to transfer, against this client's 10s timeout. The whole request failed
+// and the timeline came up empty.
+const SnapshotEventLimit = 500
+
+// GetSession fetches the most recent SnapshotEventLimit events of a session. Returns an
+// error whose Unwrap chain includes ErrNotFound if the server returned 404.
+//
+// The returned view's TotalEvents is non-zero when older events exist that this
+// response does not carry.
 func (c *Client) GetSession(ctx context.Context, id string) (*pipeline.SessionView, error) {
+	return c.GetSessionTail(ctx, id, SnapshotEventLimit)
+}
+
+// GetSessionTail fetches the most recent limit events of a session.
+func (c *Client) GetSessionTail(ctx context.Context, id string, limit int) (*pipeline.SessionView, error) {
 	var view pipeline.SessionView
-	path := "/v1/sessions/" + url.PathEscape(id)
+	path := fmt.Sprintf("/v1/sessions/%s?limit=%d", url.PathEscape(id), limit)
 	if err := c.getJSON(ctx, path, &view); err != nil {
 		return nil, err
 	}

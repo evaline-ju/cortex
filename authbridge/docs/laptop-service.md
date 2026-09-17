@@ -37,10 +37,20 @@ changed it changes nothing: it does not re-download binaries already at that ver
 `service install` reports `Already current` and leaves the running proxy alone rather
 than restarting it.
 
-That last part matters — a restart cuts every attached Claude Code session, because
-`HTTPS_PROXY` is fixed in each session's environment at startup and cannot fall back to a
-direct connection. When a restart genuinely is needed, install says how many connections
-it is about to cut.
+That last part matters, though less than it used to read here. A restart cuts every
+connection attached to the proxy, and `HTTPS_PROXY` is fixed in each client's environment
+at startup so it cannot fall back to a direct connection — but it does reconnect through
+the proxy on its next request. Measured across three restarts, time from bind to first
+request served: **0.92s, 0.81s, 0.59s**, with the attached Claude Code sessions carrying
+on through all three.
+
+These three numbers are the only copy: `cmd_service.go` and its tests point here rather
+than repeating them, so a re-measurement changes one place and not four.
+
+So what a restart costs is the requests in flight at that moment, not the sessions. A
+session that reports an error has lost one request and will recover; it does not need
+restarting. When a restart genuinely is needed, install says how many connections it is
+about to cut.
 
 To restart deliberately: `abctl service restart`.
 
@@ -92,7 +102,20 @@ One limit by default, and it is not a clock:
   the machine.
 - With `max_events` unset, `max_sessions` bounds how many sessions are kept and nothing
   about how large one gets. A single session that never ends grows until the process does;
-  that is the case to set `max_events` (or a `session.ttl`) for.
+  that is the case to set `max_events` (or a `session.ttl`) for. Repeated message text is
+  stored once per session rather than once per turn, which cut heap by 10.4x on a
+  300-turn measurement — so "5000 events" costs far less than multiplying by a request
+  size suggests, but it is not free.
+- `abctl` fetches the **most recent** 500 events of a session, not all of them, and says
+  so in the events footer (`· N older not fetched`). A session's whole history can be a
+  gigabyte of JSON; asking for it took 17s and timed out at 10, which showed up as an
+  events pane holding only what arrived after you opened it.
+- Opening a session no longer costs the proxy memory. The snapshot response is written one
+  event at a time, so serving it takes heap proportional to a single event; it used to be
+  encoded whole before the first byte went out, which meant a couple hundred megabytes of
+  resident memory per session you opened, kept for the life of the process. If you are
+  looking at an older build and wondering why RSS climbs in steps as you browse rather
+  than as traffic arrives, that is why — one step per <kbd>Enter</kbd>.
 - `max_sessions` is **reachable in normal use**, which it effectively was not before.
   Every `claude` invocation mints a new bucket, so the 101st session on a busy machine
   evicts the least-recently-updated one — whole session and all. If an older session has
@@ -171,10 +194,11 @@ A stop persists: Cortex stays down across logouts and reboots until you start it
 again. That is deliberate — a stop that quietly undoes itself at your next login is
 worse than none.
 
-`stop` also reports how many connections it cut, because a Claude Code session that is
-already running cannot recover on its own: `HTTPS_PROXY` is fixed in its environment
-when it starts, so it has no way to fall back to a direct connection. Restart any
-session that begins failing to connect.
+`stop` also reports how many connections it cut, because until Cortex is back those
+clients have nowhere to go: `HTTPS_PROXY` is fixed in each one's environment when it
+starts, so none of them can fall back to a direct connection. Run `abctl service start`
+and they reconnect on their next request — the sessions themselves do not need
+restarting.
 
 ## Three ways to turn it off
 
@@ -189,11 +213,12 @@ abctl service stop
 Claude Code fails while Cortex is stopped, because its settings still point at the
 proxy. Either start Cortex again or unwire Claude Code (below).
 
-**A Claude Code session that is already running cannot recover on its own.**
-`HTTPS_PROXY` is fixed in its environment when it starts, so it has no way to fall
-back to a direct connection, and `claude-code disable` cannot reach it. Restart any
-session that starts failing to connect. `service stop` tells you how many
-connections it cut, for exactly this reason.
+**A running session cannot route around a stopped Cortex.** `HTTPS_PROXY` is fixed in
+its environment when it starts, so it has no way to fall back to a direct connection,
+and `abctl configure claude-code disable` cannot reach it — that only affects
+sessions started afterwards. What it needs is Cortex back: `abctl service start`,
+after which it reconnects on its next request without being restarted. `service
+stop` tells you how many connections it cut, for exactly this reason.
 
 Use `abctl service stop`, not `kill` or `pkill` — the supervisor restarts the
 process within seconds, which looks like it refusing to die.
@@ -201,7 +226,7 @@ process within seconds, which looks like it refusing to die.
 ### Unwire Claude Code
 
 ```sh
-abctl claude-code disable
+abctl configure claude-code disable
 ```
 
 This removes only the keys Cortex added to `~/.claude/settings.json`
@@ -312,29 +337,29 @@ security delete-certificate -c authbridge-tls-bridge-ca \
 `git`, `curl` and Python are **not** affected on macOS — they read their bundles
 through OpenSSL/LibreSSL, which honours the variables on every platform. And on
 Linux `SSL_CERT_FILE` works normally, so nothing extra is needed there.
-`abctl claude-code enable` prints this note when it runs on macOS.
+`abctl configure claude-code enable` prints this note when it runs on macOS.
 
-Cortex keeps running; nothing sends traffic to it. `abctl claude-code enable` puts it
-back.
+Cortex keeps running; nothing sends traffic to it. `abctl configure claude-code
+enable` puts it back.
 
 ### Remove it
 
 ```sh
-abctl claude-code disable     # 1. unwire Claude Code
-abctl service uninstall       # 2. stop it and remove the service
-rm -rf ~/.cortex              # 3. config, CA, logs, abctl's UI settings
+abctl configure claude-code disable   # 1. unwire Claude Code
+abctl service uninstall               # 2. stop it and remove the service
+rm -rf ~/.cortex                      # 3. config, CA, logs, abctl's UI settings
 rm -f ~/.local/bin/abctl ~/.local/bin/authbridge-proxy
 ```
 
-Order matters for the first two: `claude-code disable` needs to read the config that
-step 3 deletes.
+Order matters for the first two: `abctl configure claude-code disable` needs to
+read the config that step 3 deletes.
 
 #### Check nothing is left
 
 ```sh
-abctl claude-code status                    # should say "not enabled"
-pgrep -fl authbridge-prox                   # should print nothing
-ls ~/.cortex 2>/dev/null                    # should print nothing
+abctl configure claude-code status   # should say "not enabled"
+pgrep -fl authbridge-prox            # should print nothing
+ls ~/.cortex 2>/dev/null             # should print nothing
 ```
 
 The CA that step 3 removes was only ever trusted through the CA variables in
@@ -409,6 +434,6 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 its tool's trust store rather than adding to it. Leave them behind with the file
 deleted and git, curl and Python fail **every** TLS call — including calls that have
 nothing to do with Cortex — with `error setting certificate verify locations`, on a
-machine you believe you have just cleaned. `abctl claude-code disable` removes all
+machine you believe you have just cleaned. `abctl configure claude-code disable` removes all
 seven in the right order, which is why it is step 1 above; this list is only for when
 that binary is already gone.

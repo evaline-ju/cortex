@@ -115,8 +115,13 @@ type refreshTickMsg time.Time
 type sessionsLoadedMsg []session.SessionSummary
 type pipelineLoadedMsg *apiclient.PipelineView
 type snapshotLoadedMsg struct {
-	id     string
-	events []pipeline.SessionEvent
+	// olderNotFetched is how many events precede the ones in this response, from the
+	// server's own count of the session. Non-zero means the timeline starts where the
+	// window starts, not where the session does — a distinction the operator cannot
+	// otherwise make, and the one that made a 5000-event session look like a 3-row one.
+	olderNotFetched int
+	id              string
+	events          []pipeline.SessionEvent
 }
 type streamMsg apiclient.StreamEvent
 type streamClosedMsg struct{}
@@ -241,8 +246,19 @@ type model struct {
 	eventColsDropped int
 	// colPicker is open while `c` owns the keyboard; colCursor is the highlighted
 	// column within it.
-	colPicker    bool
-	colCursor    int
+	colPicker bool
+	colCursor int
+	// sortCol is the column the events table is ordered by, and sortDesc its
+	// direction (#865). The empty id means CHRONOLOGICAL — arrival order — which is
+	// both the default and what rebuildEventsTable uses internally regardless: the
+	// request/response pairing walks the chronological slice, and only the finished
+	// rows are reordered. See sortEventRows.
+	//
+	// Descending is what a freshly chosen column gets, because the question the
+	// issue asks is "which events took longest / cost most" and that answer belongs
+	// at the top.
+	sortCol      eventColumnID
+	sortDesc     bool
 	selectedSess string
 	// filter is the ACTIVE filter, which is not the same as the saved one:
 	// backToPodsPane clears this on teardown so a filter cannot survive a pod
@@ -266,8 +282,20 @@ type model struct {
 	// doesn't read as data loss.
 	hideInactive   bool
 	hiddenInactive int
-	flash          string
-	flashUntil     time.Time
+
+	// olderNotFetched is how many events a session holds that its snapshot did not
+	// carry, reported by the server, keyed by session id.
+	//
+	// Keyed rather than a single number, because snapshots land asynchronously and for
+	// whichever session was selected when the fetch started. A single field let a late
+	// snapshot for an abandoned session describe the one on screen, and showed the
+	// previous session's count in the window between selecting a session and its
+	// snapshot arriving. Beside hiddenInactive in spirit — both answer "is this the
+	// whole timeline?" — but that one is a filter the operator chose and this is a
+	// bound they did not.
+	olderNotFetched map[string]int
+	flash           string
+	flashUntil      time.Time
 	// flashSticky keeps the current flash up until the next keypress instead of
 	// expiring on flashUntil. Set only by setStickyFlash (yank), so every other
 	// flash producer keeps its timed behaviour.
@@ -397,6 +425,10 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 	// it for good.
 	ti.SetValue(Settings.Filter)
 
+	// Resolved once: sortSelection walks eventColumns to validate the persisted name,
+	// and the two fields are two halves of one answer.
+	sortCol, sortDesc := Settings.sortSelection()
+
 	return &model{
 		endpoint:     c.Endpoint(),
 		client:       c,
@@ -405,6 +437,8 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 		events:       make(map[string][]pipeline.SessionEvent),
 		pane:         paneSessions,
 		eventColumns: Settings.columnSelection(),
+		sortCol:      sortCol,
+		sortDesc:     sortDesc,
 		filter:       Settings.Filter,
 		sessionsTbl:  newSessionsTable(),
 		eventsTbl:    newEventsTable(),
@@ -456,6 +490,10 @@ func (m *model) backToPodsPane() {
 	m.streamCh = nil
 	m.sessions = nil
 	m.events = make(map[string][]pipeline.SessionEvent)
+	// In lockstep with m.events. A count describing a session whose events are gone is
+	// the bug that made this map per-session in the first place, just with a narrower
+	// window: re-entering the events pane on a matching id before its snapshot lands.
+	m.olderNotFetched = nil
 	// A different pod is a different aggregator: keep the view options the
 	// operator chose, drop the data they described.
 	m.usage.snap = nil
@@ -629,7 +667,11 @@ func (m *model) snapshotCmd(id string) tea.Cmd {
 		if err != nil {
 			return errMsg{where: "snapshot " + id, err: err}
 		}
-		return snapshotLoadedMsg{id: id, events: view.Events}
+		older := 0
+		if view.TotalEvents > len(view.Events) {
+			older = view.TotalEvents - len(view.Events)
+		}
+		return snapshotLoadedMsg{id: id, events: view.Events, olderNotFetched: older}
 	}
 }
 
@@ -781,6 +823,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//
 		// Only update if we're still focused on this session.
 		m.events[msg.id] = msg.events
+		if m.olderNotFetched == nil {
+			m.olderNotFetched = map[string]int{}
+		}
+		m.olderNotFetched[msg.id] = msg.olderNotFetched
 		if m.pane == paneEvents && m.selectedSess == msg.id {
 			m.rebuildEventsTable()
 		}
@@ -1183,7 +1229,8 @@ func (m *model) View() string {
 	// the popup drawn over a pane it does not belong to.
 	if m.colPicker && m.pane == paneEvents {
 		return overlayCenter(base,
-			renderColumnPicker(m.eventColumns, m.colCursor, m.width, m.height),
+			renderColumnPicker(m.eventColumns, m.colCursor, m.width, m.height,
+				m.sortCol, m.sortDesc),
 			m.width, m.height)
 	}
 	return base

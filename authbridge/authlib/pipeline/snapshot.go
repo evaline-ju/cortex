@@ -39,6 +39,36 @@ func SnapshotMCP(ext *MCPExtension) *MCPExtension {
 	return &c
 }
 
+// snapshotClient returns a copy of the parsed client label.
+//
+// UNEXPORTED, unlike its five siblings, and not an oversight: a listener never calls this one.
+// Its only caller is Context.ClientInfo, which snapshots on the caller's behalf, so every
+// recording site already receives a copy. Exported, it would invite
+// SnapshotClient(pctx.ClientInfo()) at some future site — a second copy of a copy, which reads
+// as belt-and-braces and is really a hint that the ownership is unclear.
+//
+// Every field on a SessionEvent is snapshotted by one of these helpers precisely so an
+// already-appended event cannot be rewritten later. Without one here, Client would be the live
+// pointer Context.ClientInfo memoizes, shared by every recording site of the request: one
+// mutation through it would relabel every event, including those already handed to the session
+// store and being read by the session API.
+//
+// THAT IS AN INTEGRITY CLAIM, not a tidiness one. This label is what attributes spend to a
+// program, and context.go states that a caller lying about itself mis-attributes "that
+// caller's own spend and nothing else". A shared mutable pointer is exactly how that stops
+// being true: a plugin could re-file spend already recorded under another agent's name. The
+// label is still self-reported and still spoofable — nothing here changes that — but it is
+// now fixed at the moment it is recorded, which is what the claim requires.
+//
+// All three fields are strings, so a shallow copy is a deep one.
+func snapshotClient(c *EventClient) *EventClient {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	return &cp
+}
+
 // SnapshotInference returns a shallow copy of ext. Scalar response
 // fields (Completion, FinishReason, *Tokens) get assigned on the live
 // extension during OnResponse; without snapshotting, the request event's

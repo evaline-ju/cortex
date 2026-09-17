@@ -6,18 +6,6 @@ Interactive terminal UI for inspecting AuthBridge's in-memory session store.
 and lets you browse active sessions, follow a session's event stream live,
 and read individual events as pretty-printed JSON.
 
-```
-┌─ abctl · http://localhost:9094 ────────────────────────────────┐
-│ ID                       UPDATED    EVENTS  ACTIVE             │
-│ ► ctx-abc-1234…          3s ago     42      ●                  │
-│   ctx-def-5678…          18m ago    15                         │
-│   default                1h ago     8                          │
-│                                                                 │
-│ ● connected   2.1 ev/s   drops: 0                              │
-│ [↑↓/jk] nav  [↵] drill  [/] filter  [?] keys  [q] quit         │
-└─────────────────────────────────────────────────────────────────┘
-```
-
 ## Install
 
 Download a prebuilt `abctl` for your platform (linux/macOS, amd64/arm64) from the
@@ -87,10 +75,44 @@ kubectl port-forward -n team1 pod/weather-agent-xxxx 9094:9094 &
 This preserves the pre-picker behavior for scripts, CI, or remote
 session APIs that aren't in your kube context.
 
+### Choosing between a cluster and a local Cortex (`--kubernetes`)
+
+With no `--endpoint`, abctl decides between the cluster picker and the Cortex
+running on this machine (read from `~/.cortex/config.yaml`, and probed first —
+a stale config from an install that is no longer running is ignored).
+
+`--kubernetes` controls that choice and **defaults to false**, so a local Cortex
+that is answering wins and the picker appears only when none is:
+
+```sh
+./abctl observe                # the local Cortex, when one is running
+./abctl observe --kubernetes   # the picker, even with a local Cortex running
+```
+
+The default favours the local one because that is the quickstart, and it should
+need no flag: install Cortex on your laptop, run `abctl observe`, watch traffic.
+`--kubernetes` is for the machine that has both — a local install AND cluster
+work — where the probe would otherwise win every time and `--endpoint` could
+only substitute for the picker by naming a namespace, a pod and a port-forward
+by hand.
+
+A machine with no local install needs no flag either: with nothing answering,
+`abctl observe` opens the picker on its own.
+
+The flag is ignored when `--endpoint` is given — an explicit address always
+wins. Resolution in full:
+
+| `--endpoint` | Local Cortex answering | `--kubernetes` | Result |
+|---|---|---|---|
+| given | — | — | that endpoint |
+| — | yes | absent (default) | the local Cortex |
+| — | yes | passed | Namespaces picker |
+| — | no | either | Namespaces picker |
+
 ## Running one command through Cortex (`abctl exec`)
 
-`abctl claude-code enable` works because Claude Code has a settings file:
-the variables can be written once and reach every session on the machine,
+`abctl configure claude-code enable` works because Claude Code has a settings
+file: the variables can be written once and reach every session on the machine,
 background agents included. Nothing else has that. `curl`, `python`,
 `node`, `gh` and your test suite read the process environment and nothing
 else, and the usual workaround — exporting `HTTPS_PROXY` in your shell —
@@ -127,9 +149,9 @@ The CA names split two ways, and the difference matters. `NODE_EXTRA_CA_CERTS`
 pointing them at `ca.crt` would leave the child trusting the bridge and nothing
 else — breaking every host the bridge does not terminate. They get `bundle.crt`
 instead, which Cortex writes beside `ca.crt` on startup (bridge CA + platform
-roots). These are the same values `abctl claude-code enable` writes into
-`settings.json`; `exec` reuses that derivation rather than repeating it, so the
-two commands cannot disagree.
+roots). These are the same values `abctl configure claude-code enable` writes
+into `settings.json`; `exec` reuses that derivation rather than repeating it, so
+the two commands cannot disagree.
 
 Both proxy variables get the **`http://`** URL, deliberately. The scheme
 in a `*_PROXY` variable says how to reach the *proxy*, not what the
@@ -145,9 +167,8 @@ reading a file instead would let the two disagree, since listener addresses are
 not hot-reloaded and a file says nothing about whether anything is listening. A
 Cortex that is down is reported as down rather than yielding an environment that
 points at nothing. The derivation from config to variables is still the one
-`claude-code enable` uses, so the two produce identical values for the same
-Cortex. Nothing is
-exported to your shell and no file is modified.
+`configure claude-code enable` uses, so the two produce identical values for the
+same Cortex. Nothing is exported to your shell and no file is modified.
 
 abctl exits with the child's status (127 if the command was not found,
 128+signum if it was killed), so it is safe in a pipeline or a Makefile.
@@ -170,14 +191,15 @@ long after abctl exits, which is what makes the `eval` form usable.
 `--print` takes no command, and no `--`: it is a complete request on its own.
 Both `abctl exec --print -- curl …` and a bare `abctl exec --print --` are usage
 errors — the first asks for two different things at once, the second promises a
-command and supplies none. The paths `--print` hands out are
-meant to be kept, and are the same ones `abctl claude-code enable` writes into
+command and supplies none. The paths `--print` hands out are meant to be kept,
+and are the same ones `abctl configure claude-code enable` writes into
 `settings.json`; running a command is the opposite, applying them to one process
 for its lifetime. Asking for both in one invocation is a contradiction about
 which you want, so abctl says so rather than picking one.
 
-`abctl claude-code enable` shares this requirement as of the same change: it too
-refuses `tls_bridge.mode: disabled` with a `ca_dir` set, a combination it used to
+`abctl configure claude-code enable` shares this requirement as of the same
+change: it too refuses `tls_bridge.mode: disabled` with a `ca_dir` set, a
+combination it used to
 accept and write into `settings.json`, where the CA bought nothing because the
 bridge terminated no TLS. `enable` also now points its four replacing variables at
 `bundle.crt` rather than the bare `ca.crt`.
@@ -199,10 +221,40 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
 - **Sessions** (default): table of active sessions in the store, most
   recently updated first. Columns: ID, updated (relative), event count,
-  active marker.
+  tokens, active marker.
+
+  ```
+  abctl · http://localhost:9094 · [Sessions] Pipeline
+
+   ID                                        UPDATED         EVENTS    TOKENS      ACTIVE
+   ctx-abc-1234…                             3s ago          42        48.2k       ●
+   ctx-def-5678…                             18m ago         15        1.2k
+   default                                   1h ago          8
+
+  ● connected   2.1 ev/s   drops: 0
+  [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [/] filter  [p] pause  [?] keys  [q] quit
+  ```
+
+  The selected row is reverse-video rather than marked with a glyph, so it is
+  the one thing these listings cannot show.
 - **Events**: per-session event table. `c` opens a column picker — a popup with
   a checkbox and a one-line description per column, since twelve abbreviated
   headers are not self-describing.
+
+  The picker is also where sorting lives: `s` orders the table by the column
+  under the cursor, descending first, so "which calls took longest" and "which
+  cost the most" are one keystroke from the column that answers them. Press it
+  again for ascending, and a third time to return to arrival order. The sorted
+  column is marked in its header (`DURATION▼`) and named in the footer
+  (`[sort: DURATION▼]`) — the footer matters on a narrow terminal, where the
+  sorted column may be one the table had to drop.
+
+  Numeric columns sort numerically, not by the text in the cell: DURATION orders
+  90ms before 1.20s, and TOKENS orders 900 before 1,048,576. Blank cells — a
+  request whose response has not landed, or a figure the proxy could not model —
+  sort to the bottom of a descending view rather than crowding the end you sorted
+  toward. Sorting never changes the `#` exchange pairing or the per-row token and
+  cost figures; it reorders the finished rows only.
 
   All twelve together need ~168 terminal columns, so the table drops what does
   not fit and the footer says how many (`→ N more columns`). Columns carry a
@@ -219,6 +271,31 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   Live-updates while in view — if the cursor is on the last row, it
   auto-follows new events.
+
+  All twelve columns, on a terminal wide enough for them. Each `#` appears
+  twice — once for the request, once for its response — which is how a row
+  with no STATUS is read as "still in flight" rather than "failed":
+
+  ```
+  abctl · ctx-abc-1234…
+
+   #     TIME          DIR   PHASE    ACTION    PLUGIN              METHOD              STATUS   DURATION    TOKENS             COST                 HOST
+   1     14:23:07.41   in    req      allow     jwt-validation                                                                                       weather-agent
+   1     14:23:07.52   in    resp     —         —                                       200      118ms                                               weather-agent
+   2     14:23:07.71   out   req      observe   inference-parser    claude-sonnet-5                                            681,300(−9.9k)   $0.2546(−$0.0037)   api.anthropic.com
+   2     14:23:08.91   out   resp     —         —                   claude-sonnet-5     200      1.20s       412                                     api.anthropic.com
+   3     14:23:09.01   out   req      modify    token-exchange      tools/call                                                                       github-tool-mcp
+   3     14:23:09.10   out   resp     —         —                   tools/call          503      96ms                                                github-tool-mcp
+
+  ● connected   2.1 ev/s   drops: 0   [sort: DURATION▼]   [filter: anthropic]
+  [↑↓] nav  [b/f] page  [↵] detail  [c] columns  [u] usage  [s] hide passthru/skip  [p] pause  [/] filter  [esc] back  ·  → 4 more columns ([c] to choose)  [?] keys  [q] quit
+  ```
+
+  `—` in ACTION and PLUGIN means no plugin acted on that message; a `tunnel`
+  there is an opaque CONNECT, where METHOD and STATUS are blank too because
+  opaque bytes carry no request line. The TOKENS and COST figures on a request
+  row carry what `tool-prune` saved in parentheses — `−` for a counted saving,
+  `~` for a projected one.
 - **Detail**: pretty-printed JSON of a single event. Scroll with arrow
   keys; `y` yanks to `~/.cortex/abctl-events/<timestamp>-<rand>.json` and
   shows the path in the footer until you press another key. The directory is
@@ -261,11 +338,99 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   series past the palette fold into `(other)` — every band drawn has a
   legend entry.
 
+  ```
+  abctl · http://localhost:9094 · usage · all
+
+    USAGE — all sessions — 10m0s @ 1m0s — tokens — by model
+
+     12k                            ▄▄▄▄
+                              ████  ssss
+    9.6k        ▃▃▃▃          ssss  ssss
+                ssss    ▅▅▅▅  ssss  ssss
+    7.2k  ▂▂▂▂  ssss    ssss  ssss  ssss
+          ssss  ssss    hhhh  hhhh  ssss
+    4.8k  ssss  ssss    hhhh  hhhh  hhhh
+          hhhh  hhhh    hhhh  hhhh  hhhh
+    2.4k  hhhh  hhhh    ····  ····  hhhh
+          ····  ····    ····  ····  ····
+       0 ┼────┴────┴────┴────┴────┴────
+         14:23   :25   :27   :29   :31
+        6.1k  8.8k     0  11k   9.9k  12k
+
+    s claude-sonnet-5 (34.2k)   h claude-haiku-4-5 (9.4k)   · (unlabelled) (2.1k)
+
+    REQUESTS 412    ERRORS 3 (0.7%)    TOKENS 48.2k    LATENCY 1.31s    COST $0.9412
+
+    updated 7s ago (every 20s)
+
+  [m] metric  [w] window  [b] breakdown  [s] this session  [esc] back  [?] keys  [q] quit
+  ```
+
+  Under `latency` the bars give way to mean-with-whiskers and the breakdown
+  hint disappears, since the aggregator holds no per-label latency:
+
+  ```
+    USAGE — all sessions — 10m0s @ 1m0s — latency — no breakdown for latency
+
+   2.4s              ┬
+                     │       ┬
+   1.8s        ┬     │       │
+               │     ┼       │
+   1.2s  ┬     ┼     │       ┼
+         ┼     │     ┴       │
+   600ms ┴     ┴           ┴
+       0 ┼────┴────┴────┴────┴────
+         14:23   :25   :27   :29
+        1.2s  1.8s     0  2.1s  1.4s
+
+    ┼ mean   ┬ +1σ   ┴ −1σ   (0 = no measured responses)
+  ```
+
 - **Catalog**: registered-plugin browser, opened by `P` from any
   session-view pane. Lists every plugin the running binary knows how to
   construct, including ones not in the active pipeline. Useful for
   discovering what's available before adding to the pipeline. Sourced
   from `/v1/plugins`.
+
+  REQUIRES lists a plugin's hard dependencies comma-separated; an either-or
+  group appears as one entry joined by `|`. Both are checked against the
+  ACTIVE pipeline in the Pipeline pane's DEPS column, not here — this pane
+  lists what the binary can build, not what is wired up.
+
+  ```
+  abctl · http://localhost:9094 · catalog
+
+   NAME                    REQUIRES                      DESCRIPTION
+   jwt-validation                                        Validate inbound JWTs against JWKS
+   token-exchange                                        RFC 8693 exchange for a target audience
+   mcp-parser                                            Parse MCP JSON-RPC requests and results
+   inference-parser                                      Parse LLM chat/completions traffic
+   ibac                    a2a-parser                    Intent-based access control
+   tool-prune              inference-parser              Drop unused tool definitions
+
+  [↑↓] nav  [↵] plugin detail  [r] refresh  [esc] back  [?] keys  [q] quit
+  ```
+
+- **Kubernetes Namespaces** (optional): the way in when abctl has no endpoint
+  to connect to — one row per namespace holding an AuthBridge agent, then a
+  Pods pane, then an automatic `kubectl port-forward` into the session view.
+  Shown when `--endpoint` was not given and either no local Cortex is answering
+  or `--kubernetes` was passed; `[l]` leaves it for the Cortex on this machine.
+
+  ```
+  abctl · pick namespace
+
+   NAMESPACE                       PODS
+   team1                           2
+   team2                           1
+   default                         1
+
+  [↑↓/jk] nav  [↵] open  [l] localhost:47601  [r] reload  [?] keys  [q] quit
+  ```
+
+  Without `--kubernetes`, a running local Cortex is connected to directly and
+  this pane never appears. With `--endpoint` the flag is moot: an explicit
+  address always wins.
 
 Layered on top of all of them:
 
@@ -305,7 +470,8 @@ Layered on top of all of them:
 | `Esc` | sessions, pipeline | (picker mode) tear down port-forward and back to pods |
 | `/` | sessions, events | filter (substring match; Enter commits and saves, Esc cancels the edit and saves nothing; clear the box and press Enter to remove a saved filter) |
 | `s` | events | toggle skip-row visibility (default: hidden; the events footer shows the hidden count) |
-| `c` | events | open the column picker (`↑↓`/`jk` move, `space`/`x` toggle, `r` reset, `Esc`/`Enter`/`c` close); the selection is saved on close |
+| `c` | events | open the column picker (`↑↓`/`jk` move, `space`/`x` toggle, `s` sort, `r` reset, `Esc`/`Enter`/`c` close); the selection and sort are saved on close |
+| `s` | column picker | sort by the column under the cursor: descending → ascending → chronological. Pressing it on a different column starts that column descending. `#` is not sortable — its order already *is* chronological |
 | `p` | any | pause/resume stream |
 | `y` | detail | yank event JSON to `~/.cortex/abctl-events` (path stays until the next keypress) |
 | `g` / `G` | lists | jump to top / bottom |
@@ -327,10 +493,10 @@ Layered on top of all of them:
 
 ## Settings
 
-abctl remembers the events-table column selection and the active filter in
-`~/.cortex/abctl-config.yaml`. Columns are saved when the column picker closes with
-`Esc`/`Enter`/`c` (`q` quits without saving); the filter is saved when you commit it
-with `Enter`. There is no explicit save step.
+abctl remembers the events-table column selection, the sort order, and the active
+filter in `~/.cortex/abctl-config.yaml`. Columns and the sort are saved when the
+column picker closes with `Esc`/`Enter`/`c` (`q` quits without saving); the filter is
+saved when you commit it with `Enter`. There is no explicit save step.
 
 A restored filter is shown in the footer as `[filter: …]` while it is in effect but
 not being edited — otherwise a shortened list would have no explanation on screen.
@@ -344,7 +510,7 @@ the saved one stays on disk for the next start.
 
 `--prefs PATH` reads and writes somewhere else. This is *not* the Cortex proxy
 config — that is `~/.cortex/config.yaml`, and `--config` on `abctl service` and
-`abctl claude-code`.
+`abctl configure claude-code`.
 
 ```yaml
 # abctl user settings. Written by abctl; safe to hand-edit or delete.
@@ -355,6 +521,9 @@ events:
       visible: false
     - name: TOKENS
       visible: false
+  # Omit sortColumn (or name a column this build does not have) for arrival order.
+  sortColumn: DURATION
+  sortDesc: true
 filter: github-tool
 ```
 
@@ -533,9 +702,9 @@ results; treat the output accordingly.
 ## Deferred to later PRs
 
 - Native clipboard (currently writes a file under `~/.cortex/abctl-events`).
-- More persisted settings (#954): sort order, pane sizes, theme. Each needs the
-  setting itself before there is anything to persist — the events table has no sort
-  state, pane sizes are recomputed per frame, and there is no theme to choose.
+- More persisted settings (#954): pane sizes, theme. Each needs the setting itself
+  before there is anything to persist — pane sizes are recomputed per frame, and
+  there is no theme to choose. (Sort order is done: see the column picker's `s`.)
 - Fuzzy search beyond substring match.
 - Per-user filtering (`Identity.Subject == X`).
 - Krew plugin packaging.

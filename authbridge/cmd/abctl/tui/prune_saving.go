@@ -46,10 +46,22 @@ func pruneSavingFor(resp *pipeline.SessionEvent) (costevent.Saving, bool) {
 // formatCompact renders a token count tersely enough for a table cell: 10577
 // becomes "10.6k". Exact below 1000, where the extra digits still fit.
 func formatCompact(v float64) string {
+	// Thresholds sit where the ROUNDING carries, not at the round number. %.1f turns
+	// 999,999,999 into "1000.0M" — seven runes of four-digit millions, one wider than
+	// any value on either side of it, and the same carry happens at every boundary
+	// ("1000.0k"). Promoting at 999.95 of a tier keeps the widest output six runes
+	// ("999.9M"), which is what lets the column's fit guarantee be stated at all.
 	switch {
-	case v >= 1_000_000:
+	case v >= 999_950_000:
+		// A billion-token session is not hypothetical: the picker showed 547.9M on a
+		// day-old one, and the figure is a sum over turns that keeps climbing. Without
+		// this tier it reads "10000.0M" — eight runes of five-digit millions, which is
+		// both the shape this function exists to avoid and the one that overflows the
+		// TOKENS column once fitTableColumns squeezes it on a narrow terminal.
+		return fmt.Sprintf("%.1fB", v/1_000_000_000)
+	case v >= 999_950:
 		return fmt.Sprintf("%.1fM", v/1_000_000)
-	case v >= 1_000:
+	case v >= 999.95:
 		return fmt.Sprintf("%.1fk", v/1_000)
 	default:
 		return fmt.Sprintf("%.0f", math.Round(v))

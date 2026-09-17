@@ -846,3 +846,187 @@ func TestViewports_GrowingTheTerminalDoesNotStrandTheOffset(t *testing.T) {
 		}
 	})
 }
+
+// sortCursorFixture is a distinguishable version of cursorRowsFixture: distinct
+// timestamps and request ids, so keyOf gives every event its OWN eventKey, plus a
+// duration that is deliberately NOT in arrival order so a DURATION sort has to move
+// rows. cursorRowsFixture leaves At and RequestID at their zero values, which makes
+// every one of its events share a single eventKey — fine for the scroll-geometry
+// tests it was written for, useless for asking which event the cursor is on.
+func sortCursorFixture(n int) []pipeline.SessionEvent {
+	base := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	events := make([]pipeline.SessionEvent, n)
+	for i := range events {
+		events[i] = pipeline.SessionEvent{
+			Direction: pipeline.Outbound, Phase: pipeline.SessionRequest,
+			Host:      hostToken(i),
+			RequestID: fmt.Sprintf("req-%d", i),
+			At:        base.Add(time.Duration(i) * time.Second),
+			// Durations that agree with arrival order nowhere, and specifically put
+			// NEITHER the first nor the last-arriving event at either end of the sorted
+			// list. That is what lets a test tell tail-follow apart from the identity
+			// pin: if the newest event were also the smallest, "follow the tail" and
+			// "stay on my event" would name the same row and the two would be
+			// indistinguishable.
+			Duration:  time.Duration(1+(i*37+11)%(n*3)) * time.Millisecond,
+			Inference: &pipeline.InferenceExtension{Model: "m"},
+		}
+	}
+	return events
+}
+
+func sortCursorModel(t *testing.T, n int) *model {
+	t.Helper()
+	m := &model{
+		pane: paneEvents, selectedSess: "s", bodyHeight: 12, width: 200,
+		events: map[string][]pipeline.SessionEvent{"s": sortCursorFixture(n)},
+	}
+	m.eventsTbl = newEventsTable()
+	m.rebuildEventsTable()
+	if got := len(m.eventsTbl.Rows()); got != n {
+		t.Fatalf("fixture built %d rows, want %d", got, n)
+	}
+	return m
+}
+
+// Tail-follow is chronological-only (#865). "Stay at the bottom" means "follow the
+// newest event" only because the last row IS the newest; under a DURATION sort the
+// last row is the SMALLEST value, so following it would drag the cursor to a
+// different event on every streamed message — and away from the large-value end the
+// operator sorted to look at.
+func TestEventsTable_SortSuppressesTailFollow(t *testing.T) {
+	m := sortCursorModel(t, 40)
+
+	// Chronological: the cursor rides the tail as new events land.
+	if got := m.eventsTbl.Cursor(); got != 39 {
+		t.Fatalf("chronological cursor = %d, want 39 (tail)", got)
+	}
+	m.events["s"] = append(m.events["s"], sortCursorFixture(41)[40])
+	m.rebuildEventsTable()
+	if got := m.eventsTbl.Cursor(); got != 40 {
+		t.Fatalf("chronological: cursor = %d after a new event, want 40 (followed the tail)", got)
+	}
+
+	// Pin the event the operator is on — the newest one, since they were following
+	// the live tail. By eventKey, not by pointer: appending to m.events reallocates
+	// the backing slice, so the same event legitimately gets a new address.
+	m.selectedEventKey = keyOf(m.selectedEvent())
+	before := m.selectedEventKey
+	if before == (eventKey{}) {
+		t.Fatal("no event under the cursor")
+	}
+
+	// Turn the sort on. wasAtEnd is computed from the table as it stood BEFORE this
+	// rebuild, and the cursor is still on the last row from the follow above — so the
+	// very rebuild that applies the sort is a wasAtEnd rebuild. That is exactly the
+	// case the gate exists for: an operator following the live tail turns a sort on,
+	// and "the tail" silently stops meaning "the newest event". Ungated, the cursor
+	// re-anchors to whichever event now sorts last, which is a different one (the
+	// fixture guarantees the newest event is at neither extreme).
+	m.sortCol, m.sortDesc = colDuration, true
+	m.rebuildEventsTable()
+	if got := keyOf(m.selectedEvent()); got != before {
+		t.Errorf("turning a sort on moved the cursor off the operator's event:\n got  %+v\n want %+v",
+			got, before)
+	}
+	assertSelectionVisible(t, m.eventsTbl, "sort applied while following the tail")
+
+	// And a further streamed event must not drag it either.
+	incoming := sortCursorFixture(42)[41]
+	incoming.Duration = time.Hour // sorts to row 0 descending, shifting every row down
+	incoming.RequestID = "req-incoming"
+	m.events["s"] = append(m.events["s"], incoming)
+	m.rebuildEventsTable()
+	if got := keyOf(m.selectedEvent()); got != before {
+		t.Errorf("a streamed event moved the cursor off its event while sorted:\n got  %+v\n want %+v",
+			got, before)
+	}
+	assertSelectionVisible(t, m.eventsTbl, "streamed event while sorted")
+}
+
+// The selectedEventKey pin is order-agnostic — findByKey searches by identity — so
+// turning a sort on, flipping it, and turning it off must all leave the cursor on
+// the same event, wherever that event now sits.
+func TestEventsTable_SortKeepsCursorOnItsEvent(t *testing.T) {
+	m := sortCursorModel(t, 40)
+	setCursorVisible(&m.eventsTbl, 17)
+	m.selectedEventKey = keyOf(m.selectedEvent())
+	want := m.selectedEventKey
+	if want == (eventKey{}) {
+		t.Fatal("no event under the cursor")
+	}
+
+	for _, step := range []struct {
+		name string
+		col  eventColumnID
+		desc bool
+	}{
+		{"sort desc", colDuration, true},
+		{"flip to asc", colDuration, false},
+		{"sort by host", colHost, false},
+		{"back to chronological", "", false},
+	} {
+		m.sortCol, m.sortDesc = step.col, step.desc
+		m.rebuildEventsTable()
+		if got := keyOf(m.selectedEvent()); got != want {
+			t.Errorf("%s: cursor landed on a different event", step.name)
+		}
+		assertSelectionVisible(t, m.eventsTbl, step.name)
+	}
+}
+
+// A sort restored from the config file is active on the very first rebuild, with no
+// keypress behind it and nothing on screen announcing it. Suppressing tail-follow
+// removes the only restore arm that fires with no pin, so without a seeded pin the
+// cursor falls back to a positional index while arriving events reshuffle every row —
+// landing on a different event each time.
+func TestEventsTable_PersistedSortPinsWithoutAKeypress(t *testing.T) {
+	m := sortCursorModel(t, 12)
+	// Discard the state sortCursorModel's own rebuild established, and start over the
+	// way a fresh process does: a sort from the config file, nothing pinned.
+	m.sortCol, m.sortDesc = colDuration, true
+	m.selectedEventKey = eventKey{}
+	m.rebuildEventsTable()
+
+	if m.selectedEventKey == (eventKey{}) {
+		t.Fatal("an active sort left the pin unseeded, so restore has nothing to follow")
+	}
+	want := keyOf(m.selectedEvent())
+	if want == (eventKey{}) {
+		t.Fatal("no event under the cursor after the first sorted rebuild")
+	}
+
+	// Events arrive, each slower than everything before it — so descending puts each
+	// at row 0 and pushes every existing row down.
+	for i := 1; i <= 3; i++ {
+		next := sortCursorFixture(12 + i)[11+i]
+		next.Duration = time.Duration(i) * time.Hour
+		next.RequestID = fmt.Sprintf("req-incoming-%d", i)
+		m.events["s"] = append(m.events["s"], next)
+		m.rebuildEventsTable()
+		if got := keyOf(m.selectedEvent()); got != want {
+			t.Fatalf("event %d: cursor drifted off its event with no keypress:\n got  %+v\n want %+v",
+				i, got, want)
+		}
+		assertSelectionVisible(t, m.eventsTbl, fmt.Sprintf("after event %d", i))
+	}
+}
+
+// The seed must not overwrite a real pin, including one the eviction branch
+// deliberately cleared to signal "the pinned event is gone".
+func TestEventsTable_SortSeedDoesNotClobberAnExistingPin(t *testing.T) {
+	m := sortCursorModel(t, 12)
+	setCursorVisible(&m.eventsTbl, 5)
+	m.selectedEventKey = keyOf(m.selectedEvent())
+	pinned := m.selectedEventKey
+
+	m.sortCol, m.sortDesc = colDuration, true
+	m.rebuildEventsTable()
+	if m.selectedEventKey != pinned {
+		t.Errorf("turning a sort on replaced the operator's pin:\n got  %+v\n want %+v",
+			m.selectedEventKey, pinned)
+	}
+	if got := keyOf(m.selectedEvent()); got != pinned {
+		t.Errorf("cursor is not on the pinned event after sorting")
+	}
+}

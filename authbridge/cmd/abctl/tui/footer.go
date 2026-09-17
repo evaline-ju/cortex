@@ -80,6 +80,21 @@ func (m *model) footerView() string {
 	if m.filter != "" && !m.filtering {
 		status.WriteString(styleWarn.Render("   [filter: " + m.filter + "]"))
 	}
+	// A non-chronological sort, for the same reason as [filter: …] above: it is
+	// state the operator chose, and a table in an order the eye does not expect
+	// reads as a bug when nothing on screen names the ordering.
+	//
+	// Here as well as in the column header, because the sorted column may be one
+	// fitColumns dropped on a narrow terminal — and then there is no header on
+	// screen to carry the glyph, which is precisely when the reordering is most
+	// confusing.
+	if m.sortCol != "" {
+		glyph := sortGlyphAsc
+		if m.sortDesc {
+			glyph = sortGlyphDesc
+		}
+		status.WriteString(styleWarn.Render("   [sort: " + string(m.sortCol) + glyph + "]"))
+	}
 
 	// Flash message (e.g. "yanked → ~/.cortex/abctl-events/...").
 	if m.flash != "" && (m.flashSticky || time.Now().Before(m.flashUntil)) {
@@ -100,7 +115,27 @@ func (m *model) footerView() string {
 
 	hint := fitHintLine(m.helpView(), m.width)
 
-	return status.String() + "\n" + styleHint.Render(hint)
+	return fitStatusLine(status.String(), m.width) + "\n" + styleHint.Render(hint)
+}
+
+// fitStatusLine bounds the status row to the terminal.
+//
+// layout() reserves exactly three rows for title + blank + footer, so a status row
+// wider than the terminal wraps and costs the hint line below it — the row carrying
+// [?] keys and [q] quit. Every writer above appends unconditionally, and only the
+// feedback link checked the width, so a state-rich row (paused + a restored filter +
+// an active sort) overflowed at 80 columns: measured 87.
+//
+// Truncates from the RIGHT, unlike fitHintLine's drop-from-the-front. The two lines
+// rank their contents oppositely: the hint line's last entries are the escape hatches
+// a stuck operator needs, while this row leads with the connection state, rate and
+// drops — what someone is actively debugging with — and trails into optional state
+// markers. So the tail is what should go.
+func fitStatusLine(status string, width int) string {
+	if width <= 0 || lipgloss.Width(status) <= width {
+		return status
+	}
+	return truncToWidth(status, width)
 }
 
 // fitFlashLine bounds a full-width flash to the terminal, truncating from the

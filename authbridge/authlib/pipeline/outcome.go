@@ -104,7 +104,14 @@ func (c *Context) Outcome() *Outcome {
 // pctx.StartedAt when left unset.
 func OutcomeFromContext(pctx *Context) Outcome {
 	out := Outcome{StatusCode: pctx.StatusCode}
-	if denier := pctx.RejectingPlugin(); denier != "" {
+	// A REFUSAL THAT ARRIVED AFTER THE RESPONSE IS NOT A DENIAL, and both deny branches have to
+	// agree about that or the two disagree on the same request. A plugin can reject during a
+	// teardown flush or a finalization pass, when the response has already gone downstream and
+	// there is nothing left to refuse; the refusal is still recorded, marked Late, but reporting
+	// OutcomeDeny for it tells every Finisher and every audit row that a request answered with a
+	// 200 was blocked. Measured before this: FinalAction=deny, StatusCode=200, one outcome
+	// contradicting itself.
+	if denier := pctx.RejectingPlugin(); denier != "" && !pctx.rejectedAfterDelivery {
 		out.FinalAction = OutcomeDeny
 		out.DenyingPlugin = denier
 		return out
@@ -128,6 +135,9 @@ func OutcomeFromContext(pctx *Context) Outcome {
 //
 // Secondary to pctx.RejectingPlugin(); kept as defense-in-depth for
 // bespoke dispatchers that bypass Pipeline.Run.
+// Late invocations are skipped for the same reason Shadow ones are: both are denials that were
+// recorded without being applied, and treating either as the request's outcome reports a block
+// that never happened. See Invocation.Late.
 func lastDenyingPlugin(pctx *Context) (string, bool) {
 	if pctx.Extensions.Invocations == nil {
 		return "", false
@@ -137,13 +147,13 @@ func lastDenyingPlugin(pctx *Context) (string, bool) {
 	// deployments, so "most recent" under wall-clock is outbound.
 	for i := len(pctx.Extensions.Invocations.Outbound) - 1; i >= 0; i-- {
 		inv := pctx.Extensions.Invocations.Outbound[i]
-		if inv.Action == ActionDeny && !inv.Shadow {
+		if inv.Action == ActionDeny && !inv.Shadow && !inv.Late {
 			return inv.Plugin, true
 		}
 	}
 	for i := len(pctx.Extensions.Invocations.Inbound) - 1; i >= 0; i-- {
 		inv := pctx.Extensions.Invocations.Inbound[i]
-		if inv.Action == ActionDeny && !inv.Shadow {
+		if inv.Action == ActionDeny && !inv.Shadow && !inv.Late {
 			return inv.Plugin, true
 		}
 	}

@@ -322,6 +322,17 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
+	// Resolved here, before the pipeline runs, so the calling program is fixed for every
+	// event this request produces: Headers above is a clone that plugins write to, so a
+	// later resolution would attribute the request to whatever the pipeline left behind,
+	// and the answer would depend on which recording site asked first. See
+	// pipeline.Context.ResolveClient — the forward proxy and ext_proc pin at their own
+	// construction sites for the same reason.
+	//
+	// Inbound, this is the caller's own User-Agent. Without it every event here recorded no
+	// client at all, and Label() answered "unknown" — which is documented as "the request
+	// carried no User-Agent" and would have meant "this listener was never wired".
+	pctx.ResolveClient()
 
 	// Surface connection-level identity to plugins that opt in. r.TLS is
 	// non-nil only when the connection went through TLS — for plain HTTP
@@ -429,6 +440,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 			Plugins:     plugins,
 			Identity:    pipeline.SnapshotIdentity(pctx),
+			Client:      pctx.ClientInfo(),
 			Host:        pctx.Host,
 			HTTPMethod:  pctx.Method,
 			HTTPPath:    pctx.Path,
@@ -489,7 +501,30 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 	}
 
-	action := s.InboundPipeline.RunResponse(resp.Request.Context(), pctx)
+	// DETACHED AND BOUNDED, for the same reason the streaming path's finalize() is, and this is
+	// the arm that was missed. Everything below runs AFTER the whole body is in hand, so a
+	// client that hung up while it was being read leaves a done context — and
+	// RunResponseFrame refuses a done context before calling any plugin, returning a Deny that
+	// this call site cannot tell from a policy reject, because it only tests action.Type. The
+	// response then becomes a responseRejectedError: the cost never settles, and the
+	// SessionResponse append at the bottom of this function is skipped, for a response that
+	// arrived complete. Detaching also restores the meaning of a Reject here — with
+	// cancellation gone, one can only come from a plugin.
+	//
+	// ONE CONTEXT PER DISPATCH, which is the rule at every finalization site in this tree. The
+	// alternative — one context for the whole finalization — is simpler and gets the priority
+	// backwards: the dispatches run in order, so whatever the response phase spends is taken from
+	// the TERMINAL frame, and that is the dispatch that turns folded state into a settled figure.
+	// A slow plugin in the phase would then lose the charge, which is the failure this whole
+	// change exists to prevent, in a new disguise. Bounding each one separately keeps the total
+	// bounded too, because the number of dispatches here is fixed and small.
+	//
+	// Built here rather than at the top of modifyResponse: the deadline bounds this work, and a
+	// deadline that started while the body was still being read would bound the read instead.
+	phaseCtx, cancelPhase := httpx.TeardownContext(resp.Request.Context())
+	defer cancelPhase()
+
+	action := s.InboundPipeline.RunResponse(phaseCtx, pctx)
 	if action.Type == pipeline.Reject {
 		return &responseRejectedError{action: action}
 	}
@@ -498,7 +533,10 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// for buffered application/json we deliver the body as one
 	// last=true frame so plugins can finalize via OnResponseFrame.
 	if s.InboundPipeline.HasStreamingResponders() && resp.Body != nil {
-		frameAction := s.InboundPipeline.RunResponseFrame(resp.Request.Context(), pctx, pctx.ResponseBody, true)
+		// Its own budget, per the rule above: the settle does not inherit what the phase spent.
+		finalCtx, cancelFinal := httpx.TeardownContext(resp.Request.Context())
+		defer cancelFinal()
+		frameAction := s.InboundPipeline.RunResponseFrame(finalCtx, pctx, pctx.ResponseBody, true)
 		if frameAction.Type == pipeline.Reject {
 			return &responseRejectedError{action: frameAction}
 		}
@@ -551,6 +589,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
 			Plugins:     plugins,
 			Identity:    pipeline.SnapshotIdentity(pctx),
+			Client:      pctx.ClientInfo(),
 			Host:        pctx.Host,
 			HTTPMethod:  pctx.Method,
 			HTTPPath:    pctx.Path,
@@ -604,6 +643,7 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 		Direction:   pipeline.Inbound,
 		Phase:       pipeline.SessionDenied,
 		RequestID:   pctx.RequestID(),
+		Client:      pctx.ClientInfo(),
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Host:        pctx.Host,
 		HTTPMethod:  pctx.Method,
@@ -661,6 +701,10 @@ func (s *Server) installStreamingResponseBody(resp *http.Response, pctx *pipelin
 	resp.Body = &streamingResponseBody{
 		upstream: upstream,
 		reader:   sseframe.NewReader(upstream, maxBodySize),
+		// The request context, used for mid-stream frames deliberately: those dispatches
+		// happen only while bytes are being copied to a client that is still there, and a
+		// cancelled context there is a real signal to stop. The terminal frame is the
+		// opposite case — see finalize.
 		ctx:      resp.Request.Context(),
 		pipeline: s.InboundPipeline,
 		pctx:     pctx,
@@ -699,6 +743,7 @@ func (s *Server) recordInboundResponseEvent(pctx *pipeline.Context, statusCode i
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
 		Plugins:     plugins,
 		Identity:    pipeline.SnapshotIdentity(pctx),
+		Client:      pctx.ClientInfo(),
 		Host:        pctx.Host,
 		HTTPMethod:  pctx.Method,
 		HTTPPath:    pctx.Path,
@@ -722,8 +767,10 @@ func (s *Server) recordInboundResponseEvent(pctx *pipeline.Context, statusCode i
 // (`data: <payload>\n\n`) regardless of how the upstream emitted
 // each frame's data lines.
 type streamingResponseBody struct {
-	upstream   io.ReadCloser
-	reader     *sseframe.Reader
+	upstream io.ReadCloser
+	reader   *sseframe.Reader
+	// ctx is the request context, used for mid-stream frames. The terminal dispatch runs on
+	// a detached, bounded context built at the moment it fires — see finalize.
 	ctx        context.Context
 	pipeline   *pipeline.Holder
 	pctx       *pipeline.Context
@@ -733,6 +780,43 @@ type streamingResponseBody struct {
 	pending  []byte
 	finished bool
 	closed   bool
+}
+
+// finalize runs the terminal last=true dispatch, which is the only thing that turns a
+// stream's folded state into a settled cost.
+//
+// DETACHED FROM THE REQUEST. A client that hangs up mid-stream — a cancelled turn, a closed
+// tab, a timeout — cancels the request context, and pipeline.RunResponseFrame refuses a
+// cancelled context before calling any plugin: it returns Deny("pipeline.cancelled"). On the
+// request context that spend was silently dropped on the one event most likely to produce it.
+// Anthropic reports the whole prompt split on message_start, so the expensive half of a long
+// turn is already on the wire when the client leaves. Every listener detaches here for this
+// reason; see httpx.TeardownContext.
+//
+// BUILT HERE, NOT WHEN THE RESPONSE HEADERS ARRIVED, and that is the whole reason this is a
+// method rather than a field. TeardownContext carries a deadline, and a deadline starts
+// running the moment it is created: a context built in installStreamingResponseBody — which
+// runs as soon as upstream headers land — is already expired by the time a turn that streamed
+// for longer than httpx.TeardownTimeout reaches its terminal frame. RunResponseFrame refuses an
+// expired context exactly as it refuses a cancelled one, so the budget meant to bound
+// finalization would instead cap the length of a stream that can be charged at all, and it
+// would drop precisely the long turns that cost the most. Lazily is also why there is no cancel
+// to remember: the deferred one below releases the timer on every path, which a struct field
+// could only promise.
+// AND IT BLOCKS THE CALLER, up to httpx.TeardownTimeout. This runs inside Read and Close on the
+// response body, so a wedged plugin holds net/http's copy loop or the connection teardown for that
+// long — where before it returned instantly, by failing to finalize at all on a cancelled context. See
+// TeardownTimeout for why bounded-and-slow beats instant-and-wrong.
+func (b *streamingResponseBody) finalize() {
+	ctx, cancel := httpx.TeardownContext(b.ctx)
+	defer cancel()
+	// DELIVERED, so a refusal from here cannot rename the request. Every frame this body emitted
+	// went to the client as it was read, so a plugin rejecting on the terminal dispatch is a
+	// decision that cannot take effect — and without this, OutcomeFromContext would report
+	// OutcomeDeny beside a 200. ext_proc's teardown flush says the same thing for the same reason;
+	// the three listeners have to agree about it. See pipeline.Context.MarkResponseDelivered.
+	b.pctx.MarkResponseDelivered()
+	b.pipeline.RunResponseFrame(ctx, b.pctx, nil, true)
 }
 
 func (b *streamingResponseBody) Read(p []byte) (int, error) {
@@ -748,7 +832,7 @@ func (b *streamingResponseBody) Read(p []byte) (int, error) {
 	frame, err := b.reader.ReadFrame()
 	if err == io.EOF {
 		// End of upstream. Finalize aggregating plugins.
-		b.pipeline.RunResponseFrame(b.ctx, b.pctx, nil, true)
+		b.finalize()
 		b.finished = true
 		return 0, io.EOF
 	}
@@ -756,7 +840,7 @@ func (b *streamingResponseBody) Read(p []byte) (int, error) {
 		// Stream errored mid-flight. Finalize so plugins can record
 		// what they have, then propagate the error so net/http closes
 		// the downstream connection.
-		b.pipeline.RunResponseFrame(b.ctx, b.pctx, nil, true)
+		b.finalize()
 		b.finished = true
 		return 0, err
 	}
@@ -767,7 +851,7 @@ func (b *streamingResponseBody) Read(p []byte) (int, error) {
 		// earlier frames are already on the wire, so the cleanest
 		// signal is to abort the read; the client sees a truncated
 		// stream. Finalize first so plugin state is consistent.
-		b.pipeline.RunResponseFrame(b.ctx, b.pctx, nil, true)
+		b.finalize()
 		b.finished = true
 		return 0, fmt.Errorf("reverseproxy: streaming response rejected mid-stream")
 	}
@@ -819,7 +903,7 @@ func (b *streamingResponseBody) Close() error {
 	// Ensure plugins finalize even if Read never reached EOF (client
 	// disconnect, ReverseProxy error).
 	if !b.finished {
-		b.pipeline.RunResponseFrame(b.ctx, b.pctx, nil, true)
+		b.finalize()
 		b.finished = true
 	}
 	if b.onClose != nil {
