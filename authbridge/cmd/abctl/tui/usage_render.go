@@ -349,12 +349,10 @@ func renderCostSummary(snap *usage.Snapshot) string {
 		// only one of them means the traffic was free.
 		return "COST unavailable"
 	}
-	// Two decimals, not four: this is a summed grand total, so anything under a
-	// cent has been averaged out. The four-decimal precision belongs on the
-	// per-event cells, where a single cache-heavy call really can cost $0.0038.
-	// Positive amounts that round to zero cents render as "<$0.01" so a small
-	// but real total reads as small rather than free — same reason formatUSDCell
-	// has its $0.0001 floor at the per-event layer.
+	// Two decimals on the grand total; four-decimal precision belongs on the
+	// per-event cells (see formatUSDCell). A positive-but-sub-cent total falls
+	// back to "<$0.01" so small does not read as free — the same floor rule
+	// formatUSDCell applies at $0.0001.
 	usd := float64(snap.Totals.CostMicros) / 1e6
 	var cell string
 	if usd > 0 && usd < 0.005 {
