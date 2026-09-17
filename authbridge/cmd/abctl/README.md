@@ -359,7 +359,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
     s claude-sonnet-5 (34.2k)   h claude-haiku-4-5 (9.4k)   · (unlabelled) (2.1k)
 
-    REQUESTS 412    ERRORS 3 (0.7%)    TOKENS 48.2k    LATENCY 1.31s    COST $0.9412
+    REQUESTS 412    ERRORS 3 (0.7%)    TOKENS 48.2k    LATENCY 1.31s    COST $0.94
 
     updated 7s ago (every 20s)
 

@@ -827,26 +827,34 @@ func TestNumericColumns_RightAligned(t *testing.T) {
 	}
 	rows := []eventRow{{event: &ev}}
 	m := &model{}
+	cc := cellContext{m: m, rows: rows, i: 0, row: rows[0]}
 
+	numeric := map[eventColumnID]bool{colDuration: true, colTokens: true, colCost: true}
+	filled := 0
 	for _, col := range eventColumns {
-		if col.id != colDuration && col.id != colTokens && col.id != colCost {
+		if !numeric[col.id] {
 			continue
 		}
-		cc := cellContext{m: m, rows: rows, i: 0, row: rows[0], width: col.width}
+		cc.width = col.width
 		got := col.cell(cc)
-		if got == "" {
-			// COST is blank on a fixture with no cost record. Its wiring is
-			// still covered — that path renders through padLeft the same way.
-			continue
+		// Empty is legitimate — COST is blank without a cost record; the wiring
+		// still passes through padLeft, so an empty cell provides no signal on
+		// alignment. Non-empty cells go through the full check.
+		if got != "" {
+			filled++
+			// lipgloss.Width, not len: TOKENS/COST cells can carry U+2212 (3
+			// bytes, 1 column) once a saving is attached; byte length would
+			// mis-count.
+			if w := lipgloss.Width(got); w != col.width {
+				t.Errorf("%s: display width = %d, want %d (%q)", col.id, w, col.width, got)
+			}
+			if !strings.HasSuffix(got, strings.TrimSpace(got)) {
+				t.Errorf("%s: cell not right-aligned (%q)", col.id, got)
+			}
 		}
-		// lipgloss.Width, not len: TOKENS/COST cells can carry U+2212 (3 bytes,
-		// 1 column) once a saving is attached, and byte length would mis-count.
-		if w := lipgloss.Width(got); w != col.width {
-			t.Errorf("%s: display width = %d, want %d (%q)", col.id, w, col.width, got)
-		}
-		if !strings.HasSuffix(got, strings.TrimSpace(got)) {
-			t.Errorf("%s: cell not right-aligned (%q)", col.id, got)
-		}
+	}
+	if filled == 0 {
+		t.Fatal("no numeric column rendered a value; the alignment assertion is vacuous")
 	}
 }
 
