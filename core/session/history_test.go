@@ -85,3 +85,49 @@ func TestAppend_ASessionReCreatedAfterEvictionContinuesItsSeq(t *testing.T) {
 		t.Fatalf("re-created s1 seqs = %v, want [3]", got)
 	}
 }
+
+// After a restart, a session the archive holds but memory does not is still a session with
+// events numbered from 1. Merging a bucket whose events are also numbered from 1 into it
+// would give it two events of each low seq, so the rename is refused exactly as it is when
+// the target is resident.
+func TestRekey_RefusesATargetWithArchivedHistory(t *testing.T) {
+	s := New(0, 0, 0)
+	defer s.Close()
+	a := newFakeArchive()
+	a.last["ctx-1"] = 7
+	s.AddRecorder(a)
+
+	s.Append(DefaultSessionID, ev())
+	s.Rekey(DefaultSessionID, "ctx-1")
+
+	if s.View(DefaultSessionID) == nil {
+		t.Fatal("default was renamed into a session with archived history")
+	}
+	s.Append("ctx-1", ev())
+	if got := seqsOf(t, s, "ctx-1"); got[0] != 8 {
+		t.Fatalf("ctx-1 first seq = %d, want 8", got[0])
+	}
+}
+
+// The ordinary case after a restart: Claude Code resumes an archived session and its pending
+// bucket is not adopted into it. The bucket stays its own row, as it does when the target is
+// resident.
+func TestClaim_LeavesThePendingBucketWhenTheTargetIsArchived(t *testing.T) {
+	s := New(0, 0, 0)
+	defer s.Close()
+	a := newFakeArchive()
+	a.last["task-1"] = 3
+	s.AddRecorder(a)
+	r := &rekeyRecorder{}
+	s.AddRecorder(r)
+
+	s.Append("pending:bob-shell", ev())
+	s.Claim("task-1", "bob-shell")
+
+	if s.View("pending:bob-shell") == nil {
+		t.Fatal("pending bucket was adopted into an archived session")
+	}
+	if len(r.rekeyed) != 0 {
+		t.Fatalf("Rekeyed calls = %v, want none for a refused adoption", r.rekeyed)
+	}
+}

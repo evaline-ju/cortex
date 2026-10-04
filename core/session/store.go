@@ -1227,6 +1227,12 @@ func (s *Store) rekeyLocked(oldID, newID string) bool {
 	if _, exists := s.sessions[newID]; exists {
 		return false
 	}
+	// A target the archive holds history for counts as existing. Its events on disk are
+	// numbered from 1 and so are the bucket's, so a merge would give one session two events
+	// of each low seq — the same reason a resident target refuses. See SeqSeeder.
+	if s.archivedSeqLocked(newID) > 0 {
+		return false
+	}
 
 	sess.ID = newID
 	s.sessions[newID] = sess
