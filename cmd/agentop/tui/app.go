@@ -258,6 +258,12 @@ func untitledBackoff(misses int) time.Duration {
 type tickMsg time.Time
 type refreshTickMsg time.Time
 type sessionsLoadedMsg []session.SessionSummary
+
+// historyLoadedMsg is the session list fetched with history on: sessionsLoadedMsg's rows plus the
+// archive's disk-only ones, and its usage. A separate type rather than a change to
+// sessionsLoadedMsg, which eight files build and match on; its handler sets the usage and then
+// takes exactly the sessionsLoadedMsg path.
+type historyLoadedMsg struct{ list apiclient.SessionList }
 type pipelineLoadedMsg *apiclient.PipelineView
 type snapshotLoadedMsg struct {
 	// olderNotFetched is how many events precede the ones in this response, from the
@@ -400,6 +406,14 @@ type model struct {
 
 	// Data caches.
 	sessions []session.SessionSummary
+
+	// showHistory lists the sessions the proxy's session archive holds and memory no longer does
+	// (H). Not persisted, after agentScope's precedent: a view of the moment, not a preference.
+	// archiveUsage is the archive's size and bounds from the last history list, nil without one;
+	// historyNoticed keeps the "no archive here" notice to once per toggle.
+	showHistory    bool
+	archiveUsage   *pipeline.ArchiveUsage
+	historyNoticed bool
 	// events was labelled a ring buffer and has never been one. Nothing trims an entry in
 	// place; every write is one of six, and the CTX(1M) gauge folds forward off this map,
 	// so each one owes contextRun an action. The full inventory, because the gauge reads an
@@ -1196,6 +1210,15 @@ func refreshTickCmd() tea.Cmd {
 // each successful reconnect so we don't miss new sessions that appeared
 // while the stream was down.
 func (m *model) loadSessionsCmd() tea.Cmd {
+	if m.showHistory {
+		return func() tea.Msg {
+			list, err := m.client.ListSessionsArchived(m.ctx)
+			if err != nil {
+				return errMsg{where: "list sessions", err: err}
+			}
+			return historyLoadedMsg{list: list}
+		}
+	}
 	return func() tea.Msg {
 		summaries, err := m.client.ListSessions(m.ctx)
 		if err != nil {
@@ -1269,6 +1292,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastTick, m.lastCt = now, m.eventCt
 		return m, tickCmd()
+
+	case historyLoadedMsg:
+		// A reply to a request made while history was on can land after H turned it off; its
+		// disk-only rows would then stay until the next poll. Drop it instead.
+		if !m.showHistory {
+			return m, nil
+		}
+		m.archiveUsage = msg.list.Archive
+		if !m.historyNoticed {
+			m.historyNoticed = true
+			if msg.list.Archive == nil {
+				m.setFlash("this Cortex has no session archive: showing live sessions only")
+			} else {
+				m.setFlash(fmt.Sprintf("history on: %s of sessions on disk, kept %d days",
+					formatBytes(msg.list.Archive.Bytes), msg.list.Archive.RetentionDays))
+			}
+		}
+		return m.Update(sessionsLoadedMsg(msg.list.Sessions))
 
 	case sessionsLoadedMsg:
 		// The server list says what is LIVE. It does not say what is worth

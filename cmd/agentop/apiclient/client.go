@@ -163,6 +163,24 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.SessionSummary, er
 	return body.Sessions, nil
 }
 
+// SessionList is /v1/sessions with history: the sessions, and the session archive's usage.
+type SessionList struct {
+	Sessions []session.SessionSummary `json:"sessions"`
+	// Archive is nil from a proxy with no session archive — or one that predates it, and
+	// answered the plain list because it ignores the query.
+	Archive *pipeline.ArchiveUsage `json:"archive,omitempty"`
+}
+
+// ListSessionsArchived fetches /v1/sessions?archived=true: the live sessions plus every one the
+// proxy's session archive holds and memory no longer does, marked Resident false.
+func (c *Client) ListSessionsArchived(ctx context.Context) (SessionList, error) {
+	var body SessionList
+	if err := c.getJSON(ctx, "/v1/sessions?archived=true", &body); err != nil {
+		return SessionList{}, err
+	}
+	return body, nil
+}
+
 // SummaryView is the projection every timeline fetch asks for. Must match
 // sessionapi's recognised `view` value.
 const SummaryView = "summary"

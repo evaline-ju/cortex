@@ -799,6 +799,21 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		// detail viewport pages too.
 		return m.pageActivePane(msg)
 
+	case "H":
+		// History: also list the sessions the proxy's session archive holds and memory no
+		// longer does. Capital because lowercase `h` backs out. Below the modal blocks for `P`'s
+		// reason (see there), so it needs no guards of its own.
+		if m.client == nil || m.pane != paneSessions {
+			return nil
+		}
+		m.showHistory = !m.showHistory
+		m.historyNoticed = false
+		if !m.showHistory {
+			m.archiveUsage = nil
+			m.setFlash("history off: showing live sessions")
+		}
+		return m.loadSessionsCmd()
+
 	case "P":
 		// Open the pipeline. `P` REPLACED `tab` HERE, and took the letter off the
 		// plugin catalog (now `C`) to do it.
@@ -1154,13 +1169,20 @@ func (m *model) helpView() string {
 		// [A] agents is absent for width: the line is already 98 columns, and with one agent —
 		// the common case — the breakdown is a single row. The [?] overlay names it. esc names
 		// the picker instead when this list was reached through it.
+		//
+		// [H] history sits AHEAD of [u], so it is the hint that pays for its own width. It makes
+		// the line 111 columns wherever it goes; placed behind [$] that cost both cost keys at
+		// 80, while here fitHintLine drops it before them, and every hint behind it survives to
+		// exactly the width it did before [H] existed. It is visible from 92 columns, and the
+		// [?] overlay names it at any width. (The 98 measured above is the line before [H]; and
+		// [P]'s 34 is unchanged, being a fit from the tail.)
 		if m.sessionsViaAgents {
-			return "[↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [esc] agents  [p] pause  [P] pipeline  [?] keys  [q] quit"
+			return "[↑↓] nav  [↵] drill  [H] history  [u] usage  [$] spend  [/] filter  [esc] agents  [p] pause  [P] pipeline  [?] keys  [q] quit"
 		}
 		if m.parentCtx != nil {
-			return "[↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [esc] pods  [p] pause  [P] pipeline  [?] keys  [q] quit"
+			return "[↑↓] nav  [↵] drill  [H] history  [u] usage  [$] spend  [/] filter  [esc] pods  [p] pause  [P] pipeline  [?] keys  [q] quit"
 		}
-		return "[↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit"
+		return "[↑↓] nav  [↵] drill  [H] history  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit"
 	case paneEvents:
 		skipHint := "[s] hide passthru/skip"
 		if m.hideInactive {
