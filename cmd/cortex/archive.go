@@ -25,10 +25,11 @@ func sessionArchiveDir() (string, error) {
 
 // sessionArchiveRuns decides whether the session archive runs, and says why.
 //
-// ONLY ON A LOCAL INSTALL, and in this release only when asked: the archive stays off by default
-// until a release can also read history back and clear it, because until then it would write raw
-// prompts with no way for a user to see or erase them. Builds from main and `make dev-install`
-// are not gated by a release, so the default, not the release, has to hold the line.
+// ON BY DEFAULT ON A LOCAL INSTALL, and only there. A laptop is where a restart costs a user their
+// history and where the user can read it back (agentop's H) and erase it (X, or DELETE
+// /v1/sessions): both exist, which is what the default waited for. Elsewhere it is off even when
+// asked for — raw prompts on a cluster's volume need a decision of their own, and a mounted path
+// is not one. false always wins.
 func sessionArchiveRuns(cfg *config.Config, configPath string) (bool, string) {
 	a := cfg.Session.Archive
 	explicit := a != nil && a.Enabled != nil
@@ -42,7 +43,7 @@ func sessionArchiveRuns(cfg *config.Config, configPath string) (bool, string) {
 		return false, "not a local install"
 	}
 	if !explicit {
-		return false, "off by default until the archive can be read back and cleared; set session.archive.enabled: true to opt in"
+		return true, "on by default for a local install; set session.archive.enabled: false to turn it off"
 	}
 	return true, "session.archive.enabled is true on a local install"
 }

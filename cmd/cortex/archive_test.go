@@ -34,7 +34,8 @@ func archiveCfg(enabled *bool) *config.Config {
 // Until the archive can be read back and cleared, it runs only where someone asked for it on a
 // laptop. Outside a local install it never runs: raw prompts on a cluster's volume are their own
 // decision, and the archive has no dir to point at one.
-func TestSessionArchiveRuns_OffByDefaultUntilLaunch(t *testing.T) {
+// On for a local install unless turned off, and never elsewhere, asked for or not.
+func TestSessionArchiveRuns_OnForALocalInstall(t *testing.T) {
 	inside, outside := localConfig(t)
 	on, off := true, false
 	for _, tc := range []struct {
@@ -43,7 +44,7 @@ func TestSessionArchiveRuns_OffByDefaultUntilLaunch(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"local, unset", &config.Config{}, inside, false},
+		{"local, unset", &config.Config{}, inside, true},
 		{"local, enabled", archiveCfg(&on), inside, true},
 		{"local, disabled", archiveCfg(&off), inside, false},
 		{"not local, enabled", archiveCfg(&on), outside, false},

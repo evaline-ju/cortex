@@ -15,8 +15,8 @@ import "fmt"
 // refuses any live change under `session`, changing this needs a restart with no code of its
 // own.
 type SessionArchiveConfig struct {
-	// Enabled is a pointer so unset can follow the binary's default, which is on for a local
-	// install once the archive launches. false always wins.
+	// Enabled is a pointer so unset can follow the binary's default: on for a local install,
+	// off everywhere else. false always wins.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// RetentionDays is how long a segment is kept after its last write. 0 means the default,
 	// 30.
