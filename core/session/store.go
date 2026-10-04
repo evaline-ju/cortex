@@ -41,8 +41,10 @@ type entry struct {
 	// numbers, or a client holding a cursor from before the trim would page into the wrong
 	// place. The scope matters and is easy to overstate — this counter lives on the entry,
 	// and cleanupLocked and evictOldestLocked delete the entry outright, so a session
-	// re-created under the same id afterwards starts a NEW counter at 1. Numbers are
-	// therefore unique within one incarnation of a session, not across the id forever.
+	// re-created under the same id afterwards starts a NEW counter at 1 — unless a SeqSeeder
+	// (the session archive) still holds the id's earlier events, in which case the new counter
+	// starts after them. Without one, numbers are unique within one incarnation of a session,
+	// not across the id forever.
 	//
 	// Nothing here can detect that, and nothing here needs to: the store cannot tell a
 	// re-created session from a trimmed one. A paging client compares wall-clock time
@@ -467,6 +469,8 @@ func (s *Store) appendLocked(sessionID string, b *Bucket, event pipeline.Session
 			sess = &entry{
 				ID:        sessionID,
 				CreatedAt: now,
+				// After whatever the archive already numbered under this id; see SeqSeeder.
+				nextSeq: s.archivedSeqLocked(sessionID),
 				// NOT THE ZERO VALUE: rankRename is 0, so a zero-valued titleRank would claim this
 				// session had already been renamed and no candidate could ever beat it — the first
 				// prose message would be unnameable. rankNone is the "nothing has named it" rank.
