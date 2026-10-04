@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 	"time"
@@ -92,3 +93,50 @@ func TestSummaryFold_NamesNoAgentForTheDefaultAndPendingBuckets(t *testing.T) {
 		}
 	}
 }
+
+// The archive persists a fold in session.json and resumes it after a restart, so a fold carried
+// through JSON and then given more events must report exactly what one fold over all of them
+// does — including the title rank, which decides whether a later /rename may replace the title.
+func TestSummaryFold_ResumesFromJSON(t *testing.T) {
+	evs := foldFixture(t)
+	whole := NewSummaryFold()
+	for i := range evs {
+		whole.Add("s1", &evs[i])
+	}
+
+	first := NewSummaryFold()
+	for i := range evs[:4] {
+		first.Add("s1", &evs[i])
+	}
+	b, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := NewSummaryFold()
+	if err := json.Unmarshal(b, resumed); err != nil {
+		t.Fatal(err)
+	}
+	for i := range evs[4:] {
+		resumed.Add("s1", &evs[4+i])
+	}
+	w, g := whole.Summary("s1"), resumed.Summary("s1")
+	if w.EventCount != g.EventCount || w.Title != g.Title || w.Agent != g.Agent || w.TotalTokens != g.TotalTokens ||
+		w.CostMicros != g.CostMicros || w.AvoidedMicros != g.AvoidedMicros || !slices.Equal(w.Currencies, g.Currencies) {
+		t.Fatalf("resumed = %+v\nwhole   = %+v", g, w)
+	}
+}
+
+// rankRename is 0, so a decoded fold with no titleRank must not claim it was renamed — that
+// would lock the title against every later candidate but a /rename.
+func TestSummaryFold_AMissingTitleRankIsNotARename(t *testing.T) {
+	f := NewSummaryFold()
+	if err := json.Unmarshal([]byte(`{"eventCount":3}`), f); err != nil {
+		t.Fatal(err)
+	}
+	f.Add("s1", ptr(titleEvent("a title that should win")))
+	if got := f.Summary("s1").Title; got != "a title that should win" {
+		t.Fatalf("Title = %q, want the candidate", got)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }

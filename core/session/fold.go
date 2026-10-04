@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/rossoctl/cortex/core/cost/usage"
@@ -135,4 +136,71 @@ func (f *SummaryFold) Summary(sessionID string) SessionSummary {
 		sum.Agent = f.agents[0].label
 	}
 	return sum
+}
+
+// foldJSON is SummaryFold's state as the session archive persists it in session.json, so a
+// fold resumes after a restart instead of being rebuilt by decoding every segment.
+//
+// TitleRank IS A POINTER because rankRename is 0: a document without it must decode to
+// rankNone, not to a rename that would lock the title against every later candidate.
+type foldJSON struct {
+	EventCount       int            `json:"eventCount"`
+	Title            string         `json:"title,omitempty"`
+	TitleRank        *int           `json:"titleRank,omitempty"`
+	Agents           []foldAgent    `json:"agents,omitempty"`
+	TotalTokens      int            `json:"totalTokens,omitempty"`
+	CostMicros       int64          `json:"costMicros,omitempty"`
+	CostSaturated    bool           `json:"costSaturated,omitempty"`
+	AvoidedMicros    int64          `json:"avoidedMicros,omitempty"`
+	AvoidedSaturated bool           `json:"avoidedSaturated,omitempty"`
+	Units            map[string]int `json:"units,omitempty"`
+}
+
+type foldAgent struct {
+	Name  string `json:"name"`
+	Label string `json:"label"`
+}
+
+// MarshalJSON persists the fold's whole state, not just its Summary: resuming needs the title
+// rank and each currency's count, which a summary does not carry.
+func (f *SummaryFold) MarshalJSON() ([]byte, error) {
+	j := foldJSON{
+		EventCount:       f.events,
+		Title:            f.title,
+		TitleRank:        &f.titleRank,
+		TotalTokens:      f.tokens,
+		CostMicros:       f.cost.Micros,
+		CostSaturated:    f.cost.Saturated,
+		AvoidedMicros:    f.avoided.Micros,
+		AvoidedSaturated: f.avoided.Saturated,
+		Units:            f.units,
+	}
+	for _, a := range f.agents {
+		j.Agents = append(j.Agents, foldAgent{Name: a.name, Label: a.label})
+	}
+	return json.Marshal(j)
+}
+
+// UnmarshalJSON restores a fold MarshalJSON wrote; a missing titleRank is rankNone.
+func (f *SummaryFold) UnmarshalJSON(b []byte) error {
+	var j foldJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return err
+	}
+	*f = SummaryFold{
+		events:    j.EventCount,
+		tokens:    j.TotalTokens,
+		cost:      usage.CostSum{Micros: j.CostMicros, Saturated: j.CostSaturated},
+		avoided:   usage.CostSum{Micros: j.AvoidedMicros, Saturated: j.AvoidedSaturated},
+		units:     j.Units,
+		titleRank: rankNone,
+		title:     j.Title,
+	}
+	if j.TitleRank != nil {
+		f.titleRank = *j.TitleRank
+	}
+	for _, a := range j.Agents {
+		f.agents = append(f.agents, sessionAgent{name: a.Name, label: a.Label})
+	}
+	return nil
 }
