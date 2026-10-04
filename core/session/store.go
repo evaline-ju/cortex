@@ -955,6 +955,12 @@ type SessionSummary struct {
 	// is in-memory per-pod. A client that has been watching longer than this proxy has been up may
 	// hold a larger figure legitimately — see pipeline.MergePromptContext, which is how the two combine.
 	PromptContext *pipeline.PromptContext `json:"promptContext,omitempty"`
+
+	// Resident is false on a row the session archive served because the store no longer holds
+	// the session (GET /v1/sessions?archived=true), and absent otherwise. A POINTER because
+	// omitempty on a bool drops exactly the false the wire needs; absent then means "resident",
+	// so a client reading a proxy that predates the archive sees every row as it always did.
+	Resident *bool `json:"resident,omitempty"`
 }
 
 // sessionAgent is one known coding agent's first label in a session.

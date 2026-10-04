@@ -24,6 +24,7 @@ import (
 	"github.com/rossoctl/cortex/core/pipeline"
 	"github.com/rossoctl/cortex/core/redact"
 	"github.com/rossoctl/cortex/core/session"
+	"github.com/rossoctl/cortex/core/session/archive"
 )
 
 // defaultHeartbeatInterval is how often the SSE stream sends a keep-alive
@@ -56,6 +57,9 @@ type Server struct {
 	// one — handleUsage degrades to the ring's maximum rather than erroring, so an
 	// agentop cost view shows what is available there instead of failing.
 	ledger *ledger.Writer
+	// archive serves history the store no longer holds. nil — every deployment but a laptop
+	// with the archive on — leaves every endpoint exactly as it was. See archive.go.
+	archive *archive.Archive
 	// loggedDropped is the highest writer-drop total this server has already logged, so the write-side
 	// warning fires on a CHANGE rather than on every request. See the usage handler: the drop count is
 	// process-cumulative, so logging it per read turned one lost row into a warning on every poll for
@@ -143,6 +147,13 @@ func WithCostLedger(l *ledger.Writer) Option {
 	return func(s *Server) { s.ledger = l }
 }
 
+// WithArchive lets the session API serve history from the session archive: pages read on past
+// the store's resident events, a single event can be found on disk, and ?archived=true lists
+// sessions the store no longer holds. nil is today's behaviour exactly.
+func WithArchive(a *archive.Archive) Option {
+	return func(s *Server) { s.archive = a }
+}
+
 // WithClock replaces the clock /v1/usage resolves its symbolic windows against. No
 // production caller: it exists for the README demo, which pins the ledger, the aggregator
 // and this server to one shifted clock so its spend figures do not depend on what day the
@@ -221,7 +232,8 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.server.Shutdown(
 // HTML to be consistent with.
 const indexBody = `Cortex / AuthBridge Session API
 
-  GET /v1/sessions        list active sessions
+  GET /v1/sessions        list active sessions (?archived=true adds the session
+                          archive's sessions no longer in memory)
   GET /v1/sessions/{id}   recent events (?limit=N max 2000, ?before=<seq>,
                           ?view=summary drops message bodies, ~163x smaller)
   GET /v1/sessions/{id}/events/{seq}
@@ -351,11 +363,16 @@ func describePipeline(h *pipeline.Holder, direction string) []pipelinePluginView
 	return out
 }
 
-func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	sessions, usage := s.store.ListSessions(), (*pipeline.ArchiveUsage)(nil)
+	if s.archive != nil && r.URL.Query().Get("archived") == "true" {
+		sessions, usage = s.withArchivedRows(sessions)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(struct {
 		Sessions []session.SessionSummary `json:"sessions"`
-	}{Sessions: s.store.ListSessions()}); err != nil {
+		Archive  *pipeline.ArchiveUsage   `json:"archive,omitempty"`
+	}{Sessions: sessions, Archive: usage}); err != nil {
 		slog.Debug("sessionapi: list encode failed", "error", err)
 	}
 }
@@ -425,7 +442,11 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	// ViewPage with before == 0 is ViewTail, so one call covers both the plain tail
 	// request and a paging one — see Store.ViewPage.
-	view := s.store.ViewPage(id, eventBefore(r), eventLimit(r))
+	before, limit := eventBefore(r), eventLimit(r)
+	view := s.store.ViewPage(id, before, limit)
+	if s.archive != nil {
+		view = s.withArchivedEvents(id, before, limit, view)
+	}
 	if view == nil {
 		http.NotFound(w, r)
 		return
@@ -482,13 +503,24 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	view := s.store.ViewPage(id, seq+1, 1)
-	if view == nil || len(view.Events) != 1 || view.Events[0].Seq != seq {
+	var event *pipeline.SessionEvent
+	if view := s.store.ViewPage(id, seq+1, 1); view != nil && len(view.Events) == 1 && view.Events[0].Seq == seq {
+		event = &view.Events[0]
+	} else if s.archive != nil {
+		// Not resident: the archive may still hold it. Event answers only for that exact seq,
+		// so the rule above — never a neighbour in its place — holds on disk too.
+		if e, ok, err := s.archive.Event(id, seq); err == nil && ok {
+			event = e
+		} else if err != nil {
+			slog.Debug("sessionapi: archive event read failed", "error", err, "sessionID", id, "seq", seq)
+		}
+	}
+	if event == nil {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(&view.Events[0]); err != nil {
+	if err := json.NewEncoder(w).Encode(event); err != nil {
 		slog.Debug("sessionapi: event encode failed", "error", err, "sessionID", id, "seq", seq)
 	}
 }

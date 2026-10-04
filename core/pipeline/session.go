@@ -657,3 +657,21 @@ func (v *SessionView) LastError() *SessionEvent {
 	}
 	return nil
 }
+
+// ArchiveUsage is the session archive's size, bounds and losses, as `GET /v1/sessions?archived=true`
+// reports them beside the sessions it lists.
+//
+// HERE RATHER THAN IN core/session/archive so a client decodes it without linking the archive's
+// zstd encoder: agentop reads this and nothing else of the archive.
+type ArchiveUsage struct {
+	Bytes         int64 `json:"bytes"`
+	MaxBytes      int64 `json:"maxBytes"`
+	RetentionDays int   `json:"retentionDays"`
+	// DroppedEvents, WriteErrors and DroppedRenames are what never reached disk, process-wide.
+	// Nonzero means the history shown has gaps; see core/session/archive.Stats.
+	DroppedEvents  uint64 `json:"droppedEvents,omitempty"`
+	WriteErrors    uint64 `json:"writeErrors,omitempty"`
+	DroppedRenames uint64 `json:"droppedRenames,omitempty"`
+	// Paused is true after the disk filled, until the archive's next retention pass.
+	Paused bool `json:"paused,omitempty"`
+}
