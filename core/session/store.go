@@ -544,39 +544,10 @@ func (s *Store) appendLocked(sessionID string, b *Bucket, event pipeline.Session
 	// entry.Title, and entry.context just above for why sourcing the candidate from the stored slice
 	// is what breaks that property.
 	//
-	// THE SECOND DISJUNCT IS THE WHOLE RULE, not a tie-break detail: without it a re-rename is
-	// silently ignored, because the equal rank never beats the one already held. Widening it to a
-	// plain `<=` instead is the opposite failure — the title then shifts on every turn, since each
-	// new prose message equals the rank of the last.
-	//
-	// THE BLANK SCREEN IS REDUNDANT AND NO TEST CAN SHOW IT, which is worth saying rather than
-	// leaving a surviving mutant for the next reader to re-derive. titleCandidate returns "" only
-	// ever paired with rankNone (every blank-folding shape — empty, whitespace, reminder-only, an
-	// empty <user_query> — comes back as rankNone), and a fresh entry initialises to rankNone, so
-	// `rankNone < rankNone` is false and the rank test alone rejects it. Kept as a local statement
-	// of what the fold requires: a future titleCandidate returning a blank at a real rank fails
-	// here instead of storing one.
-	if titleText != "" && (titleRank < sess.titleRank || (titleRank == sess.titleRank && titleRank == rankRename)) {
-		// sanitizeTitle STAYS UNDER THE LOCK, and what makes that safe is that it is O(maxTitleLen)
-		// rather than O(candidate): it stops at 80 emitted runes, so a 190KB candidate costs 328ns,
-		// not 916µs.
-		//
-		// A CALL-COUNTING ARGUMENT IS NOT ENOUGH HERE, which is why the cap and not the count is what
-		// this rests on. "At most once per rank improvement" bounds the fold at three times per
-		// session under first-wins — except for /rename, which the second disjunct lets win
-		// repeatedly and which the client controls. Flooding /rename with a 190KB argument paid
-		// ~938µs of write-lock hold per append, unbounded in repetitions; measured on that flood with
-		// a concurrent reader, mean ListSessions latency is 205µs uncapped against 16.4µs capped.
-		//
-		// Hoisting it above the lock would still be wrong, just cheaply so: it would fold every
-		// event's candidate including the ones about to be discarded on rank.
-		if t := sanitizeTitle(titleText); t != "" {
-			sess.Title, sess.titleRank = t, titleRank
-		}
-	}
-	if agentName != "" && sessionID != DefaultSessionID && !strings.HasPrefix(sessionID, PendingPrefix) && sess.agentLabel(agentName) == "" {
-		sess.agents = append(sess.agents, sessionAgent{name: agentName, label: usage.AgentLabel(event.Client)})
-	}
+	// The rule itself, and why its sanitizeTitle is safe under this lock, are applyTitle's: it is
+	// shared with SummaryFold so an archived session is titled exactly as a resident one.
+	sess.titleRank, sess.Title = applyTitle(sess.titleRank, sess.Title, titleRank, titleText)
+	sess.agents = applyAgent(sess.agents, sessionID, agentName, event.Client)
 	if b == nil {
 		sess.UpdatedAt = now
 		s.activeID = sessionID
@@ -989,12 +960,7 @@ type sessionAgent struct{ name, label string }
 
 // agentLabel is the first label the agent named name sent into this session, or "".
 func (e *entry) agentLabel(name string) string {
-	for _, a := range e.agents {
-		if a.name == name {
-			return a.label
-		}
-	}
-	return ""
+	return agentLabelIn(e.agents, name)
 }
 
 // agentOfLocked is SessionSummary.Agent: the label of the owner that claimed the session, else
