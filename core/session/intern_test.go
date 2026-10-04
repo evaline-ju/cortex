@@ -130,7 +130,7 @@ func TestAppend_ContentlessEventDoesNotBreakSharing(t *testing.T) {
 //
 // The other door into the same bug. The contentless-event guard tests for a missing
 // extension, but "no extension" and "nothing interned" are different things: an inbound A2A
-// intent whose parts are all shorter than internMinLen — "continue", "yes", "do it", the
+// intent whose parts are all shorter than InternMinLen — "continue", "yes", "do it", the
 // most ordinary messages in an agent conversation — has a non-nil extension, produces an
 // empty table, and rolling that forward would clear the conversation just as a tunnel-open
 // did. What the code keys on is therefore whether anything was interned.
@@ -140,7 +140,7 @@ func TestAppend_ShortContentEventDoesNotBreakSharing(t *testing.T) {
 
 	const turns = 25
 	for i := 1; i <= turns; i++ {
-		// A short user intent between the turns. Well under internMinLen (64), so it
+		// A short user intent between the turns. Well under InternMinLen (64), so it
 		// interns nothing at all, and it carries a REAL extension.
 		s.Append("s1", pipeline.SessionEvent{
 			Direction: pipeline.Inbound,
@@ -223,7 +223,7 @@ func TestAppend_DoesNotShareAcrossSessions(t *testing.T) {
 func TestIntern_SkipsShortStrings(t *testing.T) {
 	var in Interner
 	next := map[string]string{}
-	short := strings.Repeat("x", internMinLen-1)
+	short := strings.Repeat("x", InternMinLen-1)
 	if got := in.intern(short, next); backing(got) != backing(short) {
 		t.Error("a short string was interned")
 	}
@@ -231,7 +231,7 @@ func TestIntern_SkipsShortStrings(t *testing.T) {
 		t.Errorf("table grew by %d for a short string", len(next))
 	}
 
-	long := strings.Repeat("y", internMinLen)
+	long := strings.Repeat("y", InternMinLen)
 	in.intern(long, next)
 	if len(next) != 1 {
 		t.Errorf("table holds %d entries after one long string, want 1", len(next))
@@ -383,7 +383,7 @@ func manifest() []pipeline.InferenceTool {
 		{
 			Name:        "get_weather",
 			Description: "Look up the forecast for a place. " + strings.Repeat("schema detail ", 8),
-			// Past internMinLen (64), or intern returns it untouched and a test asserting
+			// Past InternMinLen (64), or intern returns it untouched and a test asserting
 			// that schemas are shared would pass without any sharing having happened.
 			Parameters: pipeline.RawJSON(`{"type":"object","properties":{"city":{"type":"string","description":"` +
 				strings.Repeat("where to look ", 6) + `"}}}`),
@@ -452,9 +452,9 @@ func TestAppend_SharesRepeatedToolSchemas(t *testing.T) {
 	v := s.View("s1")
 	for tool := range manifest() {
 		// The fixture has to be long enough to intern at all, or this passes vacuously.
-		if got := len(v.Events[0].Inference.Tools[tool].Parameters); got < internMinLen {
-			t.Fatalf("tool %d's schema is %d bytes, under internMinLen %d — it cannot be interned",
-				tool, got, internMinLen)
+		if got := len(v.Events[0].Inference.Tools[tool].Parameters); got < InternMinLen {
+			t.Fatalf("tool %d's schema is %d bytes, under InternMinLen %d — it cannot be interned",
+				tool, got, InternMinLen)
 		}
 		first := backing(string(v.Events[0].Inference.Tools[tool].Parameters))
 		for i := range v.Events {
