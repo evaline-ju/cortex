@@ -647,3 +647,15 @@ func TestReloader_AnAcceptedReloadCommitsOnce(t *testing.T) {
 		t.Errorf("hook saw Mode %q, want the config that took effect", gotMode)
 	}
 }
+
+// session.archive needs a restart like the rest of `session`: the archive is constructed once
+// in main and registered on the store, and nothing re-reads it. validateReloadable already
+// refuses any change under Session; this pins that the archive's block is inside that net.
+func TestValidateReloadable_RefusesASessionArchiveEdit(t *testing.T) {
+	on, off := true, false
+	active := &config.Config{Session: config.SessionConfig{Archive: &config.SessionArchiveConfig{Enabled: &on}}}
+	next := &config.Config{Session: config.SessionConfig{Archive: &config.SessionArchiveConfig{Enabled: &off}}}
+	if err := validateReloadable(active, next); err == nil {
+		t.Fatal("a live edit of session.archive was accepted")
+	}
+}

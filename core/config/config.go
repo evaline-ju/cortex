@@ -477,6 +477,10 @@ type SessionConfig struct {
 	// host. "on" and "off" force it. Needs id_headers non-empty, like client_affinity. Only
 	// the cortex binary acts on it. Not hot-reloadable. See session.Store.SessionForProcess.
 	ProcessAttribution string `yaml:"process_attribution" json:"process_attribution"`
+
+	// Archive is the session archive, which persists sessions to disk on a laptop install. Nil
+	// means the binary's default. See SessionArchiveConfig.
+	Archive *SessionArchiveConfig `yaml:"archive,omitempty" json:"archive,omitempty"`
 }
 
 // ClientAffinityEnabled reports whether header-less requests are filed by coding agent.
@@ -1025,6 +1029,11 @@ func Load(path string) (*Config, error) {
 
 	if cfg.CostLedger != nil {
 		if err := cfg.CostLedger.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.Session.Archive != nil {
+		if err := cfg.Session.Archive.Validate(); err != nil {
 			return nil, err
 		}
 	}
