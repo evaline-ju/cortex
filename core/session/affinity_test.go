@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -159,7 +160,10 @@ type rekeyRecorder struct{ rekeyed [][2]string }
 func (r *rekeyRecorder) Record(string, *pipeline.SessionEvent) {}
 func (r *rekeyRecorder) Rekeyed(o, n string)                   { r.rekeyed = append(r.rekeyed, [2]string{o, n}) }
 
-func TestAdopt_NotifiesRekeyersAndRekeyStillDoesNot(t *testing.T) {
+// Every rename the store makes is announced to the recorders keeping per-session state, the
+// A2A merge included: a Recorder that misses one keeps figures, or history, under an id
+// nothing is filed under any more.
+func TestRekeyAndAdopt_BothNotifyRekeyers(t *testing.T) {
 	s := New(0, 0, 0)
 	defer s.Close()
 	r := &rekeyRecorder{}
@@ -167,14 +171,29 @@ func TestAdopt_NotifiesRekeyersAndRekeyStillDoesNot(t *testing.T) {
 
 	s.Append(DefaultSessionID, ev())
 	s.Rekey(DefaultSessionID, "ctx-1")
-	if len(r.rekeyed) != 0 {
-		t.Fatalf("Rekey notified %v; the A2A merge must keep today's behaviour", r.rekeyed)
-	}
-
 	s.Append("pending:bob-shell", ev())
 	s.Claim("task-1", "bob-shell")
-	if len(r.rekeyed) != 1 || r.rekeyed[0] != [2]string{"pending:bob-shell", "task-1"} {
-		t.Fatalf("Rekeyed calls = %v, want exactly [pending:bob-shell task-1]", r.rekeyed)
+
+	want := [][2]string{{DefaultSessionID, "ctx-1"}, {"pending:bob-shell", "task-1"}}
+	if !slices.Equal(r.rekeyed, want) {
+		t.Fatalf("Rekeyed calls = %v, want %v", r.rekeyed, want)
+	}
+}
+
+// A refused rename changed nothing, so it must announce nothing.
+func TestRekey_ARefusedRenameNotifiesNoOne(t *testing.T) {
+	s := New(0, 0, 0)
+	defer s.Close()
+	r := &rekeyRecorder{}
+	s.AddRecorder(r)
+
+	s.Append(DefaultSessionID, ev())
+	s.Append("ctx-1", ev())
+	s.Rekey(DefaultSessionID, "ctx-1") // target exists: refused
+	s.Rekey("absent", "ctx-2")         // source absent: refused
+
+	if len(r.rekeyed) != 0 {
+		t.Fatalf("Rekeyed calls = %v, want none", r.rekeyed)
 	}
 }
 

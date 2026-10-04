@@ -1240,6 +1240,15 @@ func (s *Store) rekeyLocked(oldID, newID string) bool {
 		delete(s.owners, oldID)
 		s.owners[newID] = owner
 	}
+	// Every rename tells the recorders that keep per-session state, so that state follows the
+	// session: Adopt's pending bucket → session and Rekey's A2A default → contextId alike. Here
+	// rather than in adoptLocked because both reach this, and only a rename that happened may
+	// be announced.
+	for _, r := range s.recorders {
+		if rk, ok := r.(Rekeyer); ok {
+			rk.Rekeyed(oldID, newID)
+		}
+	}
 	return true
 }
 
