@@ -1,0 +1,121 @@
+package sessionapi
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// clearWait bounds how long DELETE /v1/sessions waits for the archive to empty its directory.
+// The memory half is done before the wait starts, so a timeout costs only the report.
+const clearWait = 10 * time.Second
+
+// clearResponse is DELETE /v1/sessions' answer: what went from memory, and what went from disk.
+type clearResponse struct {
+	Sessions         int    `json:"sessions"`
+	ArchivedSessions int    `json:"archivedSessions"`
+	Bytes            int64  `json:"bytes"`
+	ArchiveError     string `json:"archiveError,omitempty"`
+}
+
+// WithClearAllowed lets DELETE /v1/sessions clear every session. The binary passes
+// listener.bind_loopback_only, which a laptop install sets: a proxy reachable only from its own
+// machine has one user, and history is theirs to erase. Without it the endpoint refuses.
+func WithClearAllowed(allowed bool) Option {
+	return func(s *Server) { s.allowClear = allowed }
+}
+
+// handleClear answers DELETE /v1/sessions: every session goes from memory and, where the archive
+// runs, from disk. The cost ledger stays — it holds spend totals and no content.
+//
+// THE FIRST REQUEST ON THIS API THAT CHANGES ANYTHING, and the API is unauthenticated, so what it
+// guards against is a browser: a page the user visits that targets the loopback port, directly
+// or through a DNS name rebound to 127.0.0.1. Four guards, each closing one route:
+//
+//  1. DELETE only, by the route pattern. A cross-site DELETE needs a CORS preflight, which this
+//     server never approves; a simple cross-site POST needs none, which is why this is not POST.
+//  2. The Host must be a loopback name. A rebound name reaches the port with its own name in Host.
+//  3. No Origin header. Browsers send one, on every cross-origin request and every DELETE;
+//     agentop and curl do not.
+//  4. Only when allowed, which is only on a loopback-only laptop install. No new setting: a
+//     cluster sidecar's API is reached through port-forwards and shared by whoever can reach it.
+func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
+	if reason := s.clearRefusal(r); reason != "" {
+		s.logClearRefusal(reason, r.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(struct {
+			Error string `json:"error"`
+		}{Error: reason})
+		return
+	}
+	body := clearResponse{Sessions: s.store.Clear()}
+	status := http.StatusOK
+	if s.archive != nil {
+		res, err := s.archive.AwaitClear(clearWait)
+		body.ArchivedSessions, body.Bytes = res.Sessions, res.Bytes
+		if err != nil {
+			body.ArchiveError = err.Error()
+			status = http.StatusInternalServerError
+		}
+	}
+	slog.Warn("sessionapi: cleared every session", "sessions", body.Sessions,
+		"archivedSessions", body.ArchivedSessions, "bytes", body.Bytes, "archiveError", body.ArchiveError,
+		"remote", r.RemoteAddr)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		slog.Debug("sessionapi: clear encode failed", "error", err)
+	}
+}
+
+// clearRefusalLogEvery bounds how often a refused clear is logged.
+const clearRefusalLogEvery = time.Minute
+
+// logClearRefusal logs a refused clear at most once per clearRefusalLogEvery, with the running
+// count. Every refusal is worth knowing about — something on this machine tried — but not one line
+// each: a page doing DNS rebinding reaches this endpoint same-origin, so no preflight stops it from
+// looping, and a WARN per request would let any web page grow ~/.cortex/proxy.log without bound.
+func (s *Server) logClearRefusal(reason, remote string) {
+	n := s.clearRefusals.Add(1)
+	now := time.Now().UnixNano()
+	last := s.lastRefusalLog.Load()
+	if (last != 0 && now-last < int64(clearRefusalLogEvery)) || !s.lastRefusalLog.CompareAndSwap(last, now) {
+		return
+	}
+	slog.Warn("sessionapi: refused to clear every session", "reason", reason, "remote", remote, "refusedTotal", n)
+}
+
+// clearRefusal is why r may not clear, or "" when it may. The method is already DELETE: the
+// route pattern answers anything else with 405.
+func (s *Server) clearRefusal(r *http.Request) string {
+	switch {
+	case !loopbackHost(r.Host):
+		return "clearing is accepted only for a loopback Host (localhost, 127.0.0.1 or [::1])"
+	case r.Header.Get("Origin") != "":
+		return "clearing is refused from a browser: the request carries an Origin header"
+	case !s.allowClear:
+		return "this Cortex does not accept a clear: it is not bound to loopback only (listener.bind_loopback_only)"
+	}
+	return ""
+}
+
+// loopbackHost reports whether a Host header names this machine's loopback: exactly localhost,
+// 127.0.0.1 or ::1, with or without a port. Not 127.0.0.0/8 as a whole and not anything ending
+// in localhost — the point is to refuse a name an attacker controls, and a short list cannot be
+// matched by one.
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
