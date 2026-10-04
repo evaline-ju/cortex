@@ -16,7 +16,7 @@ only the repo-level pieces.
 | Understand the pipeline internals and hot-reload | [`docs/framework-architecture.md`](../docs/framework-architecture.md) |
 | Run a demo | [`demos/README.md`](../demos/README.md) |
 | Use the `agentop` TUI | [`cmd/agentop/README.md`](../cmd/agentop/README.md) |
-| Write the in-memory session store to files | [`session-dump.md`](session-dump.md) |
+| Export sessions to files | [`session-dump.md`](session-dump.md) |
 
 ## Configuration reference
 
@@ -30,6 +30,7 @@ subsystem each one drives rather than in one file, so this table is the index.
 | `pricing:` | Model rates, gateway discounts, resolution order | [`pricing.md`](pricing.md) |
 | `cost_ledger:` | The durable per-minute cost ledger | [`laptop-service.md`](laptop-service.md) |
 | `session:` | Session store TTL, event/session caps, id headers | [`framework-architecture.md`](framework-architecture.md) |
+| `session.archive:` | The laptop's on-disk session history, its bounds, and clearing it | [`laptop-service.md`](laptop-service.md#session-history-is-kept-in-cortexsessions) |
 | `stats:` | The diagnostic listener (`/stats`, `/config`, `/reload/status`, `/pricing/table`), default `:9093` | [`framework-architecture.md`](framework-architecture.md) |
 | `spiffe:` | SVID sourcing over the Workload API and the `/opt` file mirror | [`architecture.md`](architecture.md) |
 | `listener:` | Listener addresses, `skip_hosts`, interception mode | [`framework-architecture.md`](framework-architecture.md) (reload rules), [`kubernetes.md`](kubernetes.md) (`bind_loopback_only`), and `CLAUDE.md` for `skip_hosts` |

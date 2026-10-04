@@ -765,8 +765,9 @@ agentop is for, and the other three are surfaces you visit and leave.
   opens an archived row like any other; its events are read back from disk a page
   at a time — the latest on Enter, older ones with `o`, as for a resident
   session — so a long one costs no more to open than a short one.
-  A proxy without an archive — any cluster sidecar, and a laptop that has not
-  turned it on — answers `H` with the live list and a one-line note saying so.
+  A proxy without an archive — any cluster sidecar, and a laptop that has turned
+  it off — answers `H` with the live list and a one-line note saying so. `X`
+  erases all of it, after asking; see the keybindings below.
 
   **Every figure in this table is a per-session total**, summed over that
   session's whole history rather than over a clock window — which is why its
@@ -1258,6 +1259,7 @@ Layered on top of all of them:
 | `Esc` | sessions | back to the agents picker when the list was reached by picking an agent there; otherwise (picker mode) tear down port-forward and back to pods. Sessions and the agents picker above it are the only panes that tear down — every key-opened surface returns to its caller instead |
 | `/` | sessions, events | filter (substring match; Enter commits and saves, Esc cancels the edit and saves nothing; clear the box and press Enter to remove a saved filter) |
 | `H` | sessions | toggle history: also list the sessions the proxy's session archive holds and memory no longer does, marked `archived` in `UPDATED`. Capital because `h` backs out. Ahead of `[u]` in the footer so an 80-column cut drops it before the cost keys |
+| `X` | sessions | clear all history: every session this Cortex holds, in memory and on disk. Asks first, with the count and the size on disk; `y` erases, `n`/`esc` keeps. The cost ledger is kept. Refused — with the proxy's reason — anywhere but a loopback-only laptop install. Not in the footer, like `A`: a destructive key should not be advertised on the always-visible line |
 | `s` | events | toggle skip-row visibility (default: hidden; the events footer shows the hidden count) |
 | `c` | events | open the column picker (`↑↓`/`jk` move, `space`/`x` toggle, `s` sort, `r` reset, `Esc`/`Enter`/`c` close); the selection and sort are saved on close |
 | `s` | column picker | sort by the column under the cursor: descending → ascending → chronological. Pressing it on a different column starts that column descending. `#` is not sortable — its order already *is* chronological |

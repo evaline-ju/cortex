@@ -188,14 +188,15 @@ Set `session.ttl` (e.g. `30m`) if you would rather raw prompts not sit in memory
 indefinitely.
 
 The store is in memory only, so a restart clears it regardless. Both `session.*` limits
-need a restart to change — they are not hot-reloaded. Cost totals survive a restart, and so
-do the sessions themselves if you turn on the session archive; see below for both.
+need a restart to change — they are not hot-reloaded. Cost totals survive a restart, and on a
+local install so do the sessions themselves, in the session archive; see below for both.
 
 ## Cost history is written to `~/.cortex/cost`
 
 **A local install keeps a cost ledger on disk, on by default.** Sessions themselves —
-prompts, completions, tool arguments — stay in memory and die with the process, unless you
-turn on the [session archive](#session-history-can-be-kept-in-cortexsessions). Per-minute
+prompts, completions, tool arguments — are kept by the [session
+archive](#session-history-is-kept-in-cortexsessions), a separate store with its own retention
+and its own way to clear it. Per-minute
 cost totals do not: they are appended to `~/.cortex/cost/YYYY-MM-DD.jsonl`, one file per
 local day, **kept for 31 days** — the length of the longest month, so `window=month` can be
 answered in full on the 31st.
@@ -295,21 +296,13 @@ Two other knobs, same restart rule:
 | `cost_ledger.dir` | `~/.cortex/cost` | Must be an absolute path. A relative one is refused, because it would resolve against whatever directory the proxy started from |
 | `cost_ledger.retention_days` | 31 | The longest month, so `window=month` is answerable in full on the 31st; a shorter value makes that total a partial one and it is marked as such. Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A retention shorter than the window is disclosed rather than silent — `DaysOutsideRetention` counts the days asked for beyond the setting, the band marks the total as a floor and `agentop cost` prints a coverage line. The floor of 9 is exactly `window=7d`'s worst case, so a legal setting can never answer *that* window short; a `month` asked of a 9-day ledger can |
 
-## Session history can be kept in `~/.cortex/sessions`
+## Session history is kept in `~/.cortex/sessions`
 
-**Off by default in this release; opt in with:**
-
-```yaml
-session:
-  archive:
-    enabled: true
-```
-
-in `~/.cortex/config.yaml`, then `agentop service restart`. From then on every event the
-session store records is also written to disk, so a session outlives a restart and the
-store's own eviction (`session.max_sessions`, a `session.ttl`). In `agentop`, `H` on the
-sessions pane lists the sessions only the archive still holds, marked `archived`, and Enter
-opens one like any other.
+**A local install keeps every session on disk, on by default.** Each event the session store
+records is also written to `~/.cortex/sessions`, so a session outlives a restart and the store's
+own eviction (`session.max_sessions`, a `session.ttl`). In `agentop`, `H` on the sessions pane
+lists the sessions only the archive still holds, marked `archived`, and Enter opens one like any
+other.
 
 **Unlike the cost ledger, this is the content.** Prompts, completions, tool arguments and
 tool results — everything the session API serves — sit in
@@ -319,9 +312,10 @@ the archive holds in its startup log line, so `grep 'session archive' ~/.cortex/
 shows which state you are in.
 
 **It runs only on a local install** — a config inside `~/.cortex`, which is what `agentop
-service install` and `--local` produce. Anywhere else `enabled: true` is refused with a WARN
-naming the reason, and there is deliberately no `dir` setting: raw prompts on a cluster's
-volume are a decision of their own, and a cluster should not reach it by mounting a path.
+service install` and `--local` produce. Anywhere else it is off, and `enabled: true` is refused
+with a WARN naming the reason. There is deliberately no `dir` setting: raw prompts on a
+cluster's volume are a decision of their own, and a cluster should not reach it by mounting a
+path.
 
 **How big it gets.** Each session's events are written as zstd-compressed segments that store
 a repeated message once rather than once per turn — the same saving the in-memory store makes,
@@ -331,7 +325,7 @@ first by the time they were last written:
 
 | Setting | Default | Notes |
 |---|---|---|
-| `session.archive.enabled` | off | `false` always wins |
+| `session.archive.enabled` | on for a local install | `false` always wins |
 | `session.archive.retention_days` | 30 | how long a segment is kept after its last write; at most 3650 |
 | `session.archive.max_bytes` | 2 GiB | the archive's total size; past it, the oldest segments go first |
 
@@ -345,10 +339,38 @@ on the disk — and the cost of that is that a burst the writer cannot keep up w
 `archive` (`bytes`, `maxBytes`, `retentionDays`, and `droppedEvents`, `writeErrors`,
 `droppedRenames`, `paused` when any is nonzero); nonzero means what you are reading has gaps.
 
-**Same restart rule as the ledger.** The archive is opened once at startup, and a live edit
-of anything under `session` is refused rather than half-applied. To stop it, set
-`enabled: false` and restart; that leaves what is on disk, and `rm -rf ~/.cortex/sessions`
-with the proxy stopped removes it.
+### Clearing it
+
+A restart used to be a reset; with history on disk it is not, so clearing is one action of its
+own. **`X` on agentop's sessions pane** asks first — *Erase all N sessions from this Cortex, in
+memory and on disk (S)?* — and on `y` erases every session, from memory and from disk, at once.
+**The cost ledger is kept**: it holds spend totals and no content, so `today`, `7d` and `month`
+read the same afterwards. From a script:
+
+```sh
+curl -X DELETE http://localhost:47601/v1/sessions
+# {"sessions":12,"archivedSessions":340,"bytes":81234567}
+```
+
+The clear is refused — a 403 saying why — unless the request names a loopback host
+(`localhost`, `127.0.0.1` or `[::1]`), carries no `Origin` header, and reaches a proxy bound to
+loopback only, as a local install is. Those are the checks that keep a web page you visit from
+erasing your history through the unauthenticated API. If the disk half fails, memory is still
+cleared and the answer is a 500 with `archiveError` saying what happened on disk — in the usual
+case, that the history could not be moved aside and is all still there.
+
+**To stop it**, set this in `~/.cortex/config.yaml` and restart (`agentop service restart`) —
+the archive is opened once at startup, and a live edit of anything under `session` is refused
+rather than half-applied:
+
+```yaml
+session:
+  archive:
+    enabled: false
+```
+
+That stops new writes and leaves what is on disk; clear first with `X` if you want it gone, or
+`rm -rf ~/.cortex/sessions` with the proxy stopped.
 
 ## `agentop: command not found`
 
