@@ -17,6 +17,9 @@ import (
 // lives here because usage cannot import session.
 var _ Rekeyer = (*usage.Aggregator)(nil)
 
+// The same for Clear: a drift would leave per-session figures standing after a clear.
+var _ Clearer = (*usage.Aggregator)(nil)
+
 func ev() pipeline.SessionEvent {
 	return pipeline.SessionEvent{At: time.Now(), Direction: pipeline.Outbound, Phase: pipeline.SessionRequest}
 }
