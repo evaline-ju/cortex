@@ -45,6 +45,7 @@ import (
 	"github.com/rossoctl/cortex/core/plugins"
 	"github.com/rossoctl/cortex/core/reloader"
 	"github.com/rossoctl/cortex/core/session"
+	"github.com/rossoctl/cortex/core/session/archive"
 	"github.com/rossoctl/cortex/core/sessionapi"
 	"github.com/rossoctl/cortex/core/spiffe"
 	"github.com/rossoctl/cortex/core/tlsbridge"
@@ -274,6 +275,9 @@ var closeLedgerOnFatal func()
 func fatalf(format string, args ...any) {
 	if closeLedgerOnFatal != nil {
 		closeLedgerOnFatal()
+	}
+	if closeArchiveOnFatal != nil {
+		closeArchiveOnFatal()
 	}
 	log.Fatalf(format, args...)
 }
@@ -564,6 +568,7 @@ func main() {
 	var sessions *session.Store
 	var usageAgg *usage.Aggregator
 	var costLedger *ledger.Writer
+	var sessArchive *archive.Archive
 	if cfg.Session.SessionEnabled() {
 		// Store parameters come from config.SessionConfig.Limits, which is where the
 		// defaults and the reasoning behind them live — one home for what used to be
@@ -668,6 +673,10 @@ func main() {
 				"reason", whyDefault,
 				"fix", "set cost_ledger.dir to a path on a mounted volume, or cost_ledger.enabled: true if this filesystem does persist")
 		}
+
+		// The session archive is the store's third Recorder: it persists every event so
+		// sessions survive a restart and the store's eviction. See core/session/archive.
+		sessArchive = openSessionArchive(cfg, *configPath, sessions)
 
 		// Through lim.LogAttrs, not a hand-rolled attribute list. #999 gave the session
 		// store's limits one home, and the local "ttl=0s would read like a
@@ -1036,6 +1045,15 @@ func main() {
 	if costLedger != nil {
 		if err := costLedger.Close(); err != nil {
 			slog.Warn("cost ledger: final flush failed; the last minute of cost is lost", "error", err)
+		}
+	}
+
+	// The session archive after the ledger and for the same reason: after everything that can
+	// still append, before the store goes. Close drains its queue and finishes every frame, so an
+	// orderly stop loses nothing; a SIGKILL loses at most the last second.
+	if sessArchive != nil {
+		if err := sessArchive.Close(); err != nil {
+			slog.Warn("session archive: final flush failed", "error", err)
 		}
 	}
 
