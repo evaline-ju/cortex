@@ -42,12 +42,16 @@ import (
 // MCP events across every live session inspected), so there is no evidence yet about what
 // they cost, and the same field-type change is available to them if there ever is.
 const (
-	// internMinLen is the shortest string worth a map lookup.
+	// InternMinLen is the shortest string worth a map lookup.
 	//
 	// A role ("user"), a finish reason ("end_turn") and an empty completion all repeat
 	// constantly and all cost less to duplicate than to hash. The savings live in
 	// message bodies, which are orders of magnitude past this.
-	internMinLen = 64
+	//
+	// Exported for the session archive, which deduplicates the same five fields on disk
+	// and must agree with the store on what is worth sharing — one threshold, not two
+	// numbers kept equal by hand.
+	InternMinLen = 64
 )
 
 // Interner maps a string to the one copy the session keeps of it.
@@ -91,7 +95,7 @@ type Interner struct {
 // the canonical, a 0.15MB difference and not the multiplier it first looks like. Worth
 // fixing because it is free, and worth measuring before claiming more than that.
 func (in *Interner) intern(s string, next map[string]string) string {
-	if len(s) < internMinLen {
+	if len(s) < InternMinLen {
 		return s
 	}
 	canon, ok := in.prev[s]
@@ -144,7 +148,7 @@ func (in *Interner) InternEvent(e *pipeline.SessionEvent) {
 	// This early return is only the cheap path — it skips the map allocation for the third
 	// of events that carry no extension at all. The predicate that actually MATTERS is at
 	// the bottom of this function: "produced nothing to intern", not "had no extension". An
-	// inbound A2A intent whose parts are all shorter than internMinLen — "continue", "yes",
+	// inbound A2A intent whose parts are all shorter than InternMinLen — "continue", "yes",
 	// "do it" — has a non-nil extension, interns nothing, and would roll an empty table
 	// forward exactly as a tunnel-open used to. Same bug, different door.
 	//

@@ -92,7 +92,7 @@ func TestDecodeSessionView_RejectsMalformedInput(t *testing.T) {
 // Asserted on the string's data POINTER, not on equality. Equal strings prove nothing here
 // — the whole question is whether the two events reference one allocation or two.
 func TestDecodeSessionView_SharesRepeatedMessageContent(t *testing.T) {
-	shared := strings.Repeat("the conversation so far ", 8) // past internMinLen (64)
+	shared := strings.Repeat("the conversation so far ", 8) // past InternMinLen (64)
 	event := func(seq int, extra string) string {
 		msgs := fmt.Sprintf(`{"role":"user","content":%q}`, shared)
 		if extra != "" {
