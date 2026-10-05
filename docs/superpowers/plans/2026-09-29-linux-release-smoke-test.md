@@ -19,12 +19,13 @@ Reuses the exact `enable-linger` + wait-for-`/run/user/<uid>/bus` recipe
 
 The actual test logic lives in `scripts/release_smoke_test_linux.sh`, kept
 out of the YAML for the same reason `deploy/proxy-init/test-enforce-redirect.sh`
-is a separate script rather than inline `run:` steps. It always pipes
-`curl | sh` rather than invoking the checked-out `install.sh` as a local
-file — `install.sh`'s own re-exec bootstrap only re-fetches the tagged copy
-of itself (matching the requested `--ref`) when `$0` isn't a readable file,
-which is the exact condition a real `curl | sh` user hits and a local
-invocation would skip.
+is a separate script rather than inline `run:` steps. It downloads
+`install.sh` to a temp file and feeds that in on stdin, rather than invoking
+the checked-out copy as a local file argument — `install.sh`'s own re-exec
+bootstrap only re-fetches the tagged copy of itself (matching the requested
+`--ref`) when `$0` isn't a readable file, which is the condition a real
+`curl | sh` user hits (and a local file invocation would skip) just as much
+as a literal shell pipe does.
 
 **Spec:** none — #957 is its own checklist, not a design doc.
 
@@ -131,6 +132,72 @@ invocation would skip.
       happens: `release-binaries.yaml` PATCHes `main-latest`'s own tag ref to
       the triggering commit on every push to main, and `createdAt` follows
       the commit its tag points at. Corrected the comment accordingly.
+- [x] Fix (follow-up, decided in conversation): dropped `detect_cli` entirely
+      — matches this repo's own clean-break policy for the abctl rename (no
+      alias, no compatibility code) more closely than keeping a one-off
+      fallback for a single already-superseded release. Re-testing `v0.8.0`
+      itself now fails plainly rather than falling back to the pre-rename
+      CLI; accepted, since that case only affects one historical release and
+      the test's "no older release" first-run path isn't affected.
+- [x] Fix (review, round 2 — a separate PR landed `agentop setup`
+      mid-review): `install.sh` was rearchitected (#1203's follow-up) to hand
+      installation off to a new `agentop setup` subcommand instead of doing
+      it directly. Verified before touching anything further: the on-disk
+      layout, `agentop service uninstall`, the SHA-256 "already current"
+      stamp check, and the `enable`+`restart` split from #1203's own fix are
+      all unchanged in substance, just invoked one layer up through
+      `setup`'s step pipeline — none of this script's assertions needed to
+      change because of it, confirmed by reading the new
+      `cmd/agentop/cmd_setup.go`/`setup_step_*.go` directly rather than
+      assuming.
+- [x] Fix (review, round 2): the workflow's checkout pinned
+      `ref: ${{ github.event.workflow_run.head_sha }}` — the release's own
+      commit. This script didn't exist yet at `v0.8.0`/`v0.8.1` (confirmed
+      via the GitHub API: 404 for `scripts/release_smoke_test_linux.sh` at
+      both commits), so re-running an old release's workflow failed before
+      the test even started. Dropped the `ref:` pin — the checkout is only
+      for the test script itself; the release assets and `install.sh` both
+      come over the network regardless of what's checked out.
+- [x] Fix (review, round 2): `--limit 20` on the release lookup capped the
+      candidate pool BEFORE filtering, and date-based "older than TAG" broke
+      across maintenance branches (`release-0.6`/`release-0.7` both exist; a
+      patch tagged later on an older line could resolve to something with a
+      *higher* version number). Replaced the whole lookup: `main-latest`
+      just takes the single newest stable release (`--limit 1`, no date
+      comparison needed); a real `v*` tag now compares by VERSION NUMBER
+      (`sort -V` across up to 200 stable releases, not a 20-release
+      date-ordered cap) rather than by creation date. Verified against the
+      live release list and a simulated maintenance-branch case
+      (`v0.7.1` tagged after `v0.8.1`) that it resolves to `v0.7.0`, not
+      `v0.8.1`.
+- [x] Fix (review, round 2): `assert_healthy` still piped
+      `agentop service status | tee`, losing the command's own exit status
+      under dash — a missing `agentop` (exit 127) would read as "did not
+      report healthy" rather than "command not found". Checked directly now,
+      same pattern already used for `install_cortex`.
+- [x] Fix (review, round 2): uninstall's three checks (printed "Removed",
+      unit file gone, config unchanged) can all pass even if the proxy never
+      actually stopped — `removeService` only logs a failed
+      `systemctl --user disable --now`, then deletes the unit file and
+      prints success regardless. Added a direct
+      `systemctl --user is-active --quiet cortex.service` check.
+- [x] Fix (review, round 2): a `main-latest` run pinned the expected
+      *version string* to the triggering commit, but not the *installer
+      script* used to install it — that was always fetched from
+      `raw.githubusercontent.com/.../main/...`, cached up to 5 minutes. A
+      commit that changes the installer and the binaries together (as the
+      rename PR did) has a narrow window to be tested with a mismatched
+      pairing. `install_cortex` now fetches the installer from a SHA-pinned
+      URL whenever installing `main-latest`.
+- [x] Fix (review, round 2): a couple of this file's own comments overclaimed
+      — one said a cost "stops being reachable... once a newer stable
+      release exists" when `OLDER_TAG` is actually anchored to "before TAG"
+      permanently; another said a pre-rename re-test fails with
+      "command not found" when it actually surfaced as a misleading
+      "did not report healthy" (now fixed to fail as a direct, checked exit
+      status instead). Corrected both. Also fixed capitalization drift
+      ("Release Binaries" vs the workflow's real name, "Release binaries")
+      in prose comments that didn't get the trigger's own earlier fix.
 
 ## Result
 

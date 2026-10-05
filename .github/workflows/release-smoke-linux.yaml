@@ -4,7 +4,7 @@
 # downloading from GitHub Releases — there is no "install from a local build"
 # mode), then exercises the systemd install/upgrade/uninstall path for real.
 #
-# Triggers on Release Binaries finishing, not on the tag/main push directly:
+# Triggers on Release binaries finishing, not on the tag/main push directly:
 # that guarantees the release assets this pulls from already exist, rather
 # than racing the upload.
 #
@@ -34,7 +34,7 @@ permissions:
 jobs:
   linux-smoke-test:
     name: Linux install/upgrade/uninstall smoke test
-    # event == 'push' excludes Release Binaries' workflow_dispatch dry runs,
+    # event == 'push' excludes Release binaries' workflow_dispatch dry runs,
     # which build but never publish — nothing would exist yet to install.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
@@ -42,9 +42,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # No `ref:` pin to the triggering release's own commit: this checkout is
+      # only for the TEST SCRIPT itself, not the things under test (the
+      # release assets and install.sh both come over the network regardless
+      # of what's checked out here). Pinning to the release's commit broke
+      # re-running an old release's workflow outright — this script didn't
+      # exist yet at v0.8.0/v0.8.1 (confirmed via the GitHub API: 404 for
+      # scripts/release_smoke_test_linux.sh at both commits), so the checkout
+      # would succeed and the very next step would fail to find the script to
+      # run. Always running main's current copy means re-runs always reach
+      # the actual test logic, whichever release they're re-testing.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       # A tag push's workflow_run.head_branch is the tag itself; a push to main
@@ -83,8 +92,10 @@ jobs:
             sleep 1
           done
           echo "XDG_RUNTIME_DIR=${rt}" >>"${GITHUB_ENV}"
-          XDG_RUNTIME_DIR="${rt}" systemctl --user show-environment || \
-            echo "::warning::systemd --user session not reachable after enable-linger; the smoke test will report why"
+          XDG_RUNTIME_DIR="${rt}" systemctl --user show-environment || {
+            echo "::error::systemd --user session not reachable after enable-linger"
+            exit 1
+          }
 
       - name: Run the Linux release smoke test
         env:
