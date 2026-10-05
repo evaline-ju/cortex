@@ -159,7 +159,7 @@ def main():
 
     base = resolve_api(args.api)
     try:
-        index = get(base, "/v1/sessions")
+        index = get(base, "/v1/sessions", **({"archived": "true"} if args.sessions else {}))
     except urllib.error.URLError as exc:
         sys.exit(f"cannot reach session API at {base}: {exc}")
 
