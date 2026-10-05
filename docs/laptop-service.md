@@ -313,9 +313,12 @@ shows which state you are in.
 
 **It runs only on a local install** — a config inside `~/.cortex`, which is what `agentop
 service install` and `--local` produce. Anywhere else it is off, and `enabled: true` is refused
-with a WARN naming the reason. There is deliberately no `dir` setting: raw prompts on a
-cluster's volume are a decision of their own, and a cluster should not reach it by mounting a
-path.
+with a WARN naming the reason. On a local install it is on by default only while
+`listener.bind_loopback_only` is true, as the generated config sets it, because that is the one
+setting under which [clearing it](#clearing-it) works; with the binds widened, it stays off
+unless `enabled: true` opts in, and the startup line then says a clear will be refused. There
+is deliberately no `dir` setting: raw prompts on a cluster's volume are a decision of their
+own, and a cluster should not reach it by mounting a path.
 
 **How big it gets.** Each session's events are written as zstd-compressed segments that store
 a repeated message once rather than once per turn — the same saving the in-memory store makes,
@@ -325,7 +328,7 @@ first by the time they were last written:
 
 | Setting | Default | Notes |
 |---|---|---|
-| `session.archive.enabled` | on for a local install | `false` always wins |
+| `session.archive.enabled` | on for a local install bound to loopback only | `false` always wins; `true` opts in without the loopback bind |
 | `session.archive.retention_days` | 30 | how long a segment is kept after its last write; at most 3650 |
 | `session.archive.max_bytes` | 2 GiB | the archive's total size; past it, the oldest segments go first |
 
@@ -660,8 +663,8 @@ added, unless other tools in `~/.local/bin` still need them, and removes `agento
 `cortex` and `cortex-session-dump` from `~/.local/bin`. A step that fails is reported
 with its fix, the rest still run, and the end lists what was left behind.
 
-`--purge` also deletes `~/.cortex`: config, CA, logs, cost history, agentop's UI
-settings. It goes last, and only when every removal before it worked: after a failed
+`--purge` also deletes `~/.cortex`: config, CA, logs, cost history, session history,
+agentop's UI settings. It goes last, and only when every removal before it worked: after a failed
 one `~/.cortex` stays, and the end lists it, with the `rm -rf` to run once the fixes
 above are done. Without `--purge` `~/.cortex` stays too, so a later install picks up
 where you left off, and a run where every removal worked ends by saying how to delete
