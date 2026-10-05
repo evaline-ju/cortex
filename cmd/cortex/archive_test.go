@@ -31,10 +31,14 @@ func archiveCfg(enabled *bool) *config.Config {
 	return &config.Config{Session: config.SessionConfig{Archive: &config.SessionArchiveConfig{Enabled: enabled}}}
 }
 
-// Until the archive can be read back and cleared, it runs only where someone asked for it on a
-// laptop. Outside a local install it never runs: raw prompts on a cluster's volume are their own
-// decision, and the archive has no dir to point at one.
-// On for a local install unless turned off, and never elsewhere, asked for or not.
+// loopbackOnly is cfg bound to loopback only, as the config `cortex --local` writes is.
+func loopbackOnly(cfg *config.Config) *config.Config {
+	cfg.Listener.BindLoopbackOnly = true
+	return cfg
+}
+
+// On by default only where DELETE /v1/sessions can clear what it writes: a local install bound to
+// loopback only. An explicit true opts in on any local install; nothing outside one runs it.
 func TestSessionArchiveRuns_OnForALocalInstall(t *testing.T) {
 	inside, outside := localConfig(t)
 	on, off := true, false
@@ -44,9 +48,10 @@ func TestSessionArchiveRuns_OnForALocalInstall(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"local, unset", &config.Config{}, inside, true},
-		{"local, enabled", archiveCfg(&on), inside, true},
-		{"local, disabled", archiveCfg(&off), inside, false},
+		{"local, unset, loopback only", loopbackOnly(&config.Config{}), inside, true},
+		{"local, unset, not loopback only", &config.Config{}, inside, false},
+		{"local, enabled, not loopback only", archiveCfg(&on), inside, true},
+		{"local, disabled, loopback only", loopbackOnly(archiveCfg(&off)), inside, false},
 		{"not local, enabled", archiveCfg(&on), outside, false},
 		{"not local, unset", &config.Config{}, outside, false},
 	} {
@@ -98,9 +103,9 @@ func TestOpenSessionArchive_OpensWithEnabledUnset(t *testing.T) {
 		cfg           *config.Config
 		wantRetention int
 	}{
-		{"no session.archive block", &config.Config{}, 30},
-		{"bounds without enabled", &config.Config{Session: config.SessionConfig{
-			Archive: &config.SessionArchiveConfig{RetentionDays: 7}}}, 7},
+		{"no session.archive block", loopbackOnly(&config.Config{}), 30},
+		{"bounds without enabled", loopbackOnly(&config.Config{Session: config.SessionConfig{
+			Archive: &config.SessionArchiveConfig{RetentionDays: 7}}}), 7},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inside, _ := localConfig(t)

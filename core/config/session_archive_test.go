@@ -91,3 +91,38 @@ func TestLoad_RefusesAnInvalidSessionArchiveBlock(t *testing.T) {
 		t.Fatalf("Load = %v, want an error naming max_bytes", err)
 	}
 }
+
+// The archive's rule on a local install: false always wins, true opts in, and unset follows
+// listener.bind_loopback_only — the condition DELETE /v1/sessions needs to clear it.
+func TestArchiveRunsOnLocalInstall(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name     string
+		enabled  *bool
+		block    bool
+		loopback bool
+		want     bool
+		reason   string
+	}{
+		{"no block, loopback only", nil, false, true, true, "on by default"},
+		{"no block, not loopback only", nil, false, false, false, "bind_loopback_only is false"},
+		{"block without enabled, loopback only", nil, true, true, true, "on by default"},
+		{"block without enabled, not loopback only", nil, true, false, false, "bind_loopback_only is false"},
+		{"enabled, loopback only", &on, true, true, true, "enabled is true"},
+		{"enabled, not loopback only", &on, true, false, true, "refuses to clear"},
+		{"disabled, loopback only", &off, true, true, false, "enabled is false"},
+		{"disabled, not loopback only", &off, true, false, false, "enabled is false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var c Config
+			c.Listener.BindLoopbackOnly = tc.loopback
+			if tc.block {
+				c.Session.Archive = &SessionArchiveConfig{Enabled: tc.enabled}
+			}
+			got, why := c.ArchiveRunsOnLocalInstall()
+			if got != tc.want || !strings.Contains(why, tc.reason) {
+				t.Errorf("ArchiveRunsOnLocalInstall = %v (%q), want %v and a reason naming %q", got, why, tc.want, tc.reason)
+			}
+		})
+	}
+}

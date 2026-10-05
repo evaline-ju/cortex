@@ -25,27 +25,23 @@ func sessionArchiveDir() (string, error) {
 
 // sessionArchiveRuns decides whether the session archive runs, and says why.
 //
-// ON BY DEFAULT ON A LOCAL INSTALL, and only there. A laptop is where a restart costs a user their
-// history and where the user can read it back (agentop's H) and erase it (X, or DELETE
-// /v1/sessions): both exist, which is what the default waited for. Elsewhere it is off even when
-// asked for — raw prompts on a cluster's volume need a decision of their own, and a mounted path
-// is not one. false always wins.
+// ONLY ON A LOCAL INSTALL. A laptop is where a restart costs a user their history and where the
+// user can read it back (agentop's H) and erase it (X, or DELETE /v1/sessions). Elsewhere it is
+// off even when asked for — raw prompts on a cluster's volume need a decision of their own, and a
+// mounted path is not one. On a local install, config.ArchiveRunsOnLocalInstall decides.
 func sessionArchiveRuns(cfg *config.Config, configPath string) (bool, string) {
 	a := cfg.Session.Archive
 	explicit := a != nil && a.Enabled != nil
-	if explicit && !*a.Enabled {
-		return false, "session.archive.enabled is false"
-	}
 	if !startedFromLocalInstall(configPath) {
-		if explicit {
+		switch {
+		case explicit && !*a.Enabled:
+			return false, "session.archive.enabled is false"
+		case explicit:
 			return false, "the session archive is a laptop feature in this release and runs only from a config inside ~/.cortex"
 		}
 		return false, "not a local install"
 	}
-	if !explicit {
-		return true, "on by default for a local install; set session.archive.enabled: false to turn it off"
-	}
-	return true, "session.archive.enabled is true on a local install"
+	return cfg.ArchiveRunsOnLocalInstall()
 }
 
 // closeArchiveOnFatal finishes the archive's open segments before a fatal exit, for the reason

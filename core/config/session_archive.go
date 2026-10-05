@@ -15,8 +15,8 @@ import "fmt"
 // refuses any live change under `session`, changing this needs a restart with no code of its
 // own.
 type SessionArchiveConfig struct {
-	// Enabled is a pointer so unset can follow the binary's default: on for a local install,
-	// off everywhere else. false always wins.
+	// Enabled is a pointer so unset can follow the default; see ArchiveRunsOnLocalInstall.
+	// false always wins.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// RetentionDays is how long a segment is kept after its last write. 0 means the default,
 	// 30.
@@ -33,6 +33,30 @@ func (c *SessionArchiveConfig) ArchiveEnabled(defaultOn bool) bool {
 		return defaultOn
 	}
 	return *c.Enabled
+}
+
+// ArchiveRunsOnLocalInstall reports whether the session archive runs for c when it is started
+// from a local install — a config inside ~/.cortex — and why. Outside one it never runs; that half
+// is the caller's to decide, since only the caller knows where the config lives.
+//
+// ON BY DEFAULT ONLY WHERE A CLEAR REACHES IT: bound to loopback only, the one shape whose
+// DELETE /v1/sessions answers. Elsewhere the history it wrote could only be removed by hand, so
+// an unset block leaves it off there, and an explicit true opts in knowing that.
+func (c *Config) ArchiveRunsOnLocalInstall() (bool, string) {
+	a := c.Session.Archive
+	switch {
+	case a != nil && a.Enabled != nil && !*a.Enabled:
+		return false, "session.archive.enabled is false"
+	case a != nil && a.Enabled != nil && c.Listener.BindLoopbackOnly:
+		return true, "session.archive.enabled is true on a local install"
+	case a != nil && a.Enabled != nil:
+		return true, "session.archive.enabled is true on a local install; DELETE /v1/sessions refuses to clear it, " +
+			"because listener.bind_loopback_only is false"
+	case c.Listener.BindLoopbackOnly:
+		return true, "on by default for a local install bound to loopback only; set session.archive.enabled: false to turn it off"
+	}
+	return false, "off by default: listener.bind_loopback_only is false, so DELETE /v1/sessions could not clear " +
+		"what it wrote; set session.archive.enabled: true to opt in anyway"
 }
 
 // Validate is called from the loader when session.archive is present.
