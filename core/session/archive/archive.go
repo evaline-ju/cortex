@@ -588,6 +588,10 @@ func (a *Archive) renameEntry(s *sessionState, oldID, newID, newDir string, afte
 	startAfter, before := s.startAfter, s.before
 	s.startAfter, s.before = 0, nil
 	if entry == len(segs) {
+		if startAfter == after {
+			a.closeWriter(s)
+			s.meta.Summary, _ = foldSegments(s.dir, s.meta.Segments, oldID)
+		}
 		return false
 	}
 	if entry == 0 {
@@ -609,19 +613,7 @@ func (a *Archive) renameEntry(s *sessionState, oldID, newID, newDir string, afte
 		}
 	}
 	slices.SortFunc(move, func(x, y SegmentInfo) int { return cmp.Compare(x.FirstSeq, y.FirstSeq) })
-	since := session.NewSummaryFold()
-	var createdAt time.Time
-	for _, seg := range move {
-		if _, err := readSegment(filepath.Join(s.dir, seg.File), func(e *pipeline.SessionEvent) bool {
-			if createdAt.IsZero() {
-				createdAt = e.At
-			}
-			since.Add(oldID, e)
-			return true
-		}); err != nil {
-			slog.Warn("session archive: could not read a renamed segment back for its summary", "file", seg.File, "error", err)
-		}
-	}
+	since, createdAt := foldSegments(s.dir, move, oldID)
 	if createdAt.IsZero() {
 		createdAt = a.now()
 	}
@@ -658,6 +650,27 @@ func (a *Archive) renameEntry(s *sessionState, oldID, newID, newDir string, afte
 	}
 	a.sessions[newID] = ns
 	return true
+}
+
+// foldSegments reads segs back from dir and folds their events, recorded under id, in seq order.
+// It also returns the first event's time.
+func foldSegments(dir string, segs []SegmentInfo, id string) (*session.SummaryFold, time.Time) {
+	segs = slices.Clone(segs)
+	slices.SortFunc(segs, func(x, y SegmentInfo) int { return cmp.Compare(x.FirstSeq, y.FirstSeq) })
+	f := session.NewSummaryFold()
+	var first time.Time
+	for _, seg := range segs {
+		if _, err := readSegment(filepath.Join(dir, seg.File), func(e *pipeline.SessionEvent) bool {
+			if first.IsZero() {
+				first = e.At
+			}
+			f.Add(id, e)
+			return true
+		}); err != nil {
+			slog.Warn("session archive: could not read a renamed segment back for its summary", "file", seg.File, "error", err)
+		}
+	}
+	return f, first
 }
 
 // latestWrite is the last time any of segs was written.

@@ -599,7 +599,7 @@ func TestRekeyed_MovesOnlyTheRenamedEntrysEvents(t *testing.T) {
 		}
 		t.Run(rn.name+"/after a restart", func(t *testing.T) {
 			root := t.TempDir()
-			a, st := restarted(t, root, rn.from, earlier)
+			a, st := restarted(t, root, newClock(), rn.from, earlier)
 			defer st.Close()
 			check(t, root, a, st)
 		})
@@ -643,9 +643,8 @@ func wantHistory(t *testing.T, root, id string, want ...uint64) {
 
 // restarted archives events under id with one store and archive, closes both, and returns a
 // reopened archive with a fresh store recording into it: a proxy restart.
-func restarted(t *testing.T, root, id string, events []pipeline.SessionEvent, opts ...Option) (*Archive, *session.Store) {
+func restarted(t *testing.T, root string, clk *fakeClock, id string, events []pipeline.SessionEvent, opts ...Option) (*Archive, *session.Store) {
 	t.Helper()
-	clk := newClock()
 	a := openTest(t, root, clk)
 	st := session.New(0, 0, 0)
 	st.AddRecorder(a)
@@ -716,7 +715,7 @@ func TestRekeyed_MovesWhatTheEntryWrote(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			root := t.TempDir()
-			a, st := restarted(t, root, from, synthSession(63, 1, 512), c.opts...)
+			a, st := restarted(t, root, newClock(), from, synthSession(63, 1, 512), c.opts...)
 			defer st.Close()
 			to := c.run(a, st)
 			if err := a.Close(); err != nil {
@@ -766,4 +765,48 @@ func TestRekeyed_AnEntryOverNoHistoryMovesWhole(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantHistory(t, root, "Y", 1)
+}
+
+// What a rename carries describes the entry alone, even when the history it began over has since
+// been pruned away: the earlier events must not reach the claiming session's summary.
+func TestRekeyed_AfterAPruneTheSummaryIsTheEntrys(t *testing.T) {
+	from := session.DefaultSessionID
+	entry := synthSession(71, 1, 512)
+	cases := []struct {
+		name  string
+		prune func(a *Archive, clk *fakeClock)
+	}{
+		{"by retention", func(a *Archive, clk *fakeClock) {
+			clk.advance(2 * 24 * time.Hour)
+			tick(a)
+		}},
+		{"by the size bound", func(a *Archive, clk *fakeClock) {
+			a.inWriter(func() { a.maxBytes = 1 })
+			tick(a)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root, clk := t.TempDir(), newClock()
+			a, st := restarted(t, root, clk, from, synthSession(70, 1, 512))
+			defer st.Close()
+			clk.advance(29 * 24 * time.Hour)
+			st.Append(from, entry[0]) // an entry over history: numbered from 4
+			settle(a)
+			c.prune(a, clk)
+			a.inWriter(func() {
+				for _, seg := range a.sessions[from].meta.Segments {
+					if seg.FirstSeq <= 3 {
+						t.Errorf("segment %s holds earlier history; the prune did not take it", seg.File)
+					}
+				}
+			})
+			st.Rekey(from, "Y")
+			st.Append("Y", entry[1])
+			if err := a.Close(); err != nil {
+				t.Fatal(err)
+			}
+			wantHistory(t, root, "Y", 4, 5)
+		})
+	}
 }
