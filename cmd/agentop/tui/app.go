@@ -1466,6 +1466,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.usage.err = nil
 		m.usage.snap, m.usage.windowUnits = msg.snap, msg.windowUnits
+		m.usage.agentLatency, m.usage.latencyErr = msg.agentLatency, msg.latencyErr
 		m.usage.lastFetch = time.Now()
 		return m, nil
 
