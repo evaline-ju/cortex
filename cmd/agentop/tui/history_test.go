@@ -148,4 +148,8 @@ func TestSessionsFooter_HDoesNotPushTheCostKeysOffAt80Columns(t *testing.T) {
 	if wide := fitHintLine(m.helpView(), 120); !strings.Contains(wide, "[H] history") {
 		t.Errorf("at 120 columns the footer does not advertise [H]: %q", wide)
 	}
+	m.sessionsViaAgents = true
+	if wide := fitHintLine(m.helpView(), 120); !strings.Contains(wide, "[H] history") || !strings.Contains(wide, "[esc] agents") {
+		t.Errorf("at 120 columns the footer reached through the agents picker does not advertise [H] and [esc] agents: %q", wide)
+	}
 }
