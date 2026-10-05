@@ -41,8 +41,10 @@ type entry struct {
 	// numbers, or a client holding a cursor from before the trim would page into the wrong
 	// place. The scope matters and is easy to overstate — this counter lives on the entry,
 	// and cleanupLocked and evictOldestLocked delete the entry outright, so a session
-	// re-created under the same id afterwards starts a NEW counter at 1. Numbers are
-	// therefore unique within one incarnation of a session, not across the id forever.
+	// re-created under the same id afterwards starts a NEW counter at 1 — unless a SeqSeeder
+	// (the session archive) still holds the id's earlier events, in which case the new counter
+	// starts after them. Without one, numbers are unique within one incarnation of a session,
+	// not across the id forever.
 	//
 	// Nothing here can detect that, and nothing here needs to: the store cannot tell a
 	// re-created session from a trimmed one. A paging client compares wall-clock time
@@ -467,6 +469,8 @@ func (s *Store) appendLocked(sessionID string, b *Bucket, event pipeline.Session
 			sess = &entry{
 				ID:        sessionID,
 				CreatedAt: now,
+				// After whatever the archive already numbered under this id; see SeqSeeder.
+				nextSeq: s.archivedSeqLocked(sessionID),
 				// NOT THE ZERO VALUE: rankRename is 0, so a zero-valued titleRank would claim this
 				// session had already been renamed and no candidate could ever beat it — the first
 				// prose message would be unnameable. rankNone is the "nothing has named it" rank.
@@ -540,39 +544,10 @@ func (s *Store) appendLocked(sessionID string, b *Bucket, event pipeline.Session
 	// entry.Title, and entry.context just above for why sourcing the candidate from the stored slice
 	// is what breaks that property.
 	//
-	// THE SECOND DISJUNCT IS THE WHOLE RULE, not a tie-break detail: without it a re-rename is
-	// silently ignored, because the equal rank never beats the one already held. Widening it to a
-	// plain `<=` instead is the opposite failure — the title then shifts on every turn, since each
-	// new prose message equals the rank of the last.
-	//
-	// THE BLANK SCREEN IS REDUNDANT AND NO TEST CAN SHOW IT, which is worth saying rather than
-	// leaving a surviving mutant for the next reader to re-derive. titleCandidate returns "" only
-	// ever paired with rankNone (every blank-folding shape — empty, whitespace, reminder-only, an
-	// empty <user_query> — comes back as rankNone), and a fresh entry initialises to rankNone, so
-	// `rankNone < rankNone` is false and the rank test alone rejects it. Kept as a local statement
-	// of what the fold requires: a future titleCandidate returning a blank at a real rank fails
-	// here instead of storing one.
-	if titleText != "" && (titleRank < sess.titleRank || (titleRank == sess.titleRank && titleRank == rankRename)) {
-		// sanitizeTitle STAYS UNDER THE LOCK, and what makes that safe is that it is O(maxTitleLen)
-		// rather than O(candidate): it stops at 80 emitted runes, so a 190KB candidate costs 328ns,
-		// not 916µs.
-		//
-		// A CALL-COUNTING ARGUMENT IS NOT ENOUGH HERE, which is why the cap and not the count is what
-		// this rests on. "At most once per rank improvement" bounds the fold at three times per
-		// session under first-wins — except for /rename, which the second disjunct lets win
-		// repeatedly and which the client controls. Flooding /rename with a 190KB argument paid
-		// ~938µs of write-lock hold per append, unbounded in repetitions; measured on that flood with
-		// a concurrent reader, mean ListSessions latency is 205µs uncapped against 16.4µs capped.
-		//
-		// Hoisting it above the lock would still be wrong, just cheaply so: it would fold every
-		// event's candidate including the ones about to be discarded on rank.
-		if t := sanitizeTitle(titleText); t != "" {
-			sess.Title, sess.titleRank = t, titleRank
-		}
-	}
-	if agentName != "" && sessionID != DefaultSessionID && !strings.HasPrefix(sessionID, PendingPrefix) && sess.agentLabel(agentName) == "" {
-		sess.agents = append(sess.agents, sessionAgent{name: agentName, label: usage.AgentLabel(event.Client)})
-	}
+	// The rule itself, and why its sanitizeTitle is safe under this lock, are applyTitle's: it is
+	// shared with SummaryFold so an archived session is titled exactly as a resident one.
+	sess.titleRank, sess.Title = applyTitle(sess.titleRank, sess.Title, titleRank, titleText)
+	sess.agents = applyAgent(sess.agents, sessionID, agentName, event.Client)
 	if b == nil {
 		sess.UpdatedAt = now
 		s.activeID = sessionID
@@ -985,12 +960,7 @@ type sessionAgent struct{ name, label string }
 
 // agentLabel is the first label the agent named name sent into this session, or "".
 func (e *entry) agentLabel(name string) string {
-	for _, a := range e.agents {
-		if a.name == name {
-			return a.label
-		}
-	}
-	return ""
+	return agentLabelIn(e.agents, name)
 }
 
 // agentOfLocked is SessionSummary.Agent: the label of the owner that claimed the session, else
@@ -1223,6 +1193,12 @@ func (s *Store) rekeyLocked(oldID, newID string) bool {
 	if _, exists := s.sessions[newID]; exists {
 		return false
 	}
+	// A target the archive holds history for counts as existing. Its events on disk are
+	// numbered from 1 and so are the bucket's, so a merge would give one session two events
+	// of each low seq — the same reason a resident target refuses. See SeqSeeder.
+	if s.archivedSeqLocked(newID) > 0 {
+		return false
+	}
 
 	sess.ID = newID
 	s.sessions[newID] = sess
@@ -1239,6 +1215,15 @@ func (s *Store) rekeyLocked(oldID, newID string) bool {
 	if owner, ok := s.owners[oldID]; ok {
 		delete(s.owners, oldID)
 		s.owners[newID] = owner
+	}
+	// Every rename tells the recorders that keep per-session state, so that state follows the
+	// session: Adopt's pending bucket → session and Rekey's A2A default → contextId alike. Here
+	// rather than in adoptLocked because both reach this, and only a rename that happened may
+	// be announced.
+	for _, r := range s.recorders {
+		if rk, ok := r.(Rekeyer); ok {
+			rk.Rekeyed(oldID, newID)
+		}
 	}
 	return true
 }

@@ -24,10 +24,9 @@ const PendingPrefix = "pending:"
 func PendingSessionID(client string) string { return PendingPrefix + client }
 
 // Rekeyer is optionally implemented by a Recorder that keeps per-session state, so that
-// state follows an Adopt. Called under the store's write lock, like Record.
-//
-// Only Adopt notifies. Rekey — the A2A path's default→contextId merge — never has, and
-// changing that is not this feature's to decide.
+// state follows a rename. Called under the store's write lock, like Record, once for every
+// rename the store makes — Adopt's pending bucket → session, and Rekey's A2A default →
+// contextId merge — and never for a rename it refused.
 type Rekeyer interface {
 	Rekeyed(oldID, newID string)
 }
@@ -68,9 +67,10 @@ func (s *Store) Claim(sessionID, client string) {
 	}
 }
 
-// Adopt renames pendingID to id the way Rekey does, and additionally tells every Rekeyer
-// recorder, so the usage aggregator's per-session figures follow the rename. Reports false,
-// changing nothing, when pendingID does not exist or id already does.
+// Adopt renames pendingID to id the way Rekey does — every Rekeyer recorder is told, so the
+// usage aggregator's per-session figures follow — and additionally records the adoption, so
+// a response still in flight under pendingID lands in id (see followAdoptedLocked). Reports
+// false, changing nothing, when pendingID does not exist or id already does.
 func (s *Store) Adopt(pendingID, id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,11 +94,7 @@ func (s *Store) adoptLocked(pendingID, id string) bool {
 		s.adopted = make(map[string]string)
 	}
 	s.adopted[pendingID] = id
-	for _, r := range s.recorders {
-		if rk, ok := r.(Rekeyer); ok {
-			rk.Rekeyed(pendingID, id)
-		}
-	}
+	// rekeyLocked has told every Rekeyer.
 	return true
 }
 

@@ -1,13 +1,15 @@
 package usage
 
+import (
+	"maps"
+	"slices"
+)
+
 // Rekeyed moves oldID's figures to newID: the per-session ring, and oldID's row in every
-// bucket's session breakdown. It implements session.Rekeyer, which session.Store.Adopt calls
-// when a coding agent's pending bucket is renamed to the session its first header named.
+// bucket's session breakdown. It implements session.Rekeyer.
 //
 // Without it the store would list the session under its new id while /v1/usage kept
 // answering for the old one — the "listed but zeroed" shape sessionRing exists to prevent.
-// A newID that already has a ring keeps it; the store never adopts into a session that holds
-// events, so that is a defensive no-op rather than a merge.
 func (a *Aggregator) Rekeyed(oldID, newID string) {
 	if oldID == newID {
 		return
@@ -15,10 +17,15 @@ func (a *Aggregator) Rekeyed(oldID, newID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ring, ok := a.sessions[oldID]; ok {
-		if _, taken := a.sessions[newID]; !taken {
+		delete(a.sessions, oldID)
+		relabelSession(ring.buckets, oldID, newID)
+		if into, taken := a.sessions[newID]; taken {
+			mergeRing(into.buckets, ring.buckets)
+			if ring.lastSeen.After(into.lastSeen) {
+				into.lastSeen = ring.lastSeen
+			}
+		} else {
 			a.sessions[newID] = ring
-			delete(a.sessions, oldID)
-			relabelSession(ring.buckets, oldID, newID)
 		}
 	}
 	relabelSession(a.all, oldID, newID)
@@ -36,5 +43,60 @@ func relabelSession(ring []bucket, oldID, newID string) {
 		}
 		delete(ring[i].bySession, from)
 		addLabel(&ring[i].bySession, to, c)
+	}
+}
+
+// mergeRing adds src's buckets into dst slot by slot. Where the two hold different laps of a
+// slot the newer one is kept.
+func mergeRing(dst, src []bucket) {
+	for i := range src {
+		s, d := &src[i], &dst[i]
+		switch {
+		case s.start.IsZero() || s.start.Before(d.start):
+		case d.start.Before(s.start):
+			*d = *s
+		default:
+			d.add(s)
+		}
+	}
+}
+
+// add folds o into b. Label maps go through addLabel, so the cap holds, and each label's units
+// follow it to the key addLabel filed it under.
+func (b *bucket) add(o *bucket) {
+	b.Counts.Add(o.Counts)
+	b.latSum += o.latSum
+	b.latSumSq += o.latSumSq
+	b.latN += o.latN
+	addLabels(&b.byMethod, o.byMethod, b.unitsFrom(o, GroupModel))
+	addLabels(&b.byEndpoint, o.byEndpoint, b.unitsFrom(o, GroupEndpoint))
+	addLabels(&b.byAgent, o.byAgent, b.unitsFrom(o, GroupAgent))
+	addLabels(&b.bySession, o.bySession, nil)
+	addLabels(&b.byStatus, o.byStatus, nil)
+	addLabels(&b.byPlugin, o.byPlugin, nil)
+	addLabels(&b.byHost, o.byHost, nil)
+	addLabels(&b.byProvenance, o.byProvenance, nil)
+	addLabels(&b.byUnpriced, o.byUnpriced, nil)
+	addLabels(&b.byIncomplete, o.byIncomplete, nil)
+	addLabels(&b.byCurrency, o.byCurrency, nil)
+}
+
+// unitsFrom notes on b, under the key a label was filed at, the units o held for it on axis g.
+func (b *bucket) unitsFrom(o *bucket, g Group) func(from, to string) {
+	return func(from, to string) {
+		for unit := range o.labelUnits[g][from] {
+			b.noteUnit(g, to, unit)
+		}
+	}
+}
+
+// addLabels adds every entry of src into *dst, and passes filed each key with the key it was
+// filed at.
+func addLabels(dst *map[string]Counts, src map[string]Counts, filed func(from, to string)) {
+	for _, k := range slices.Sorted(maps.Keys(src)) {
+		to := addLabel(dst, k, src[k])
+		if filed != nil {
+			filed(k, to)
+		}
 	}
 }

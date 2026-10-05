@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -159,7 +160,10 @@ type rekeyRecorder struct{ rekeyed [][2]string }
 func (r *rekeyRecorder) Record(string, *pipeline.SessionEvent) {}
 func (r *rekeyRecorder) Rekeyed(o, n string)                   { r.rekeyed = append(r.rekeyed, [2]string{o, n}) }
 
-func TestAdopt_NotifiesRekeyersAndRekeyStillDoesNot(t *testing.T) {
+// Every rename the store makes is announced to the recorders keeping per-session state, the
+// A2A merge included: a Recorder that misses one keeps figures, or history, under an id
+// nothing is filed under any more.
+func TestRekeyAndAdopt_BothNotifyRekeyers(t *testing.T) {
 	s := New(0, 0, 0)
 	defer s.Close()
 	r := &rekeyRecorder{}
@@ -167,14 +171,80 @@ func TestAdopt_NotifiesRekeyersAndRekeyStillDoesNot(t *testing.T) {
 
 	s.Append(DefaultSessionID, ev())
 	s.Rekey(DefaultSessionID, "ctx-1")
-	if len(r.rekeyed) != 0 {
-		t.Fatalf("Rekey notified %v; the A2A merge must keep today's behaviour", r.rekeyed)
-	}
-
 	s.Append("pending:bob-shell", ev())
 	s.Claim("task-1", "bob-shell")
-	if len(r.rekeyed) != 1 || r.rekeyed[0] != [2]string{"pending:bob-shell", "task-1"} {
-		t.Fatalf("Rekeyed calls = %v, want exactly [pending:bob-shell task-1]", r.rekeyed)
+
+	want := [][2]string{{DefaultSessionID, "ctx-1"}, {"pending:bob-shell", "task-1"}}
+	if !slices.Equal(r.rekeyed, want) {
+		t.Fatalf("Rekeyed calls = %v, want %v", r.rekeyed, want)
+	}
+}
+
+// A refused rename changed nothing, so it must announce nothing.
+func TestRekey_ARefusedRenameNotifiesNoOne(t *testing.T) {
+	s := New(0, 0, 0)
+	defer s.Close()
+	r := &rekeyRecorder{}
+	s.AddRecorder(r)
+
+	s.Append(DefaultSessionID, ev())
+	s.Append("ctx-1", ev())
+	s.Rekey(DefaultSessionID, "ctx-1") // target exists: refused
+	s.Rekey("absent", "ctx-2")         // source absent: refused
+
+	if len(r.rekeyed) != 0 {
+		t.Fatalf("Rekeyed calls = %v, want none", r.rekeyed)
+	}
+}
+
+func tokensEv(in int) pipeline.SessionEvent {
+	return pipeline.SessionEvent{
+		At: time.Now(), Phase: pipeline.SessionResponse, StatusCode: 200, Host: "gw.example.com",
+		Inference: &pipeline.InferenceExtension{
+			Model: "m", InputTokens: in, OutputTokens: 1, TotalTokens: in + 1, PresentKinds: 0b1001,
+		},
+	}
+}
+
+// The store evicts a session without telling the aggregator, whose ring for it lives on, and
+// then permits a rename into that id. /v1/usage must still agree with itself afterwards: the
+// session's own figure is its row in the all-sessions breakdown, and the old id answers nothing.
+func TestRename_IntoAnEvictedSessionKeepsUsageConsistent(t *testing.T) {
+	for _, c := range []struct {
+		name, from string
+		rename     func(s *Store, from string)
+	}{
+		{"Rekey", DefaultSessionID, func(s *Store, from string) { s.Rekey(from, "ctx-1") }},
+		{"Adopt", PendingSessionID("claude-code"), func(s *Store, _ string) { s.Claim("ctx-1", "claude-code") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			agg := usage.New()
+			s := New(0, 0, 2)
+			defer s.Close()
+			s.AddRecorder(agg)
+
+			s.Append("ctx-1", tokensEv(13))
+			s.Append("x1", tokensEv(1))
+			s.Append("x2", tokensEv(1)) // evicts ctx-1 from the store
+			s.Append(c.from, tokensEv(17))
+			c.rename(s, c.from)
+
+			if s.View("ctx-1") == nil || s.View(c.from) != nil {
+				t.Fatal("the rename did not happen, so this test checks nothing")
+			}
+			window := 10 * time.Minute
+			var row int64
+			for _, b := range agg.Snapshot(window, usage.BucketWidth, "", usage.GroupSession).Buckets {
+				row += b.Series["ctx-1"].InputTokens
+			}
+			one := agg.Snapshot(window, usage.BucketWidth, "ctx-1", usage.GroupNone).Totals.InputTokens
+			if one != 30 || row != 30 {
+				t.Errorf("session=ctx-1 InputTokens = %d, all-sessions row = %d, want 30 for both", one, row)
+			}
+			if got := agg.Snapshot(window, usage.BucketWidth, c.from, usage.GroupNone).Totals.InputTokens; got != 0 {
+				t.Errorf("session=%s InputTokens = %d, want 0 once renamed", c.from, got)
+			}
+		})
 	}
 }
 
