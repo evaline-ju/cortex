@@ -198,6 +198,20 @@ as a literal shell pipe does.
       status instead). Corrected both. Also fixed capitalization drift
       ("Release Binaries" vs the workflow's real name, "Release binaries")
       in prose comments that didn't get the trigger's own earlier fix.
+- [x] Fix (review, round 3): `assert_running_version_is` only ran inside the
+      upgrade block, so a run with no `OLDER_TAG` (the very first release, or
+      a `v*` tag whose own "older" release doesn't exist) never checked it had
+      installed the right thing at all. It also wasn't independent of
+      `assert_running_binary_is_current` the way its old comment implied — it
+      runs the binary sitting on disk, not the service's process, so on its
+      own it would pass even in the #1203 stale-process state (the disk
+      binary IS the new one there; only the running process is stale). Fixed
+      by calling both checks right after the fresh-install leg too (using
+      `OLDER_TAG` itself as the expected version there, since it's always a
+      real tag, never `main-latest`), and reworded both functions' comments
+      to document the dependency explicitly: call `assert_running_binary_is_current`
+      first, every time, or `assert_running_version_is` is checking the wrong
+      thing.
 
 ## Result
 

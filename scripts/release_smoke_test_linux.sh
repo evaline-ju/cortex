@@ -142,13 +142,20 @@ assert_running_binary_is_current() {
 	fi
 }
 
-# Confirms the running binary's own reported version matches what this run
-# installed — a second, independent signal alongside the inode check above,
-# and the one that also ties a main-latest run to the exact commit that
-# triggered it (see TRIGGER_SHA below): a later merge can re-point main-latest
-# and clobber its assets while this job is still running, so without this a
-# pass could be describing the NEXT build rather than the one actually under
-# test.
+# NOT independent of the check above — this runs the binary sitting at
+# PROXY_BIN on disk, not the service's own process, so on its own it would
+# pass even in the exact #1203 stale-process bug this script exists to catch
+# (the disk binary IS the new one in that state; only the running process
+# is stale). It only says something about the SERVICE because the preceding
+# assert_running_binary_is_current call already proved the service's
+# /proc/<pid>/exe points at this same PROXY_BIN path. Call both, in this
+# order, or this one is checking the wrong thing.
+#
+# What it adds beyond that: the exe-path check only proves "the service runs
+# the file at this path"; this proves that file's own self-reported version
+# is the one this run installed — which also ties a main-latest run to the
+# exact commit that triggered it (see TRIGGER_SHA below), since a later merge
+# can re-point main-latest and clobber its assets while this job still runs.
 assert_running_version_is() {
 	got="$("${PROXY_BIN}" --version)"
 	if [ "${got}" != "cortex $1" ]; then
@@ -258,6 +265,11 @@ INSTALL_TAG="${OLDER_TAG:-${TAG}}"
 log "Fresh install: ${INSTALL_TAG}"
 install_cortex "${INSTALL_TAG}"
 assert_healthy
+assert_running_binary_is_current
+# INSTALL_TAG is OLDER_TAG when it's set — always a real v* tag, never
+# main-latest, so its own version string IS the tag; expected_version (which
+# resolves main-latest's main-<sha> form) only applies when INSTALL_TAG == TAG.
+assert_running_version_is "${OLDER_TAG:-${expected_version}}"
 
 if [ -n "${OLDER_TAG}" ]; then
 	# A marker only this test writes, to prove config survives the upgrade
