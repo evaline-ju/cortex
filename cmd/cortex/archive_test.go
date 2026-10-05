@@ -90,6 +90,40 @@ func TestOpenSessionArchive_RecordsWhatTheStoreAppends(t *testing.T) {
 	}
 }
 
+// The archive runs by default on a local install, so it must open from a config that never
+// mentions it, as well as from one that sets its bounds without saying enabled.
+func TestOpenSessionArchive_OpensWithEnabledUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		cfg           *config.Config
+		wantRetention int
+	}{
+		{"no session.archive block", &config.Config{}, 30},
+		{"bounds without enabled", &config.Config{Session: config.SessionConfig{
+			Archive: &config.SessionArchiveConfig{RetentionDays: 7}}}, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inside, _ := localConfig(t)
+			st := session.New(0, 0, 0)
+			defer st.Close()
+			arch := openSessionArchive(tc.cfg, inside, st)
+			if arch == nil {
+				t.Fatal("the archive did not open on a local install")
+			}
+			if got := arch.RetentionDays(); got != tc.wantRetention {
+				t.Errorf("RetentionDays = %d, want %d", got, tc.wantRetention)
+			}
+			st.Append("s1", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest})
+			if err := arch.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if arch.LastSeq("s1") != 1 {
+				t.Fatalf("the archive did not see the store's event: LastSeq = %d", arch.LastSeq("s1"))
+			}
+		})
+	}
+}
+
 func TestOpenSessionArchive_NotOnALocalInstallIsNil(t *testing.T) {
 	_, outside := localConfig(t)
 	on := true

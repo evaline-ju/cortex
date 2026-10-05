@@ -72,7 +72,10 @@ func openSessionArchive(cfg *config.Config, configPath string, sessions *session
 		slog.Warn("session archive disabled — cannot determine where to write it", "error", err)
 		return nil
 	}
-	ac := cfg.Session.Archive
+	var ac config.SessionArchiveConfig
+	if cfg.Session.Archive != nil {
+		ac = *cfg.Session.Archive
+	}
 	arch, err := archive.Open(dir, archive.WithRetentionDays(ac.RetentionDays), archive.WithMaxBytes(ac.MaxBytes))
 	if err != nil {
 		slog.Warn("session archive disabled — could not open it", "dir", dir, "error", err,
