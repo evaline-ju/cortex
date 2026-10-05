@@ -508,3 +508,29 @@ func TestCharacterize_ServiceInstall_LoginHomeWarning(t *testing.T) {
 		t.Errorf("raw stderr holds the login-home warning %d times, want 1:\n%q", n, errb.String())
 	}
 }
+
+// A proxy that ran the session archive kept its history through the restart, so the install
+// says the archive keeps it rather than that it was cleared.
+func TestCharacterize_ServiceInstall_OverAnArchivingProxy(t *testing.T) {
+	fakeSupervisor(t)
+	sc := newServiceScene(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"sessions":[],"archive":{"bytes":1,"maxBytes":2,"retentionDays":30}}`))
+	}))
+	t.Cleanup(api.Close)
+	f, err := os.OpenFile(sc.p.configFile, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("  session_api_addr: " + strings.TrimPrefix(api.URL, "http://") + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	run := sc.install(t, true, false)
+	const want = "  The proxy's memory is cleared, but its session archive is not: H in\n" +
+		"  agentop lists the sessions it holds.\n"
+	if run.code != 0 || !strings.HasSuffix(run.out, want) || strings.Contains(run.out, "history is cleared") {
+		t.Fatalf("exit %d, stdout:\n%s\nwant it to end with:\n%s", run.code, run.out, want)
+	}
+}

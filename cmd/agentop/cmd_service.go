@@ -2,12 +2,14 @@ package main
 
 import (
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -448,6 +450,7 @@ func runServiceInstall(p servicePaths, adopt int, forceRestart, announceUnit boo
 	// Whether anything is SERVING, captured before the replacement and reported after it
 	// succeeds — see reportHistoryCleared for why neither half of that is optional.
 	wasServing := adopt > 0 || proxyServing(p)
+	wasArchiving := wasServing && proxyArchives(p)
 
 	if adopt > 0 {
 		fmt.Fprintf(stdout, "Stopping pid %d...\n", adopt)
@@ -516,7 +519,7 @@ func runServiceInstall(p servicePaths, adopt int, forceRestart, announceUnit boo
 	if p.healthURL != "" {
 		if waitHealthy(p.healthURL, serviceReadyTimeout) {
 			reportInstallSuccess(true, stdout)
-			reportHistoryCleared(wasServing, stdout)
+			reportHistoryCleared(wasServing, wasArchiving, stdout)
 			return installResult{healthy: true, replaced: true}
 		}
 		fmt.Fprintf(stderr, "\nagentop: installed, but nothing answered %s within %s.\n"+
@@ -525,7 +528,7 @@ func runServiceInstall(p servicePaths, adopt int, forceRestart, announceUnit boo
 		return installResult{exit: 1, replaced: true}
 	}
 	reportInstallSuccess(false, stdout)
-	reportHistoryCleared(wasServing, stdout)
+	reportHistoryCleared(wasServing, wasArchiving, stdout)
 	return installResult{replaced: true}
 }
 
@@ -995,12 +998,51 @@ const historyProbeBudget = 250 * time.Millisecond
 //
 // Extracted rather than inlined so the gate is assertable: serviceInstall reaches these
 // lines only after writing a unit file and calling launchctl, which a unit test cannot.
-func reportHistoryCleared(wasServing bool, stdout io.Writer) {
+//
+// archived is whether the replaced proxy ran a session archive; see proxyArchives. There the
+// restart clears memory and not the history, so saying it was cleared would be false.
+func reportHistoryCleared(wasServing, archived bool, stdout io.Writer) {
 	if !wasServing {
+		return
+	}
+	if archived {
+		fmt.Fprintln(stdout, "  The proxy's memory is cleared, but its session archive is not: H in")
+		fmt.Fprintln(stdout, "  agentop lists the sessions it holds.")
 		return
 	}
 	fmt.Fprintln(stdout, "  Captured session history is cleared: the store is in memory, so any")
 	fmt.Fprintln(stdout, "  timeline you were reading in agentop starts over.")
+}
+
+// proxyArchives reports whether the proxy now answering on p's session API runs a session
+// archive: its ?archived=true list carries an archive object only then. Asked of the running
+// proxy, before it is replaced, because the history a restart keeps or loses is that proxy's —
+// the first restart onto an archiving release replaces one that never wrote any.
+func proxyArchives(p servicePaths) bool {
+	cfg, err := config.Load(p.configFile)
+	if err != nil {
+		return false
+	}
+	base := dialURL(cfg.Listener.SessionAPIAddr)
+	if base == "" {
+		return false
+	}
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get(base + "/v1/sessions?archived=true") //nolint:noctx // bounded by Timeout
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var body struct {
+		Archive json.RawMessage `json:"archive"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&body); err != nil {
+		return false
+	}
+	return len(body.Archive) > 0 && string(body.Archive) != "null"
 }
 
 // serviceIsCurrent reports whether the installed service already matches what
