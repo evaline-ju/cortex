@@ -28,3 +28,21 @@ func (s *Store) archivedSeqLocked(id string) uint64 {
 	}
 	return last
 }
+
+// EntryStarter is optionally implemented by a SeqSeeder. The store calls EntryStarted under its
+// write lock each time it creates an entry for sessionID, with the seq it numbers that entry's
+// events after. A rename of the entry carries the events numbered after it; those at or below
+// it were recorded under sessionID before this entry existed, and stay there. Like LastSeq, it
+// must be a memory update.
+type EntryStarter interface {
+	EntryStarted(sessionID string, after uint64)
+}
+
+// entryStartedLocked tells every EntryStarter that an entry for id numbers after `after`. s.mu held.
+func (s *Store) entryStartedLocked(id string, after uint64) {
+	for _, r := range s.recorders {
+		if es, ok := r.(EntryStarter); ok {
+			es.EntryStarted(id, after)
+		}
+	}
+}

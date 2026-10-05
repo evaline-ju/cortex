@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -117,6 +118,10 @@ type Archive struct {
 	// by Record and Rekeyed, so it is right before the writer has caught up.
 	mu      sync.Mutex
 	lastSeq map[string]uint64
+	// started is where the store's live entry for an id began numbering, from EntryStarted, for
+	// ids that held history then. The entry's first queued event carries it to the writer, and
+	// its rename tells the writer which segments move.
+	started map[string]entryStart
 
 	dropped, writeErrors, droppedRenames atomic.Uint64
 	bytes                                atomic.Int64
@@ -130,6 +135,12 @@ type Archive struct {
 	lastDropLog   time.Time
 }
 
+// entryStart is where a store entry began numbering; see Archive.started.
+type entryStart struct {
+	after  uint64
+	queued bool
+}
+
 // sessionState is one archived session as the writer goroutine holds it.
 type sessionState struct {
 	dir       string
@@ -137,6 +148,10 @@ type sessionState struct {
 	w         *segmentWriter
 	lastWrite time.Time
 	metaDirty bool
+	// startAfter is where the store's current entry began numbering, once its first event
+	// arrived, and before is the summary of what the session held then.
+	startAfter uint64
+	before     *session.SummaryFold
 }
 
 type opKind uint8
@@ -153,6 +168,7 @@ type op struct {
 	kind   opKind
 	id, to string
 	ev     pipeline.SessionEvent
+	after  uint64 // where a store entry began: on its first queued event, and on its rename
 	f      func()
 	done   chan struct{}
 }
@@ -172,6 +188,7 @@ func Open(root string, opts ...Option) (*Archive, error) {
 		maxOpen:    defaultMaxOpen,
 		tickEvery:  defaultTickEvery,
 		lastSeq:    map[string]uint64{},
+		started:    map[string]entryStart{},
 		sessions:   map[string]*sessionState{},
 	}
 	for _, o := range opts {
@@ -258,21 +275,42 @@ func (a *Archive) Record(sessionID string, e *pipeline.SessionEvent) {
 		return
 	}
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	if e.Seq > a.lastSeq[sessionID] {
 		a.lastSeq[sessionID] = e.Seq
 	}
-	a.mu.Unlock()
 	// Every send happens under the store's write lock, so this check and the send below cannot
 	// race another producer; the writer only ever makes room.
 	if len(a.ops) >= cap(a.ops)-reserve {
 		a.dropped.Add(1)
 		return
 	}
+	o := op{kind: opEvent, id: sessionID, ev: *e}
+	st, starting := a.started[sessionID]
+	if starting && !st.queued {
+		o.after = st.after
+	}
 	select {
-	case a.ops <- op{kind: opEvent, id: sessionID, ev: *e}:
+	case a.ops <- o:
+		if starting && !st.queued {
+			st.queued = true
+			a.started[sessionID] = st
+		}
 	default:
 		a.dropped.Add(1)
 	}
+}
+
+// EntryStarted implements session.EntryStarter. A memory update: it runs under the store's
+// write lock.
+func (a *Archive) EntryStarted(sessionID string, after uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if after == 0 {
+		delete(a.started, sessionID)
+		return
+	}
+	a.started[sessionID] = entryStart{after: after}
 }
 
 // Rekeyed implements session.Rekeyer: the session's history follows its new id. The rename
@@ -282,13 +320,19 @@ func (a *Archive) Rekeyed(oldID, newID string) {
 		return
 	}
 	a.mu.Lock()
+	st := a.started[oldID]
+	delete(a.started, oldID)
+	delete(a.started, newID)
 	if n, ok := a.lastSeq[oldID]; ok {
 		delete(a.lastSeq, oldID)
+		if st.after > 0 {
+			a.lastSeq[oldID] = st.after
+		}
 		a.lastSeq[newID] = max(a.lastSeq[newID], n)
 	}
 	a.mu.Unlock()
 	select {
-	case a.ops <- op{kind: opRename, id: oldID, to: newID}:
+	case a.ops <- op{kind: opRename, id: oldID, to: newID, after: st.after}:
 	default:
 		a.droppedRenames.Add(1)
 		slog.Error("session archive: a rename was lost to a full queue; the session's history stays under its old id",
@@ -372,13 +416,27 @@ func (a *Archive) take(o op) {
 	}
 	switch o.kind {
 	case opEvent:
+		if o.after > 0 {
+			a.begin(o.id, o.after)
+		}
 		a.write(o.id, &o.ev)
 	case opRename:
-		a.rename(o.id, o.to)
+		a.rename(o.id, o.to, o.after)
 	case opFunc:
 		o.f()
 		close(o.done)
 	}
+}
+
+// begin marks where a new store entry for id began numbering: its events start a segment of
+// their own, and the summary of what came before is kept, so a rename can part the two.
+func (a *Archive) begin(id string, after uint64) {
+	s := a.sessions[id]
+	if s == nil {
+		return
+	}
+	a.closeWriter(s)
+	s.startAfter, s.before = after, s.meta.Summary.Clone()
 }
 
 // write appends one event to its session's open segment, opening one if needed.
@@ -481,7 +539,7 @@ func (a *Archive) writeFailed(s *sessionState, err error) {
 // rename follows the store's rename of oldID to newID: session.json is rewritten with the new id
 // first, then the directory moved. A crash between the two leaves a session.json naming the new
 // id under the old directory, which adopt finishes at the next start.
-func (a *Archive) rename(oldID, newID string) {
+func (a *Archive) rename(oldID, newID string, after uint64) {
 	s := a.sessions[oldID]
 	if s == nil {
 		return
@@ -497,6 +555,9 @@ func (a *Archive) rename(oldID, newID string) {
 			"from", oldID, "to", newID)
 		return
 	}
+	if after > 0 && a.renameEntry(s, oldID, newID, newDir, after) {
+		return
+	}
 	s.meta.ID = newID
 	a.writeMeta(s)
 	if err := os.Rename(s.dir, newDir); err != nil {
@@ -507,6 +568,107 @@ func (a *Archive) rename(oldID, newID string) {
 	}
 	delete(a.sessions, oldID)
 	a.sessions[newID] = s
+}
+
+// renameEntry renames the segments of oldID that a store entry numbering after `after` wrote,
+// and leaves the rest under oldID. It reports false when every segment is the entry's, for
+// rename to move the directory whole.
+func (a *Archive) renameEntry(s *sessionState, oldID, newID, newDir string, after uint64) bool {
+	segs := slices.Clone(s.meta.Segments)
+	if s.w != nil {
+		segs = append(segs, s.w.info())
+	}
+	isEntry := func(seg SegmentInfo) bool { return seg.Events > 0 && seg.FirstSeq > after }
+	entry := 0
+	for _, seg := range segs {
+		if isEntry(seg) {
+			entry++
+		}
+	}
+	startAfter, before := s.startAfter, s.before
+	s.startAfter, s.before = 0, nil
+	if entry == len(segs) {
+		return false
+	}
+	if entry == 0 {
+		return true
+	}
+	if startAfter != after {
+		slog.Warn("session archive: cannot tell a renamed session's events from earlier ones; keeping them under the old id",
+			"from", oldID, "to", newID)
+		return true
+	}
+
+	a.closeWriter(s)
+	var keep, move []SegmentInfo
+	for _, seg := range s.meta.Segments {
+		if isEntry(seg) {
+			move = append(move, seg)
+		} else {
+			keep = append(keep, seg)
+		}
+	}
+	slices.SortFunc(move, func(x, y SegmentInfo) int { return cmp.Compare(x.FirstSeq, y.FirstSeq) })
+	since := session.NewSummaryFold()
+	var createdAt time.Time
+	for _, seg := range move {
+		if _, err := readSegment(filepath.Join(s.dir, seg.File), func(e *pipeline.SessionEvent) bool {
+			if createdAt.IsZero() {
+				createdAt = e.At
+			}
+			since.Add(oldID, e)
+			return true
+		}); err != nil {
+			slog.Warn("session archive: could not read a renamed segment back for its summary", "file", seg.File, "error", err)
+		}
+	}
+	if createdAt.IsZero() {
+		createdAt = a.now()
+	}
+	ns := &sessionState{
+		dir:       newDir,
+		meta:      &sessionMeta{ID: newID, CreatedAt: createdAt, UpdatedAt: latestWrite(move), Summary: since, Segments: move},
+		lastWrite: s.lastWrite,
+	}
+	// session.json first: a crash before a segment moves leaves it listed where it is not, which
+	// reconcile drops, rather than a directory loadMetas cannot read.
+	if err := writeMeta(newDir, ns.meta); err != nil {
+		a.writeErrors.Add(1)
+		slog.Warn("session archive: could not write a renamed session's session.json; keeping its history under the old id",
+			"from", oldID, "to", newID, "error", err)
+		os.RemoveAll(newDir)
+		return true
+	}
+	ns.meta.Segments = nil
+	for _, seg := range move {
+		if err := os.Rename(filepath.Join(s.dir, seg.File), filepath.Join(newDir, seg.File)); err != nil {
+			a.writeErrors.Add(1)
+			slog.Warn("session archive: could not move a renamed session's segment; it stays under the old id",
+				"from", oldID, "to", newID, "file", seg.File, "error", err)
+			keep = append(keep, seg)
+			ns.metaDirty = true
+			continue
+		}
+		ns.meta.Segments = append(ns.meta.Segments, seg)
+	}
+	s.meta.Segments, s.meta.Summary, s.meta.UpdatedAt = keep, before, latestWrite(keep)
+	a.writeMeta(s)
+	if ns.metaDirty {
+		a.writeMeta(ns)
+	}
+	a.sessions[newID] = ns
+	return true
+}
+
+// latestWrite is the last time any of segs was written.
+func latestWrite(segs []SegmentInfo) time.Time {
+	var t time.Time
+	for _, seg := range segs {
+		if seg.LastWrite.After(t) {
+			t = seg.LastWrite
+		}
+	}
+	return t
 }
 
 // tick is the writer goroutine's clock: flush, idle close, session.json cadence, retention.

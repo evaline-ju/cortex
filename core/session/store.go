@@ -466,17 +466,19 @@ func (s *Store) appendLocked(sessionID string, b *Bucket, event pipeline.Session
 		var ok bool
 		sess, ok = s.sessions[sessionID]
 		if !ok {
+			seed := s.archivedSeqLocked(sessionID)
 			sess = &entry{
 				ID:        sessionID,
 				CreatedAt: now,
 				// After whatever the archive already numbered under this id; see SeqSeeder.
-				nextSeq: s.archivedSeqLocked(sessionID),
+				nextSeq: seed,
 				// NOT THE ZERO VALUE: rankRename is 0, so a zero-valued titleRank would claim this
 				// session had already been renamed and no candidate could ever beat it — the first
 				// prose message would be unnameable. rankNone is the "nothing has named it" rank.
 				titleRank: rankNone,
 			}
 			s.sessions[sessionID] = sess
+			s.entryStartedLocked(sessionID, seed)
 		}
 	}
 

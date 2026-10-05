@@ -2,6 +2,8 @@ package session
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/rossoctl/cortex/core/cost/usage"
@@ -96,6 +98,14 @@ type SummaryFold struct {
 
 // NewSummaryFold returns an empty fold.
 func NewSummaryFold() *SummaryFold { return &SummaryFold{titleRank: rankNone} }
+
+// Clone returns a copy of f that later Adds to either do not reach.
+func (f *SummaryFold) Clone() *SummaryFold {
+	c := *f
+	c.units = maps.Clone(f.units)
+	c.agents = slices.Clone(f.agents)
+	return &c
+}
 
 // Add folds one event recorded under sessionID. It does the work appendLocked hoists above the
 // store's lock — a plugin-map decode and a scan of message content — so call it from a

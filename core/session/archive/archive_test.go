@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"testing"
@@ -562,4 +563,207 @@ func TestStats_ReportsBytesAndBounds(t *testing.T) {
 	if st.Bytes <= 0 || st.MaxBytes != 12345 || st.RetentionDays != MaxRetentionDays {
 		t.Fatalf("Stats = %+v", st)
 	}
+}
+
+// A rename carries the renamed entry's events, and what an earlier entry recorded under the
+// same id stays under it: the store renames one entry, never the id's whole history. Both of
+// the store's renames, each after the two ways an id's entry is re-created.
+func TestRekeyed_MovesOnlyTheRenamedEntrysEvents(t *testing.T) {
+	renames := []struct {
+		name, from string
+		rename     func(st *session.Store, to string)
+	}{
+		{"claim", session.PendingSessionID("claude-code"), func(st *session.Store, to string) { st.Claim(to, "claude-code") }},
+		{"rekey", session.DefaultSessionID, func(st *session.Store, to string) { st.Rekey(session.DefaultSessionID, to) }},
+	}
+	earlier, entry := synthSession(60, 1, 512), synthSession(61, 1, 512) // 3 events each
+	for _, rn := range renames {
+		check := func(t *testing.T, root string, a *Archive, st *session.Store) {
+			t.Helper()
+			st.Append(rn.from, entry[0])
+			rn.rename(st, "Y")
+			st.Append("Y", entry[1])
+			if got := a.LastSeq(rn.from); got != 3 {
+				t.Errorf("LastSeq(%s) after the rename = %d, want 3: its earlier history stays", rn.from, got)
+			}
+			if err := a.Close(); err != nil {
+				t.Fatal(err)
+			}
+			wantHistory(t, root, "Y", 4, 5)
+			wantHistory(t, root, rn.from, 1, 2, 3)
+			b := openTest(t, root, newClock())
+			defer b.Close()
+			if b.LastSeq("Y") != 5 || b.LastSeq(rn.from) != 3 {
+				t.Fatalf("LastSeq after reopening: Y=%d %s=%d, want 5 and 3", b.LastSeq("Y"), rn.from, b.LastSeq(rn.from))
+			}
+		}
+		t.Run(rn.name+"/after a restart", func(t *testing.T) {
+			root := t.TempDir()
+			a, st := restarted(t, root, rn.from, earlier)
+			defer st.Close()
+			check(t, root, a, st)
+		})
+		t.Run(rn.name+"/after an eviction", func(t *testing.T) {
+			root := t.TempDir()
+			a := openTest(t, root, newClock())
+			st := session.New(0, 0, 1) // one resident session: the next one evicts it
+			defer st.Close()
+			st.AddRecorder(a)
+			for _, e := range earlier {
+				st.Append(rn.from, e)
+			}
+			st.Append("other", synthSession(62, 1, 512)[0]) // evicts rn.from; its segment stays open
+			check(t, root, a, st)
+		})
+	}
+}
+
+// wantHistory checks that id's archived events are numbered want, in order, and that its
+// session.json summary is the fold of exactly those events.
+func wantHistory(t *testing.T, root, id string, want ...uint64) {
+	t.Helper()
+	evs := onDisk(t, root, id)
+	var got []uint64
+	own := session.NewSummaryFold()
+	for i := range evs {
+		got = append(got, evs[i].Seq)
+		own.Add(evs[i].SessionID, &evs[i])
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s holds seqs %v, want %v", id, got, want)
+	}
+	m, err := readMeta(filepath.Join(root, dataDirName, dirName(id)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g, w := m.Summary.Summary(id), own.Summary(id); g.EventCount != w.EventCount || g.Title != w.Title {
+		t.Fatalf("%s summary = %d events titled %q, want %d titled %q", id, g.EventCount, g.Title, w.EventCount, w.Title)
+	}
+}
+
+// restarted archives events under id with one store and archive, closes both, and returns a
+// reopened archive with a fresh store recording into it: a proxy restart.
+func restarted(t *testing.T, root, id string, events []pipeline.SessionEvent, opts ...Option) (*Archive, *session.Store) {
+	t.Helper()
+	clk := newClock()
+	a := openTest(t, root, clk)
+	st := session.New(0, 0, 0)
+	st.AddRecorder(a)
+	for _, e := range events {
+		st.Append(id, e)
+	}
+	a.Close()
+	st.Close()
+	b := openTest(t, root, clk, opts...)
+	st = session.New(0, 0, 0)
+	st.AddRecorder(b)
+	return b, st
+}
+
+// What a rename moves is decided by the events of the entry that reached disk, wherever they
+// landed: an entry whose first event never reached the writer, one that reached nothing, and an
+// entry renamed a second time. Each starts after a restart over 3 earlier events under default.
+func TestRekeyed_MovesWhatTheEntryWrote(t *testing.T) {
+	from := session.DefaultSessionID
+	entry := synthSession(64, 1, 512)
+	cases := []struct {
+		name string
+		opts []Option
+		// run appends the entry's events and renames it, ending with the entry under to.
+		run  func(a *Archive, st *session.Store) (to string)
+		want []uint64 // to's seqs; nil for no history
+	}{
+		{"the first event is dropped by a full queue", []Option{WithQueueDepth(reserve + 3)},
+			func(a *Archive, st *session.Store) string {
+				a.gate = make(chan struct{})
+				for _, e := range synthSession(65, 2, 512) {
+					st.Append("filler", e) // more than the queue holds short of its reserve
+				}
+				st.Append(from, entry[0])
+				close(a.gate)
+				settle(a)
+				st.Append(from, entry[1])
+				st.Rekey(from, "Y")
+				return "Y"
+			}, []uint64{5}},
+		{"the first event is dropped by a paused writer", nil,
+			func(a *Archive, st *session.Store) string {
+				a.paused.Store(true)
+				st.Append(from, entry[0])
+				settle(a)
+				a.paused.Store(false)
+				st.Append(from, entry[1])
+				st.Rekey(from, "Y")
+				return "Y"
+			}, []uint64{5}},
+		{"every event is dropped", nil,
+			func(a *Archive, st *session.Store) string {
+				a.paused.Store(true)
+				st.Append(from, entry[0])
+				st.Rekey(from, "Y")
+				settle(a)
+				return "Y"
+			}, nil},
+		{"the entry is renamed twice", nil,
+			func(a *Archive, st *session.Store) string {
+				st.Append(from, entry[0])
+				st.Rekey(from, "Y")
+				st.Rekey("Y", "Z")
+				st.Append("Z", entry[1])
+				return "Z"
+			}, []uint64{4, 5}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			a, st := restarted(t, root, from, synthSession(63, 1, 512), c.opts...)
+			defer st.Close()
+			to := c.run(a, st)
+			if err := a.Close(); err != nil {
+				t.Fatal(err)
+			}
+			wantHistory(t, root, from, 1, 2, 3)
+			if c.want == nil {
+				if _, err := os.Stat(filepath.Join(root, dataDirName, dirName(to))); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s has a directory, want none: %v", to, err)
+				}
+				return
+			}
+			wantHistory(t, root, to, c.want...)
+		})
+	}
+}
+
+// An entry created over no history carries everything to its rename, even when an earlier
+// entry under the id began over history that retention has since deleted.
+func TestRekeyed_AnEntryOverNoHistoryMovesWhole(t *testing.T) {
+	root, clk := t.TempDir(), newClock()
+	a := openTest(t, root, clk)
+	st := session.New(0, 0, 1)
+	st.AddRecorder(a)
+	from := session.DefaultSessionID
+	for _, e := range synthSession(66, 1, 512) {
+		st.Append(from, e)
+	}
+	a.Close()
+	st.Close()
+
+	b := openTest(t, root, clk)
+	st = session.New(0, 0, 1)
+	defer st.Close()
+	st.AddRecorder(b)
+	st.Append(from, synthSession(67, 1, 512)[0]) // an entry over history: numbered from 4
+	settle(b)
+	clk.advance(time.Duration(defaultRetentionDays+1) * 24 * time.Hour)
+	tick(b) // closes the idle segment and prunes the whole session
+	if b.LastSeq(from) != 0 {
+		t.Fatalf("LastSeq(%s) after retention = %d, want 0", from, b.LastSeq(from))
+	}
+	st.Append("other", synthSession(68, 1, 512)[0]) // evicts the entry
+	st.Append(from, synthSession(69, 1, 512)[0])    // a new one, over nothing: numbered from 1
+	st.Rekey(from, "Y")
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantHistory(t, root, "Y", 1)
 }
