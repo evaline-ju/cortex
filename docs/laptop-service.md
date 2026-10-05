@@ -670,6 +670,12 @@ above are done. Without `--purge` `~/.cortex` stays too, so a later install pick
 where you left off, and a run where every removal worked ends by saying how to delete
 it yourself.
 
+Restart any `claude` that was already running: it read its settings when it started, so
+it still points at Cortex. `claude --resume` picks the conversation back up. IBM Bob
+needs a restart too; OpenCode's service is restarted for you. A later install routes no
+agent by itself, so run each agent's `agentop configure <agent> enable` again, or pass
+`--claude-code` to the installer for Claude Code.
+
 #### Check nothing is left
 
 ```sh
