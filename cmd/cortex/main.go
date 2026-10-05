@@ -992,6 +992,8 @@ func main() {
 			// nil when the ledger is off, which handleUsage reads as "serve the ring's
 			// maximum window and say which window that was".
 			sessionapi.WithCostLedger(costLedger),
+			// nil unless the archive runs; pages and ?archived=true then read history from disk.
+			sessionapi.WithArchive(sessArchive),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",

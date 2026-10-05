@@ -733,3 +733,35 @@ func TestGetUsageWindow_BadRequestDetailCarriesNoControlBytes(t *testing.T) {
 		}
 	}
 }
+
+// History is the archived list, asked for explicitly, with the archive's usage beside it.
+func TestListSessionsArchived_SendsTheQueryAndDecodesUsage(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions" || r.URL.Query().Get("archived") != "true" {
+			t.Errorf("request %s, want /v1/sessions?archived=true", r.URL)
+		}
+		w.Write([]byte(`{"sessions":[{"id":"old","resident":false}],"archive":{"bytes":42,"maxBytes":100,"retentionDays":30}}`))
+	}))
+	defer ts.Close()
+	list, err := New(ts.URL).ListSessionsArchived(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Sessions) != 1 || list.Sessions[0].Resident == nil || *list.Sessions[0].Resident ||
+		list.Archive == nil || list.Archive.Bytes != 42 {
+		t.Fatalf("list = %+v", list)
+	}
+}
+
+// A proxy without an archive, or one that predates it, ignores the query and answers the plain
+// list: no archive object, and no error.
+func TestListSessionsArchived_AnOldProxyIgnoresTheQuery(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"sessions":[{"id":"live"}]}`))
+	}))
+	defer ts.Close()
+	list, err := New(ts.URL).ListSessionsArchived(context.Background())
+	if err != nil || list.Archive != nil || len(list.Sessions) != 1 {
+		t.Fatalf("list = %+v, err %v", list, err)
+	}
+}

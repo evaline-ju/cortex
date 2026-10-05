@@ -290,11 +290,12 @@ var paneKeys = map[paneID]keyGroup{
 	paneSessions: {
 		title: "SESSIONS (this pane)",
 		purpose: "one row per agent session, with its tokens, cost and context. " +
-			"Figures are per session and reset when the proxy restarts.",
+			"Figures are per session; with the session archive on, H also lists sessions the proxy no longer holds in memory.",
 		bindings: []keyBinding{
 			{"↑↓ / jk", "navigate"},
 			{"↵ / → / l", "drill into session"},
 			{"/", "filter"},
+			{"H", "history: also list archived sessions"},
 			{"esc", "back to the agents picker, else pods picker"},
 		},
 	},

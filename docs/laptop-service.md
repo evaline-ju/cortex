@@ -188,13 +188,14 @@ Set `session.ttl` (e.g. `30m`) if you would rather raw prompts not sit in memory
 indefinitely.
 
 The store is in memory only, so a restart clears it regardless. Both `session.*` limits
-need a restart to change — they are not hot-reloaded. Cost totals are the one thing that
-does survive a restart; see below.
+need a restart to change — they are not hot-reloaded. Cost totals survive a restart, and so
+do the sessions themselves if you turn on the session archive; see below for both.
 
 ## Cost history is written to `~/.cortex/cost`
 
 **A local install keeps a cost ledger on disk, on by default.** Sessions themselves —
-prompts, completions, tool arguments — stay in memory and die with the process. Per-minute
+prompts, completions, tool arguments — stay in memory and die with the process, unless you
+turn on the [session archive](#session-history-can-be-kept-in-cortexsessions). Per-minute
 cost totals do not: they are appended to `~/.cortex/cost/YYYY-MM-DD.jsonl`, one file per
 local day, **kept for 31 days** — the length of the longest month, so `window=month` can be
 answered in full on the 31st.
@@ -293,6 +294,61 @@ Two other knobs, same restart rule:
 |---|---|---|
 | `cost_ledger.dir` | `~/.cortex/cost` | Must be an absolute path. A relative one is refused, because it would resolve against whatever directory the proxy started from |
 | `cost_ledger.retention_days` | 31 | The longest month, so `window=month` is answerable in full on the 31st; a shorter value makes that total a partial one and it is marked as such. Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A retention shorter than the window is disclosed rather than silent — `DaysOutsideRetention` counts the days asked for beyond the setting, the band marks the total as a floor and `agentop cost` prints a coverage line. The floor of 9 is exactly `window=7d`'s worst case, so a legal setting can never answer *that* window short; a `month` asked of a 9-day ledger can |
+
+## Session history can be kept in `~/.cortex/sessions`
+
+**Off by default in this release; opt in with:**
+
+```yaml
+session:
+  archive:
+    enabled: true
+```
+
+in `~/.cortex/config.yaml`, then `agentop service restart`. From then on every event the
+session store records is also written to disk, so a session outlives a restart and the
+store's own eviction (`session.max_sessions`, a `session.ttl`). In `agentop`, `H` on the
+sessions pane lists the sessions only the archive still holds, marked `archived`, and Enter
+opens one like any other.
+
+**Unlike the cost ledger, this is the content.** Prompts, completions, tool arguments and
+tool results — everything the session API serves — sit in
+`~/.cortex/sessions/data/<one directory per session>/`, readable by anyone who can read your
+home directory. The directories are created `0700` and the files `0600`. The proxy says what
+the archive holds in its startup log line, so `grep 'session archive' ~/.cortex/proxy.log`
+shows which state you are in.
+
+**It runs only on a local install** — a config inside `~/.cortex`, which is what `agentop
+service install` and `--local` produce. Anywhere else `enabled: true` is refused with a WARN
+naming the reason, and there is deliberately no `dir` setting: raw prompts on a cluster's
+volume are a decision of their own, and a cluster should not reach it by mounting a path.
+
+**How big it gets.** Each session's events are written as zstd-compressed segments that store
+a repeated message once rather than once per turn — the same saving the in-memory store makes,
+since every LLM request re-sends the conversation so far. The benchmark fixture comes to about
+1.6 KB per event. Two bounds apply, checked hourly and on startup, and the oldest segments go
+first by the time they were last written:
+
+| Setting | Default | Notes |
+|---|---|---|
+| `session.archive.enabled` | off | `false` always wins |
+| `session.archive.retention_days` | 30 | how long a segment is kept after its last write; at most 3650 |
+| `session.archive.max_bytes` | 2 GiB | the archive's total size; past it, the oldest segments go first |
+
+A full disk does not stop the proxy. The archive stops writing until its next hourly pass,
+and requests are served as before; only the history has a gap.
+
+**What it does not promise.** Writing happens off the request path, so a request never waits
+on the disk — and the cost of that is that a burst the writer cannot keep up with is dropped
+*from the archive*, never from memory. An unclean kill loses at most the last second.
+`GET /v1/sessions?archived=true` reports both the archive's size and what it lost, under
+`archive` (`bytes`, `maxBytes`, `retentionDays`, and `droppedEvents`, `writeErrors`,
+`droppedRenames`, `paused` when any is nonzero); nonzero means what you are reading has gaps.
+
+**Same restart rule as the ledger.** The archive is opened once at startup, and a live edit
+of anything under `session` is refused rather than half-applied. To stop it, set
+`enabled: false` and restart; that leaves what is on disk, and `rm -rf ~/.cortex/sessions`
+with the proxy stopped removes it.
 
 ## `agentop: command not found`
 

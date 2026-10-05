@@ -1,0 +1,259 @@
+package sessionapi
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/rossoctl/cortex/core/pipeline"
+	"github.com/rossoctl/cortex/core/session"
+	"github.com/rossoctl/cortex/core/session/archive"
+)
+
+// restarted builds what a proxy looks like after a restart: an archive holding s1's first ten
+// events and old's three, written by a previous process, and a fresh store numbering from it.
+func restarted(t *testing.T) (*httptest.Server, *session.Store, *archive.Archive) {
+	t.Helper()
+	root := t.TempDir()
+	prev, err := archive.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevStore := session.New(0, 0, 0)
+	prevStore.AddRecorder(prev)
+	for i := range 10 {
+		prevStore.Append("s1", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest, Host: hostN(i)})
+	}
+	for range 3 {
+		prevStore.Append("old", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest})
+	}
+	prevStore.Close()
+	if err := prev.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := archive.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := session.New(0, 0, 0)
+	store.AddRecorder(a)
+	srv := New(":0", store, WithArchive(a))
+	ts := httptest.NewServer(srv.server.Handler)
+	t.Cleanup(func() {
+		ts.Close()
+		store.Close()
+		a.Close()
+	})
+	return ts, store, a
+}
+
+func hostN(i int) string { return "h" + string(rune('a'+i)) }
+
+func seqsOf(v *pipeline.SessionView) []uint64 {
+	out := make([]uint64, len(v.Events))
+	for i, e := range v.Events {
+		out[i] = e.Seq
+	}
+	return out
+}
+
+func equalSeqs(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// A session no longer in memory is served from disk, paged the same way a resident one is.
+func TestHandleGet_ServesAnArchiveOnlySession(t *testing.T) {
+	ts, _, _ := restarted(t)
+	if v := getView(t, ts.URL, "/v1/sessions/s1"); !equalSeqs(seqsOf(v), []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}) ||
+		v.TotalEvents != 0 || v.OldestSeq != 0 {
+		t.Fatalf("whole session: seqs %v total %d oldest %d", seqsOf(v), v.TotalEvents, v.OldestSeq)
+	}
+	v := getView(t, ts.URL, "/v1/sessions/s1?limit=4")
+	if !equalSeqs(seqsOf(v), []uint64{7, 8, 9, 10}) || v.TotalEvents != 10 || v.OldestSeq != 1 {
+		t.Fatalf("tail page: seqs %v total %d oldest %d", seqsOf(v), v.TotalEvents, v.OldestSeq)
+	}
+	if v := getView(t, ts.URL, "/v1/sessions/s1?limit=3&before=7"); !equalSeqs(seqsOf(v), []uint64{4, 5, 6}) {
+		t.Fatalf("before=7: %v, want [4 5 6]", seqsOf(v))
+	}
+}
+
+// The case the feature exists for: a session resumed after a restart is a few events in memory
+// over a history on disk. One page spans both, oldest first, with no seq repeated.
+func TestHandleGet_AResumedSessionPagesIntoItsHistory(t *testing.T) {
+	ts, store, _ := restarted(t)
+	for range 3 {
+		store.Append("s1", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest})
+	}
+	v := getView(t, ts.URL, "/v1/sessions/s1?limit=5")
+	if !equalSeqs(seqsOf(v), []uint64{9, 10, 11, 12, 13}) || v.OldestSeq != 1 || v.TotalEvents < 10 {
+		t.Fatalf("seqs %v total %d oldest %d, want [9..13] from seq 1", seqsOf(v), v.TotalEvents, v.OldestSeq)
+	}
+	if v := getView(t, ts.URL, "/v1/sessions/s1?limit=3&before=11"); !equalSeqs(seqsOf(v), []uint64{8, 9, 10}) {
+		t.Fatalf("before=11: %v, want [8 9 10] from disk", seqsOf(v))
+	}
+}
+
+// The detail pane fetches one event by seq; one that is only on disk is still found, and one
+// that exists nowhere is a 404, never a neighbour.
+func TestHandleGetEvent_FindsAnEventOnDisk(t *testing.T) {
+	ts, _, _ := restarted(t)
+	code, body := getBody(t, ts.URL+"/v1/sessions/s1/events/3")
+	var e pipeline.SessionEvent
+	if code != http.StatusOK || json.Unmarshal(body, &e) != nil || e.Seq != 3 || e.SessionID != "s1" {
+		t.Fatalf("GET events/3 = %d %s", code, body)
+	}
+	if code, _ := getBody(t, ts.URL+"/v1/sessions/s1/events/99"); code != http.StatusNotFound {
+		t.Fatalf("GET events/99 = %d, want 404", code)
+	}
+}
+
+type listBody struct {
+	Sessions []session.SessionSummary `json:"sessions"`
+	Archive  *pipeline.ArchiveUsage   `json:"archive"`
+}
+
+func getList(t *testing.T, url string) listBody {
+	t.Helper()
+	code, body := getBody(t, url)
+	if code != http.StatusOK {
+		t.Fatalf("GET %s = %d", url, code)
+	}
+	var lb listBody
+	if err := json.Unmarshal(body, &lb); err != nil {
+		t.Fatal(err)
+	}
+	return lb
+}
+
+// The default list is unchanged — resident only, no archive object — so a client that does not
+// ask sees exactly what it saw before.
+func TestHandleList_ResidentOnlyByDefault(t *testing.T) {
+	ts, store, _ := restarted(t)
+	store.Append("live", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest})
+	lb := getList(t, ts.URL+"/v1/sessions")
+	if len(lb.Sessions) != 1 || lb.Sessions[0].ID != "live" || lb.Archive != nil {
+		t.Fatalf("default list = %+v", lb)
+	}
+}
+
+// ?archived=true adds what is only on disk, marked resident: false, with the archive's figures
+// and usage; a session in both appears once, as its resident row.
+func TestHandleList_ArchivedTrueAddsDiskOnlyRows(t *testing.T) {
+	ts, store, _ := restarted(t)
+	store.Append("s1", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest})
+	lb := getList(t, ts.URL+"/v1/sessions?archived=true")
+	rows := map[string]session.SessionSummary{}
+	for _, s := range lb.Sessions {
+		if _, dup := rows[s.ID]; dup {
+			t.Fatalf("%s listed twice", s.ID)
+		}
+		rows[s.ID] = s
+	}
+	if r, ok := rows["s1"]; !ok || r.Resident != nil {
+		t.Fatalf("s1 should be its resident row: %+v", r)
+	}
+	old, ok := rows["old"]
+	if !ok || old.Resident == nil || *old.Resident || old.EventCount != 3 {
+		t.Fatalf("old should be a disk-only row with 3 events: %+v", old)
+	}
+	if lb.Archive == nil || lb.Archive.Bytes <= 0 || lb.Archive.MaxBytes <= 0 || lb.Archive.RetentionDays != 30 {
+		t.Fatalf("archive usage = %+v", lb.Archive)
+	}
+}
+
+// Without an archive the session API behaves exactly as before, ?archived=true included.
+func TestHandleList_WithoutAnArchiveIgnoresArchived(t *testing.T) {
+	ts, store := newTestServer(t)
+	store.Append("live", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest})
+	lb := getList(t, ts.URL+"/v1/sessions?archived=true")
+	if len(lb.Sessions) != 1 || lb.Archive != nil {
+		t.Fatalf("list = %+v", lb)
+	}
+}
+
+// pinned builds a session whose memory has a gap: max_events 5 keeps the inbound A2A intent
+// (seq 1) pinned ahead of the newest four events, [1 18 19 20 21], while the archive recorded
+// every event from seq from on. Closing the archive flushes it; the store keeps what it holds.
+func pinned(t *testing.T, from uint64) *httptest.Server {
+	t.Helper()
+	a, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := session.New(0, 5, 0)
+	intent := pipeline.SessionEvent{At: time.Now(), Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
+		A2A: &pipeline.A2AExtension{Method: "message/send"}}
+	for seq := uint64(1); seq <= 21; seq++ {
+		if seq == from {
+			store.AddRecorder(a)
+		}
+		e := pipeline.SessionEvent{At: time.Now(), Direction: pipeline.Outbound, Phase: pipeline.SessionRequest}
+		if seq == 1 {
+			e = intent
+		}
+		store.Append("s1", e)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if v := store.ViewTail("s1", 100); !equalSeqs(seqsOf(v), []uint64{1, 18, 19, 20, 21}) {
+		t.Fatalf("fixture: memory holds %v, want the pinned intent ahead of a gap", seqsOf(v))
+	}
+	ts := httptest.NewServer(New(":0", store, WithArchive(a)).server.Handler)
+	t.Cleanup(func() {
+		ts.Close()
+		store.Close()
+	})
+	return ts
+}
+
+func seqRange(lo, hi uint64) []uint64 {
+	var out []uint64
+	for s := lo; s <= hi; s++ {
+		out = append(out, s)
+	}
+	return out
+}
+
+// A page is the newest limit events below before across memory and disk together, each seq
+// once — including where memory holds an event below a gap, as a pinned intent is. The whole-
+// session marker is set only when nothing older is held on either side.
+func TestHandleGet_FillsTheGapBehindAPinnedIntent(t *testing.T) {
+	cases := []struct {
+		path   string
+		want   []uint64
+		paged  bool // totalEvents/oldestSeq present: there is more than this response
+		oldest uint64
+	}{
+		{"/v1/sessions/s1", seqRange(1, 21), false, 0},
+		{"/v1/sessions/s1?limit=5", seqRange(17, 21), true, 1},
+		{"/v1/sessions/s1?limit=3&before=20", seqRange(17, 19), true, 1},
+		{"/v1/sessions/s1?limit=4&before=18", seqRange(14, 17), true, 1},
+		{"/v1/sessions/s1?before=3", seqRange(1, 2), true, 1},
+	}
+	// from=2: the archive starts at seq 2, so seq 1 is held in memory only. totalEvents is at
+	// least what either side holds: 21 on disk, or 20 when disk lacks the intent.
+	for from, total := range map[uint64]int{1: 21, 2: 20} {
+		ts := pinned(t, from)
+		for _, c := range cases {
+			v := getView(t, ts.URL, c.path)
+			if !equalSeqs(seqsOf(v), c.want) {
+				t.Errorf("from=%d %s: seqs %v, want %v", from, c.path, seqsOf(v), c.want)
+			}
+			if paged := v.TotalEvents != 0 || v.OldestSeq != 0; paged != c.paged || (c.paged && (v.OldestSeq != c.oldest || v.TotalEvents < total)) {
+				t.Errorf("from=%d %s: total %d oldest %d, want paged=%v from seq %d", from, c.path, v.TotalEvents, v.OldestSeq, c.paged, c.oldest)
+			}
+		}
+	}
+}

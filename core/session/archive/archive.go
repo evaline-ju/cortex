@@ -127,6 +127,13 @@ type Archive struct {
 	bytes                                atomic.Int64
 	paused                               atomic.Bool
 
+	// index is what readers see: each session's directory, segment ranges and summary,
+	// republished by the writer goroutine whenever they change. Readers decode segment files on
+	// their own goroutine against this snapshot, so a page read never stalls the writer — and a
+	// segment still being appended reads safely up to its last flushed block.
+	idxMu sync.RWMutex
+	index map[string]*indexEntry
+
 	// Writer goroutine only.
 	sessions      map[string]*sessionState
 	lastMeta      time.Time
@@ -190,6 +197,7 @@ func Open(root string, opts ...Option) (*Archive, error) {
 		lastSeq:    map[string]uint64{},
 		started:    map[string]entryStart{},
 		sessions:   map[string]*sessionState{},
+		index:      map[string]*indexEntry{},
 	}
 	for _, o := range opts {
 		o(a)
@@ -267,6 +275,7 @@ func (a *Archive) adopt(l loaded) {
 	if changed {
 		a.writeMeta(s)
 	}
+	a.publish(s)
 }
 
 // Record implements session.Recorder. It never blocks and never touches disk; see Archive.
@@ -473,6 +482,7 @@ func (a *Archive) write(id string, e *pipeline.SessionEvent) {
 	}
 	s.meta.Summary.Add(id, e)
 	s.meta.UpdatedAt, s.lastWrite, s.metaDirty = now, now, true
+	a.publish(s)
 	// A session's session.json exists from its first event, so a crash before the first
 	// metaEvery still leaves a directory reconcile can read.
 	if fresh {
@@ -519,6 +529,7 @@ func (a *Archive) retire(s *sessionState) {
 	}
 	s.w = nil
 	s.metaDirty = true
+	a.publish(s)
 }
 
 // writeFailed counts a failed write, closes the segment it hit, and pauses the archive when the
@@ -568,6 +579,8 @@ func (a *Archive) rename(oldID, newID string, after uint64) {
 	}
 	delete(a.sessions, oldID)
 	a.sessions[newID] = s
+	a.unpublish(oldID)
+	a.publish(s)
 }
 
 // renameEntry renames the segments of oldID that a store entry numbering after `after` wrote,
@@ -649,6 +662,8 @@ func (a *Archive) renameEntry(s *sessionState, oldID, newID, newDir string, afte
 		a.writeMeta(ns)
 	}
 	a.sessions[newID] = ns
+	a.publish(s)
+	a.publish(ns)
 	return true
 }
 
@@ -746,6 +761,7 @@ func (a *Archive) prune(now time.Time) {
 		}
 		s.meta.Segments = slices.DeleteFunc(s.meta.Segments, func(x SegmentInfo) bool { return x.File == r.Info.File })
 		s.metaDirty = true
+		a.publish(s)
 	}
 	for id, s := range a.sessions {
 		if s.w != nil || len(s.meta.Segments) > 0 {
@@ -756,6 +772,7 @@ func (a *Archive) prune(now time.Time) {
 			continue
 		}
 		delete(a.sessions, id)
+		a.unpublish(id)
 		// Forget the session's numbering only if nothing newer than what was on disk was
 		// recorded since: an event still queued for it must keep its seq out of reuse.
 		a.mu.Lock()
@@ -822,4 +839,35 @@ func (a *Archive) shutdown() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// indexEntry is one session as readers see it. Every field is a fresh copy, never mutated after
+// publish, so a reader holding one needs no lock.
+type indexEntry struct {
+	dir string
+	// segments are the closed segments, then — when open is true — the one still being written.
+	segments []SegmentInfo
+	open     bool
+	summary  session.SessionSummary
+}
+
+// publish replaces s's entry in the reader index. Writer goroutine only.
+func (a *Archive) publish(s *sessionState) {
+	e := &indexEntry{dir: s.dir, segments: slices.Clone(s.meta.Segments)}
+	if s.w != nil {
+		e.segments = append(e.segments, s.w.info())
+		e.open = true
+	}
+	e.summary = s.meta.Summary.Summary(s.meta.ID)
+	e.summary.CreatedAt, e.summary.UpdatedAt = s.meta.CreatedAt, s.meta.UpdatedAt
+	a.idxMu.Lock()
+	a.index[s.meta.ID] = e
+	a.idxMu.Unlock()
+}
+
+// unpublish removes id from the reader index. Writer goroutine only.
+func (a *Archive) unpublish(id string) {
+	a.idxMu.Lock()
+	delete(a.index, id)
+	a.idxMu.Unlock()
 }

@@ -757,6 +757,17 @@ agentop is for, and the other three are surfaces you visit and leave.
   that column also carried, for sessions the server has forgotten but agentop
   still holds events for, moved into `UPDATED`.
 
+  `UPDATED` also carries `archived`, but only with history on (`H`): a session
+  the proxy's memory no longer holds and its session archive still does — after
+  a restart, say, or once `session.max_sessions` evicted it. The two markers
+  answer the same question from opposite ends: `cached` is agentop remembering
+  what the proxy forgot, `archived` is the proxy remembering it on disk. Enter
+  opens an archived row like any other; its events are read back from disk a page
+  at a time — the latest on Enter, older ones with `o`, as for a resident
+  session — so a long one costs no more to open than a short one.
+  A proxy without an archive — any cluster sidecar, and a laptop that has not
+  turned it on — answers `H` with the live list and a one-line note saying so.
+
   **Every figure in this table is a per-session total**, summed over that
   session's whole history rather than over a clock window — which is why its
   TOKENS column does not match the token counts on the `$` breakdown or the
@@ -785,8 +796,12 @@ agentop is for, and the other three are surfaces you visit and leave.
    default                      1h ago                 8           —           —           —        —
 
   ● connected  2.1 events/sec   feedback: https://github.com/rossoctl/cortex/issues/new/choose
-  [↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit
+  … [H] history  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit
   ```
+
+  The footer is 111 columns whole, so at 100 it has already given up `[↑↓] nav`
+  and `[↵] drill` — the two most guessable keys on the line, and the ones placed
+  first so they are the ones to go. `[u]` and `[$]` hold to 80.
 
   The two money columns are dropped entirely on a terminal too narrow to show a
   sub-cent charge honestly — below 93 columns — rather than rounded to `$0.00`
@@ -1242,6 +1257,7 @@ Layered on top of all of them:
 | `Esc` / `←` / `h` | detail, events | back out |
 | `Esc` | sessions | back to the agents picker when the list was reached by picking an agent there; otherwise (picker mode) tear down port-forward and back to pods. Sessions and the agents picker above it are the only panes that tear down — every key-opened surface returns to its caller instead |
 | `/` | sessions, events | filter (substring match; Enter commits and saves, Esc cancels the edit and saves nothing; clear the box and press Enter to remove a saved filter) |
+| `H` | sessions | toggle history: also list the sessions the proxy's session archive holds and memory no longer does, marked `archived` in `UPDATED`. Capital because `h` backs out. Ahead of `[u]` in the footer so an 80-column cut drops it before the cost keys |
 | `s` | events | toggle skip-row visibility (default: hidden; the events footer shows the hidden count) |
 | `c` | events | open the column picker (`↑↓`/`jk` move, `space`/`x` toggle, `s` sort, `r` reset, `Esc`/`Enter`/`c` close); the selection and sort are saved on close |
 | `s` | column picker | sort by the column under the cursor: descending → ascending → chronological. Pressing it on a different column starts that column descending. `#` is not sortable — its order already *is* chronological |

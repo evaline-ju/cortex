@@ -296,8 +296,12 @@ func (m *model) rebuildSessionsTable() {
 		if agentW > 0 {
 			row = append(row, sessionAgentCell(s, agentW))
 		}
+		updated := relTime(now, s.UpdatedAt)
+		if s.Resident != nil && !*s.Resident {
+			updated = archivedMarker
+		}
 		row = append(row,
-			relTime(now, s.UpdatedAt),
+			updated,
 			// The server's count, and only ever the server's: it is the complete one.
 			// agentop's own cache holds what it snapshotted plus what it has streamed
 			// since attaching, which for a session older than the connection is a
