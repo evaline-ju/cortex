@@ -994,6 +994,9 @@ func main() {
 			sessionapi.WithCostLedger(costLedger),
 			// nil unless the archive runs; pages and ?archived=true then read history from disk.
 			sessionapi.WithArchive(sessArchive),
+			// DELETE /v1/sessions only where the API is this machine's alone: a laptop install
+			// binds loopback-only, and its one user owns the history. See sessionapi.handleClear.
+			sessionapi.WithClearAllowed(cfg.Listener.BindLoopbackOnly),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",

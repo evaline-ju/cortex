@@ -281,6 +281,8 @@ type snapshotLoadedMsg struct {
 	// means a proxy that predates the projection returned full events — in which
 	// case the detail pane already has everything and must not fetch.
 	projected bool
+	// gen is the model's clearGen when the snapshot was asked for.
+	gen uint64
 }
 
 // olderPageLoadedMsg carries a page from BEFORE the events already held — the result of
@@ -414,6 +416,10 @@ type model struct {
 	showHistory    bool
 	archiveUsage   *pipeline.ArchiveUsage
 	historyNoticed bool
+	// clearConfirm is X's confirmation, modal while non-nil; clearGen counts completed clears,
+	// so a snapshot answered before one is not stored after it. See clear.go.
+	clearConfirm *clearConfirm
+	clearGen     uint64
 	// events was labelled a ring buffer and has never been one. Nothing trims an entry in
 	// place; every write is one of six, and the CTX(1M) gauge folds forward off this map,
 	// so each one owes contextRun an action. The full inventory, because the gauge reads an
@@ -1246,6 +1252,8 @@ func streamPump(ch <-chan apiclient.StreamEvent) tea.Cmd {
 // user drills into a session the stream hasn't fully populated yet (e.g.
 // events that predate Subscribe).
 func (m *model) snapshotCmd(id string) tea.Cmd {
+	// Read here, on the Update goroutine, not in the closure: the closure runs on its own.
+	gen := m.clearGen
 	return func() tea.Msg {
 		view, err := m.client.GetSession(m.ctx, id)
 		if err != nil {
@@ -1257,7 +1265,7 @@ func (m *model) snapshotCmd(id string) tea.Cmd {
 		}
 		return snapshotLoadedMsg{
 			id: id, events: view.Events, olderNotFetched: older, serverOldest: view.OldestSeq,
-			projected: view.View == apiclient.SummaryView,
+			projected: view.View == apiclient.SummaryView, gen: gen,
 		}
 	}
 }
@@ -1658,6 +1666,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case snapshotLoadedMsg:
+		// Asked for before a clear, answered after it: the session it describes is gone, and
+		// storing it would bring the session back as a cached row.
+		if msg.gen != m.clearGen {
+			return m, nil
+		}
 		// Every event the snapshot carried, untrimmed. This used to cut to the most
 		// recent 1000 on the claim that it "matches the server's default cap" — the
 		// server's was 500, so the two never matched, and neither trims now.
@@ -1706,6 +1719,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// say when it is next painted, not which pane is focused when they are built.
 		m.rebuildSessionsTable()
 		return m, nil
+
+	case clearCountsMsg:
+		m.applyClearCounts(msg)
+		return m, nil
+
+	case clearDoneMsg:
+		return m, m.applyClearDone(msg)
 
 	case olderPageLoadedMsg:
 		m.applyOlderPage(msg)
@@ -2208,6 +2228,9 @@ func (m *model) View() string {
 	base := m.paneView()
 	if m.helpVisible {
 		return overlayCenter(base, renderHelpOverlay(m.helpVp, m.width, m.height), m.width, m.height)
+	}
+	if m.clearConfirm != nil {
+		return overlayCenter(base, renderClearConfirm(m.clearConfirm, m.width), m.width, m.height)
 	}
 	// Same paneEvents scoping as the key block: an async pane change must not leave
 	// the popup drawn over a pane it does not belong to.

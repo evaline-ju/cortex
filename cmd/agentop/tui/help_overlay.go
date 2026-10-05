@@ -296,6 +296,7 @@ var paneKeys = map[paneID]keyGroup{
 			{"↵ / → / l", "drill into session"},
 			{"/", "filter"},
 			{"H", "history: also list archived sessions"},
+			{"X", "clear all history, in memory and on disk (asks first; the cost ledger is kept)"},
 			{"esc", "back to the agents picker, else pods picker"},
 		},
 	},

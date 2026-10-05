@@ -34,7 +34,7 @@ the install. A removal that fails is reported with its fix and the rest still
 run, but ~/.cortex then stays; the end lists what was left behind.
 
   --yes, -y   do not ask; needed when there is no terminal
-  --purge     delete ~/.cortex too: config, CA, logs and usage history
+  --purge     delete ~/.cortex too: config, CA, logs, usage and session history
 
 Exit status: 0 removed, or nothing to remove; 1 something was left behind;
 2 usage; 3 declined, or no terminal to ask on.
@@ -221,7 +221,7 @@ func runUninstall(args []string, stdout, stderr io.Writer) int {
 			ui.Plain("Kept " + k.what + ": " + k.why)
 		}
 		if keeps {
-			ui.Plain(dir + " is still here (config, CA, logs, usage history): rm -rf " + dir)
+			ui.Plain(dir + " is still here (config, CA, logs, usage and session history): rm -rf " + dir)
 		}
 		return 0
 	}
@@ -231,7 +231,7 @@ func runUninstall(args []string, stdout, stderr io.Writer) int {
 		ui.Faint("Kept: " + k.what + ", which other tools need: " + k.why)
 	}
 	if keeps {
-		ui.Faint("Kept: " + dir + " (config, CA, logs, usage history) — add --purge to delete it")
+		ui.Faint("Kept: " + dir + " (config, CA, logs, usage and session history) — add --purge to delete it")
 	}
 	if keeps || len(kepts) > 0 {
 		ui.Blank()
@@ -919,7 +919,7 @@ func planPurge(env *setupEnv) (removal, bool) {
 	dir := env.tilde(env.cortexDir)
 	return removal{
 		label:        "purged",
-		item:         checklist.Item{Verb: "delete", What: dir, Where: "config, CA, logs and usage history"},
+		item:         checklist.Item{Verb: "delete", What: dir, Where: "config, CA, logs, usage and session history"},
 		fix:          manual("rm -rf " + env.shellPath(env.cortexDir)),
 		unlessFailed: true,
 		run: func(*checklist.Running) (string, []string, error) {

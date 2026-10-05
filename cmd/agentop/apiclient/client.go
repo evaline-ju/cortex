@@ -422,8 +422,14 @@ func badRequestDetail(body []byte) string {
 	//
 	// pipeline.IsControlRune is the predicate the ledger and the aggregate already sanitise their
 	// labels with, so a byte refused on one surface is not accepted on another.
+	return serverText(payload.Error)
+}
+
+// serverText is s with control runes removed and surrounding space trimmed: a string a server
+// wrote, made safe to print. See badRequestDetail for why.
+func serverText(s string) string {
 	var clean strings.Builder
-	for _, r := range payload.Error {
+	for _, r := range s {
 		if pipeline.IsControlRune(r) {
 			continue
 		}

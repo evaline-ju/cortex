@@ -115,9 +115,11 @@ type Archive struct {
 	closeErr  error
 
 	// lastSeq is the highest seq recorded per session id, for SeqSeeder. Updated synchronously
-	// by Record and Rekeyed, so it is right before the writer has caught up.
+	// by Record and Rekeyed, so it is right before the writer has caught up. pending is the most
+	// recent clear, for AwaitClear; see clear.go.
 	mu      sync.Mutex
 	lastSeq map[string]uint64
+	pending *pendingClear
 	// started is where the store's live entry for an id began numbering, from EntryStarted, for
 	// ids that held history then. The entry's first queued event carries it to the writer, and
 	// its rename tells the writer which segments move.
@@ -166,6 +168,7 @@ type opKind uint8
 const (
 	opEvent opKind = iota
 	opRename
+	opClear
 	opFunc
 )
 
@@ -176,6 +179,7 @@ type op struct {
 	id, to string
 	ev     pipeline.SessionEvent
 	after  uint64 // where a store entry began: on its first queued event, and on its rename
+	clear  *pendingClear
 	f      func()
 	done   chan struct{}
 }
@@ -225,6 +229,7 @@ func Open(root string, opts ...Option) (*Archive, error) {
 	if err := os.MkdirAll(a.data, dirMode); err != nil {
 		return nil, err
 	}
+	removeTrash(a.root)
 
 	loadedSessions, skipped, err := loadMetas(a.data)
 	if err != nil {
@@ -431,6 +436,8 @@ func (a *Archive) take(o op) {
 		a.write(o.id, &o.ev)
 	case opRename:
 		a.rename(o.id, o.to, o.after)
+	case opClear:
+		a.clearAll(o.clear)
 	case opFunc:
 		o.f()
 		close(o.done)

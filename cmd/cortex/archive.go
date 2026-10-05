@@ -25,26 +25,23 @@ func sessionArchiveDir() (string, error) {
 
 // sessionArchiveRuns decides whether the session archive runs, and says why.
 //
-// ONLY ON A LOCAL INSTALL, and in this release only when asked: the archive stays off by default
-// until a release can also read history back and clear it, because until then it would write raw
-// prompts with no way for a user to see or erase them. Builds from main and `make dev-install`
-// are not gated by a release, so the default, not the release, has to hold the line.
+// ONLY ON A LOCAL INSTALL. A laptop is where a restart costs a user their history and where the
+// user can read it back (agentop's H) and erase it (X, or DELETE /v1/sessions). Elsewhere it is
+// off even when asked for — raw prompts on a cluster's volume need a decision of their own, and a
+// mounted path is not one. On a local install, config.ArchiveRunsOnLocalInstall decides.
 func sessionArchiveRuns(cfg *config.Config, configPath string) (bool, string) {
 	a := cfg.Session.Archive
 	explicit := a != nil && a.Enabled != nil
-	if explicit && !*a.Enabled {
-		return false, "session.archive.enabled is false"
-	}
 	if !startedFromLocalInstall(configPath) {
-		if explicit {
+		switch {
+		case explicit && !*a.Enabled:
+			return false, "session.archive.enabled is false"
+		case explicit:
 			return false, "the session archive is a laptop feature in this release and runs only from a config inside ~/.cortex"
 		}
 		return false, "not a local install"
 	}
-	if !explicit {
-		return false, "off by default until the archive can be read back and cleared; set session.archive.enabled: true to opt in"
-	}
-	return true, "session.archive.enabled is true on a local install"
+	return cfg.ArchiveRunsOnLocalInstall()
 }
 
 // closeArchiveOnFatal finishes the archive's open segments before a fatal exit, for the reason
@@ -71,7 +68,10 @@ func openSessionArchive(cfg *config.Config, configPath string, sessions *session
 		slog.Warn("session archive disabled — cannot determine where to write it", "error", err)
 		return nil
 	}
-	ac := cfg.Session.Archive
+	var ac config.SessionArchiveConfig
+	if cfg.Session.Archive != nil {
+		ac = *cfg.Session.Archive
+	}
 	arch, err := archive.Open(dir, archive.WithRetentionDays(ac.RetentionDays), archive.WithMaxBytes(ac.MaxBytes))
 	if err != nil {
 		slog.Warn("session archive disabled — could not open it", "dir", dir, "error", err,

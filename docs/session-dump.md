@@ -1,14 +1,16 @@
 # Dumping sessions to files
 
-> **This is a stopgap.** Durable session storage is tracked in
-> [#901](https://github.com/rossoctl/cortex/issues/901) (*feature: persist
-> sessions*), which will make the proxy write sessions itself instead of relying
-> on someone remembering to run a script. Until that lands, this is how you keep
-> session data. Expect it to be superseded — and prefer commenting on #901 over
-> extending this script.
+> **On a laptop the proxy now keeps sessions itself.** A local install writes every
+> session to `~/.cortex/sessions` ([#901](https://github.com/rossoctl/cortex/issues/901);
+> see [the laptop guide](laptop-service.md#session-history-is-kept-in-cortexsessions)),
+> so a restart no longer loses them and agentop's `H` lists them. What this script is
+> still for is getting sessions *out* as files — and it is the only way to keep anything
+> from a cluster sidecar, which has no archive. A whole dump covers the sessions in
+> memory; `--session <id>` also reaches one only the archive holds, because the
+> endpoint it reads pages into the archive.
 
-Cortex keeps intercepted sessions **in memory only**. Nothing is written to disk,
-so a proxy restart loses every session it was holding. `cortex-session-dump`
+Outside a local install Cortex keeps intercepted sessions **in memory only**, so a
+proxy restart loses every session it was holding. `cortex-session-dump`
 walks the [Session Events API](#where-the-data-comes-from) and writes what is
 currently resident to files.
 
@@ -18,7 +20,8 @@ beyond what the `agentop` TUI shows live.
 
 Its limits follow from being a snapshot tool rather than storage: it captures
 only what the store still holds at the moment it runs, and it has to be run
-before the thing you want to keep is gone. That is the gap #901 closes.
+before the thing you want to keep is gone. On a laptop the session archive closes that
+gap; in a cluster it is still open.
 
 ## Install
 

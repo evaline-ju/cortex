@@ -14,7 +14,7 @@ import (
 
 // restarted builds what a proxy looks like after a restart: an archive holding s1's first ten
 // events and old's three, written by a previous process, and a fresh store numbering from it.
-func restarted(t *testing.T) (*httptest.Server, *session.Store, *archive.Archive) {
+func restarted(t *testing.T, opts ...Option) (*httptest.Server, *session.Store, *archive.Archive) {
 	t.Helper()
 	root := t.TempDir()
 	prev, err := archive.Open(root)
@@ -40,7 +40,7 @@ func restarted(t *testing.T) (*httptest.Server, *session.Store, *archive.Archive
 	}
 	store := session.New(0, 0, 0)
 	store.AddRecorder(a)
-	srv := New(":0", store, WithArchive(a))
+	srv := New(":0", store, append([]Option{WithArchive(a)}, opts...)...)
 	ts := httptest.NewServer(srv.server.Handler)
 	t.Cleanup(func() {
 		ts.Close()

@@ -60,6 +60,11 @@ type Server struct {
 	// archive serves history the store no longer holds. nil — every deployment but a laptop
 	// with the archive on — leaves every endpoint exactly as it was. See archive.go.
 	archive *archive.Archive
+	// allowClear lets DELETE /v1/sessions clear; false refuses it. clearRefusals and
+	// lastRefusalLog rate-limit the log of refusals. See clear.go.
+	allowClear     bool
+	clearRefusals  atomic.Uint64
+	lastRefusalLog atomic.Int64
 	// loggedDropped is the highest writer-drop total this server has already logged, so the write-side
 	// warning fires on a CHANGE rather than on every request. See the usage handler: the drop count is
 	// process-cumulative, so logging it per read turned one lost row into a warning on every poll for
@@ -192,6 +197,7 @@ func New(addr string, store *session.Store, opts ...Option) *Server {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/sessions", s.handleList)
+	mux.HandleFunc("DELETE /v1/sessions", s.handleClear)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handleGet)
 	mux.HandleFunc("GET /v1/sessions/{id}/events/{seq}", s.handleGetEvent)
 	mux.HandleFunc("GET /v1/events", s.handleStream)
@@ -234,6 +240,7 @@ const indexBody = `Cortex / AuthBridge Session API
 
   GET /v1/sessions        list active sessions (?archived=true adds the session
                           archive's sessions no longer in memory)
+  DELETE /v1/sessions     clear every session, memory and disk (laptop only)
   GET /v1/sessions/{id}   recent events (?limit=N max 2000, ?before=<seq>,
                           ?view=summary drops message bodies, ~163x smaller)
   GET /v1/sessions/{id}/events/{seq}

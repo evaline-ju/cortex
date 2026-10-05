@@ -1,5 +1,7 @@
 package session
 
+import "time"
+
 // SeqSeeder is optionally implemented by a Recorder that keeps a session's events for longer
 // than the store does — the session archive. When the store creates an entry it asks every
 // SeqSeeder, under its write lock, for the last seq it holds under that id, and numbers the
@@ -45,4 +47,37 @@ func (s *Store) entryStartedLocked(id string, after uint64) {
 			es.EntryStarted(id, after)
 		}
 	}
+}
+
+// Clearer is optionally implemented by a Recorder that keeps state keyed by session id: the
+// usage aggregator's per-session figures, the archive's numbering and files. Clear tells each one,
+// under the store's write lock and after the store has dropped every session, so no append can
+// land between the two halves and be kept by one side only.
+//
+// Cleared runs in front of live traffic, like Record: it must not block. Work that takes time —
+// the archive's file deletion — is queued for the Clearer's own goroutine.
+type Clearer interface {
+	Cleared()
+}
+
+// Clear removes every session, with every map that names one — owners, adoptions, process
+// claims and the active session — tells every Clearer, and reports how many sessions it removed.
+// The next append to any id starts a new session, numbered from 1 once the archive has reset.
+//
+// Subscribers stay attached: a clear erases history, it does not end the stream.
+func (s *Store) Clear() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.sessions)
+	s.sessions = make(map[string]*entry)
+	s.activeID = ""
+	// nil, as a store nothing has claimed from holds them; every writer allocates on first use.
+	s.owners, s.adopted = nil, nil
+	s.procs, s.lastProcClaim = nil, time.Time{}
+	for _, r := range s.recorders {
+		if c, ok := r.(Clearer); ok {
+			c.Cleared()
+		}
+	}
+	return n
 }

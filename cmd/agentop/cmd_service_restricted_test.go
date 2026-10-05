@@ -2,6 +2,8 @@ package main
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -331,20 +333,76 @@ func TestServiceIsCurrent(t *testing.T) {
 }
 
 // The session-history line must not appear on a first install, where there is no store to
-// clear. It printed unconditionally from the Makefile before, on a clean machine too.
+// clear. It printed unconditionally from the Makefile before, on a clean machine too. Where the
+// session archive runs, a restart clears memory and not the history, and the line says that.
 func TestReportHistoryCleared(t *testing.T) {
 	t.Run("silent when nothing was running", func(t *testing.T) {
-		var out strings.Builder
-		reportHistoryCleared(false, &out)
-		if out.Len() != 0 {
-			t.Errorf("claimed history was cleared on a first install: %q", out.String())
+		for _, archived := range []bool{false, true} {
+			var out strings.Builder
+			reportHistoryCleared(false, archived, &out)
+			if out.Len() != 0 {
+				t.Errorf("archived=%v: claimed something about history on a first install: %q", archived, out.String())
+			}
 		}
 	})
-	t.Run("names it when something was running", func(t *testing.T) {
+	t.Run("names the cleared store when no archive runs", func(t *testing.T) {
 		var out strings.Builder
-		reportHistoryCleared(true, &out)
+		reportHistoryCleared(true, false, &out)
 		if !strings.Contains(out.String(), "session history is cleared") {
 			t.Errorf("did not name the cleared store: %q", out.String())
+		}
+	})
+	t.Run("says the archive keeps it when one runs", func(t *testing.T) {
+		var out strings.Builder
+		reportHistoryCleared(true, true, &out)
+		if s := out.String(); strings.Contains(s, "history is cleared") || !strings.Contains(s, "session archive is not") {
+			t.Errorf("did not say the archive keeps the history: %q", s)
+		}
+	})
+}
+
+// proxyArchives asks the running proxy, on the session API its config names: only a list
+// carrying an archive object counts. A proxy without one, or predating ?archived=true, answers
+// the plain list, and a missing or failing API is no archive.
+func TestProxyArchives(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		code int
+		want bool
+	}{
+		{"an archive object", `{"sessions":[],"archive":{"bytes":42,"maxBytes":100,"retentionDays":30}}`, 200, true},
+		{"the plain list", `{"sessions":[{"id":"live"}]}`, 200, false},
+		{"an explicit null", `{"sessions":[],"archive":null}`, 200, false},
+		{"not the session API", ``, 200, false},
+		{"an error status", `{"archive":{}}`, 500, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/sessions" || r.URL.Query().Get("archived") != "true" {
+					t.Errorf("probed %s, want /v1/sessions?archived=true", r.URL)
+				}
+				w.WriteHeader(tc.code)
+				w.Write([]byte(tc.body))
+			}))
+			defer api.Close()
+			cfg := filepath.Join(t.TempDir(), "config.yaml")
+			body := "mode: proxy-sidecar\nlistener:\n  session_api_addr: " + strings.TrimPrefix(api.URL, "http://") + "\n"
+			if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := proxyArchives(servicePaths{configFile: cfg}); got != tc.want {
+				t.Errorf("proxyArchives = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("nothing listening", func(t *testing.T) {
+		cfg := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(cfg, []byte("mode: proxy-sidecar\nlistener:\n  session_api_addr: 127.0.0.1:1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if proxyArchives(servicePaths{configFile: cfg}) {
+			t.Error("an unreachable session API counted as an archive")
 		}
 	})
 }

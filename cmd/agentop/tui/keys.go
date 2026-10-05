@@ -61,6 +61,12 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.helpVp, cmd = m.helpVp.Update(msg)
 		return cmd
 	}
+	// X's confirmation is modal too, and checked before `?` and every pane's keys: it is the one
+	// dialog whose wrong answer cannot be undone, so nothing else may act while it is up.
+	if m.clearConfirm != nil {
+		return m.clearConfirmKey(msg)
+	}
+
 	// `?` opens the overlay from any pane, with two exceptions. While a
 	// pipeline edit is in flight that overlay is already modal and owns
 	// y/N/r/Esc, so help would swallow the apply confirmation. While the
@@ -813,6 +819,15 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.setFlash("history off: showing live sessions")
 		}
 		return m.loadSessionsCmd()
+
+	case "X":
+		// Clear all history, after a confirmation. Capital, and off the footer like `A`: a
+		// destructive key should not be one stray press of a common letter, nor advertised on
+		// the always-visible line. The `?` overlay names it.
+		if m.client == nil || m.pane != paneSessions {
+			return nil
+		}
+		return m.openClearConfirm()
 
 	case "P":
 		// Open the pipeline. `P` REPLACED `tab` HERE, and took the letter off the

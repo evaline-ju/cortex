@@ -31,10 +31,15 @@ func archiveCfg(enabled *bool) *config.Config {
 	return &config.Config{Session: config.SessionConfig{Archive: &config.SessionArchiveConfig{Enabled: enabled}}}
 }
 
-// Until the archive can be read back and cleared, it runs only where someone asked for it on a
-// laptop. Outside a local install it never runs: raw prompts on a cluster's volume are their own
-// decision, and the archive has no dir to point at one.
-func TestSessionArchiveRuns_OffByDefaultUntilLaunch(t *testing.T) {
+// loopbackOnly is cfg bound to loopback only, as the config `cortex --local` writes is.
+func loopbackOnly(cfg *config.Config) *config.Config {
+	cfg.Listener.BindLoopbackOnly = true
+	return cfg
+}
+
+// On by default only where DELETE /v1/sessions can clear what it writes: a local install bound to
+// loopback only. An explicit true opts in on any local install; nothing outside one runs it.
+func TestSessionArchiveRuns_OnForALocalInstall(t *testing.T) {
 	inside, outside := localConfig(t)
 	on, off := true, false
 	for _, tc := range []struct {
@@ -43,9 +48,10 @@ func TestSessionArchiveRuns_OffByDefaultUntilLaunch(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"local, unset", &config.Config{}, inside, false},
-		{"local, enabled", archiveCfg(&on), inside, true},
-		{"local, disabled", archiveCfg(&off), inside, false},
+		{"local, unset, loopback only", loopbackOnly(&config.Config{}), inside, true},
+		{"local, unset, not loopback only", &config.Config{}, inside, false},
+		{"local, enabled, not loopback only", archiveCfg(&on), inside, true},
+		{"local, disabled, loopback only", loopbackOnly(archiveCfg(&off)), inside, false},
 		{"not local, enabled", archiveCfg(&on), outside, false},
 		{"not local, unset", &config.Config{}, outside, false},
 	} {
@@ -86,6 +92,40 @@ func TestOpenSessionArchive_RecordsWhatTheStoreAppends(t *testing.T) {
 	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(inside), "sessions", "data", "*", "session.json"))
 	if len(matches) != 1 {
 		t.Fatalf("%d session.json files under ~/.cortex/sessions, want 1", len(matches))
+	}
+}
+
+// The archive runs by default on a local install, so it must open from a config that never
+// mentions it, as well as from one that sets its bounds without saying enabled.
+func TestOpenSessionArchive_OpensWithEnabledUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		cfg           *config.Config
+		wantRetention int
+	}{
+		{"no session.archive block", loopbackOnly(&config.Config{}), 30},
+		{"bounds without enabled", loopbackOnly(&config.Config{Session: config.SessionConfig{
+			Archive: &config.SessionArchiveConfig{RetentionDays: 7}}}), 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inside, _ := localConfig(t)
+			st := session.New(0, 0, 0)
+			defer st.Close()
+			arch := openSessionArchive(tc.cfg, inside, st)
+			if arch == nil {
+				t.Fatal("the archive did not open on a local install")
+			}
+			if got := arch.RetentionDays(); got != tc.wantRetention {
+				t.Errorf("RetentionDays = %d, want %d", got, tc.wantRetention)
+			}
+			st.Append("s1", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest})
+			if err := arch.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if arch.LastSeq("s1") != 1 {
+				t.Fatalf("the archive did not see the store's event: LastSeq = %d", arch.LastSeq("s1"))
+			}
+		})
 	}
 }
 
