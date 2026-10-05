@@ -34,6 +34,9 @@ func Validate(cfg *Config) error {
 	if err := validateCostLedger(cfg); err != nil {
 		return err
 	}
+	if err := validateSessionArchive(cfg); err != nil {
+		return err
+	}
 	return validatePricing(cfg)
 }
 
@@ -138,4 +141,18 @@ func validateSession(cfg *Config) error {
 	default:
 		return fmt.Errorf("session.process_attribution must be auto, on or off, got %q", cfg.Session.ProcessAttribution)
 	}
+}
+
+// validateSessionArchive refuses `session.archive.enabled: true` alongside `session.enabled:
+// false`: the archive records through the session store, so with the store off it never sees an
+// event. Only the explicit contradiction is refused — an unset archive with sessions off is a
+// default nobody wrote, for the binary to warn about, as validateCostLedger reasons.
+func validateSessionArchive(cfg *Config) error {
+	a := cfg.Session.Archive
+	if a == nil || a.Enabled == nil || !*a.Enabled || cfg.Session.SessionEnabled() {
+		return nil
+	}
+	return fmt.Errorf("session.archive.enabled: true requires session tracking, but session.enabled is false: " +
+		"the archive records through the session store, so with the store off nothing reaches it — " +
+		"set session.enabled: true, or drop session.archive.enabled")
 }
