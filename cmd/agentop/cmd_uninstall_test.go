@@ -249,7 +249,7 @@ func TestUninstallPurgeIsTheOnlyWayCortexDirGoes(t *testing.T) {
 				if err != nil {
 					t.Errorf("~/.cortex went without --purge: %v", err)
 				}
-				wantLines(t, code, 0, out, "  Kept: ~/.cortex (config, CA, logs, usage history) — add --purge to delete it\n",
+				wantLines(t, code, 0, out, "  Kept: ~/.cortex (config, CA, logs, usage and session history) — add --purge to delete it\n",
 					"  Uninstalled.\n  Kept ~/.cortex. Delete it with: rm -rf ~/.cortex\n")
 				if row != "" {
 					t.Errorf("a delete row without --purge: %q", row)
@@ -259,8 +259,8 @@ func TestUninstallPurgeIsTheOnlyWayCortexDirGoes(t *testing.T) {
 			if !os.IsNotExist(err) {
 				t.Errorf("--purge left ~/.cortex (lstat: %v)", err)
 			}
-			if !strings.Contains(row, " ~/.cortex ") || !strings.HasSuffix(row, " config, CA, logs and usage history") {
-				t.Errorf("the delete row is %q, want ~/.cortex and its usage history named:\n%s", row, out)
+			if !strings.Contains(row, " ~/.cortex ") || !strings.HasSuffix(row, " config, CA, logs, usage and session history") {
+				t.Errorf("the delete row is %q, want ~/.cortex and its usage and session history named:\n%s", row, out)
 			}
 			if strings.Contains(out, "Kept") {
 				t.Errorf("--purge still says ~/.cortex is kept:\n%s", out)
@@ -456,7 +456,7 @@ func TestUninstallWithNothingInstalled(t *testing.T) {
 		mustMkdir(t, filepath.Join(sc.home, ".cortex"))
 		code, out := sc.uninstall(t)
 		wantLines(t, code, 0, out,
-			"\n  Nothing to uninstall.\n  ~/.cortex is still here (config, CA, logs, usage history): rm -rf ~/.cortex\n")
+			"\n  Nothing to uninstall.\n  ~/.cortex is still here (config, CA, logs, usage and session history): rm -rf ~/.cortex\n")
 	})
 }
 
