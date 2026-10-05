@@ -181,3 +181,79 @@ func TestHandleList_WithoutAnArchiveIgnoresArchived(t *testing.T) {
 		t.Fatalf("list = %+v", lb)
 	}
 }
+
+// pinned builds a session whose memory has a gap: max_events 5 keeps the inbound A2A intent
+// (seq 1) pinned ahead of the newest four events, [1 18 19 20 21], while the archive recorded
+// every event from seq from on. Closing the archive flushes it; the store keeps what it holds.
+func pinned(t *testing.T, from uint64) *httptest.Server {
+	t.Helper()
+	a, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := session.New(0, 5, 0)
+	intent := pipeline.SessionEvent{At: time.Now(), Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
+		A2A: &pipeline.A2AExtension{Method: "message/send"}}
+	for seq := uint64(1); seq <= 21; seq++ {
+		if seq == from {
+			store.AddRecorder(a)
+		}
+		e := pipeline.SessionEvent{At: time.Now(), Direction: pipeline.Outbound, Phase: pipeline.SessionRequest}
+		if seq == 1 {
+			e = intent
+		}
+		store.Append("s1", e)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if v := store.ViewTail("s1", 100); !equalSeqs(seqsOf(v), []uint64{1, 18, 19, 20, 21}) {
+		t.Fatalf("fixture: memory holds %v, want the pinned intent ahead of a gap", seqsOf(v))
+	}
+	ts := httptest.NewServer(New(":0", store, WithArchive(a)).server.Handler)
+	t.Cleanup(func() {
+		ts.Close()
+		store.Close()
+	})
+	return ts
+}
+
+func seqRange(lo, hi uint64) []uint64 {
+	var out []uint64
+	for s := lo; s <= hi; s++ {
+		out = append(out, s)
+	}
+	return out
+}
+
+// A page is the newest limit events below before across memory and disk together, each seq
+// once — including where memory holds an event below a gap, as a pinned intent is. The whole-
+// session marker is set only when nothing older is held on either side.
+func TestHandleGet_FillsTheGapBehindAPinnedIntent(t *testing.T) {
+	cases := []struct {
+		path   string
+		want   []uint64
+		paged  bool // totalEvents/oldestSeq present: there is more than this response
+		oldest uint64
+	}{
+		{"/v1/sessions/s1", seqRange(1, 21), false, 0},
+		{"/v1/sessions/s1?limit=5", seqRange(17, 21), true, 1},
+		{"/v1/sessions/s1?limit=3&before=20", seqRange(17, 19), true, 1},
+		{"/v1/sessions/s1?limit=4&before=18", seqRange(14, 17), true, 1},
+		{"/v1/sessions/s1?before=3", seqRange(1, 2), true, 1},
+	}
+	// from=2: the archive starts at seq 2, so seq 1 is held in memory only. totalEvents is at
+	// least what either side holds: 21 on disk, or 20 when disk lacks the intent.
+	for from, total := range map[uint64]int{1: 21, 2: 20} {
+		ts := pinned(t, from)
+		for _, c := range cases {
+			v := getView(t, ts.URL, c.path)
+			if !equalSeqs(seqsOf(v), c.want) {
+				t.Errorf("from=%d %s: seqs %v, want %v", from, c.path, seqsOf(v), c.want)
+			}
+			if paged := v.TotalEvents != 0 || v.OldestSeq != 0; paged != c.paged || (c.paged && (v.OldestSeq != c.oldest || v.TotalEvents < total)) {
+				t.Errorf("from=%d %s: total %d oldest %d, want paged=%v from seq %d", from, c.path, v.TotalEvents, v.OldestSeq, c.paged, c.oldest)
+			}
+		}
+	}
+}

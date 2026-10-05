@@ -10,37 +10,33 @@ import (
 )
 
 // withArchivedEvents is the one merge rule for pages: take what the store holds, newest first up
-// to the limit — which ViewPage already did — and, when that falls short, continue from the
-// session archive below the oldest event the store gave.
+// to the limit — which ViewPage already did.
 //
 // ONE RULE COVERS EVERY CASE. A resident session with nothing on disk never reaches the archive's
 // events; one resumed after a restart is a few events in memory over a history on disk; one
 // paged past its resident tail is answered from disk alone; and one that is only on disk has a
-// nil view from the store. The halves cannot overlap: the archive is asked only for seqs below
-// the store's oldest on the page, and the store seeded its numbering past the archive's.
+// nil view from the store.
 //
 // totalEvents and oldestSeq follow the store's rule — present only when the response is not the
 // whole session — over the merged history. oldestSeq is the archive's oldest retained segment
 // when it reaches further back than memory; totalEvents is at least what either side holds, which
 // is what a client uses it for: telling "there is more behind me" from "this is the beginning".
 func (s *Server) withArchivedEvents(id string, before uint64, limit int, view *pipeline.SessionView) *pipeline.SessionView {
-	cursor, memTotal, memOldest := before, 0, uint64(0)
+	cursor, need, memTotal, memOldest := before, limit, 0, uint64(0)
 	if view != nil {
 		memTotal = view.TotalEvents
 		if memTotal == 0 {
 			memTotal = len(view.Events)
 		}
 		if len(view.Events) > 0 {
-			cursor = view.Events[0].Seq
 			memOldest = view.OldestSeq
 			if memOldest == 0 {
 				memOldest = view.Events[0].Seq
 			}
+			if contiguousBelow(view.Events, before) {
+				cursor, need = view.Events[0].Seq, limit-len(view.Events)
+			}
 		}
-	}
-	need := limit
-	if view != nil {
-		need -= len(view.Events)
 	}
 	var older []pipeline.SessionEvent
 	info, ok, err := s.archive.Page(id, cursor, max(need, 0), func(e *pipeline.SessionEvent) bool {
@@ -57,7 +53,7 @@ func (s *Server) withArchivedEvents(id string, before uint64, limit int, view *p
 		view = &pipeline.SessionView{ID: id}
 	}
 	slices.Reverse(older)
-	view.Events = append(older, view.Events...)
+	view.Events = mergeBySeq(older, view.Events, limit)
 
 	oldest := info.OldestSeq
 	if memOldest != 0 && memOldest < oldest {
@@ -70,6 +66,36 @@ func (s *Server) withArchivedEvents(id string, before uint64, limit int, view *p
 		view.OldestSeq = oldest
 	}
 	return view
+}
+
+func contiguousBelow(events []pipeline.SessionEvent, before uint64) bool {
+	for i := 1; i < len(events); i++ {
+		if events[i].Seq != events[i-1].Seq+1 {
+			return false
+		}
+	}
+	return before == 0 || events[len(events)-1].Seq+1 == before
+}
+
+func mergeBySeq(disk, mem []pipeline.SessionEvent, limit int) []pipeline.SessionEvent {
+	out := make([]pipeline.SessionEvent, 0, len(disk)+len(mem))
+	i, j := 0, 0
+	for i < len(disk) || j < len(mem) {
+		switch {
+		case j == len(mem) || (i < len(disk) && disk[i].Seq < mem[j].Seq):
+			out = append(out, disk[i])
+			i++
+		case i < len(disk) && disk[i].Seq == mem[j].Seq:
+			i++
+		default:
+			out = append(out, mem[j])
+			j++
+		}
+	}
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
 }
 
 // withArchivedRows adds to the store's list every archived session it does not hold, marked
