@@ -662,6 +662,8 @@ func (a *Archive) renameEntry(s *sessionState, oldID, newID, newDir string, afte
 		a.writeMeta(ns)
 	}
 	a.sessions[newID] = ns
+	a.publish(s)
+	a.publish(ns)
 	return true
 }
 

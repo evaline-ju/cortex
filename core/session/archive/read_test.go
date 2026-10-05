@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/cortex/core/pipeline"
+	"github.com/rossoctl/cortex/core/session"
 )
 
 func page(t *testing.T, a *Archive, id string, before uint64, limit int) ([]uint64, PageInfo, bool) {
@@ -124,6 +125,38 @@ func TestSummaries_CarryTheFoldsFiguresAndTimes(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("s1 missing from Summaries")
+	}
+}
+
+// A rename that parts an id's history shows readers each part under its own id, before
+// anything else is written to either: the renamed entry's events under the new id, the earlier
+// entry's under the old one.
+func TestPage_FollowsARenameThatPartsHistory(t *testing.T) {
+	from := session.DefaultSessionID
+	a, st := restarted(t, t.TempDir(), newClock(), from, synthSession(60, 1, 512)) // seqs 1-3
+	defer a.Close()
+	defer st.Close()
+	st.Append(from, synthSession(61, 1, 512)[0]) // seq 4, the new entry's
+	st.Rekey(from, "Y")
+	settle(a)
+	for _, c := range []struct {
+		id   string
+		want []uint64
+	}{{"Y", []uint64{4}}, {from, []uint64{3, 2, 1}}} {
+		seqs, info, ok := page(t, a, c.id, 0, 10)
+		if !ok || !equalSeqs(seqs, c.want) || info.TotalEvents != len(c.want) {
+			t.Errorf("Page(%s) = %v %+v (ok=%v), want %v", c.id, seqs, info, ok, c.want)
+		}
+	}
+	if _, ok, _ := a.Event("Y", 4); !ok {
+		t.Error("Event(Y, 4) not found under the new id")
+	}
+	counts := map[string]int{}
+	for _, s := range a.Summaries() {
+		counts[s.ID] = s.EventCount
+	}
+	if counts["Y"] != 1 || counts[from] != 3 {
+		t.Errorf("Summaries count Y=%d %s=%d, want 1 and 3", counts["Y"], from, counts[from])
 	}
 }
 
