@@ -187,57 +187,71 @@ esac
 # over time and stop being the second-most-recent release, silently testing
 # a narrower jump than intended.
 #
-# main-latest and a real v* tag need different notions of "older", so they're
-# handled separately rather than through one date-based comparison (the
-# previous approach, and why: see below).
+# Compared by VERSION NUMBER, not by date. This repo keeps maintenance
+# branches alive (release-0.6, release-0.7 both exist), so a patch tagged on
+# an older line can be CREATED later in calendar time than a newer line's
+# release — e.g. v0.7.1 tagged after v0.8.1 already exists. Date-based
+# "older" would then pick v0.8.1 as the "older" release for v0.7.1, an
+# unlabeled downgrade. Comparing version numbers directly sidesteps that:
+# v0.7.1 sorts after v0.7.0 and before v0.8.0 regardless of when either was
+# actually published.
+#
+# --limit 200: gh release list's --limit counts STABLE releases, not raw API
+# results — it drops drafts and prereleases on the client and keeps paging
+# until it collects that many (cli/cli's fetchReleases), so this is "the 200
+# most recent stable releases," comfortably beyond any realistic release
+# count for a long while. gh has no --paginate flag for this subcommand, so a
+# fixed high limit stands in for real pagination on a problem this project
+# will not hit for years.
+#
+# set -eu alone won't catch a failure inside a pipeline under dash (no
+# pipefail), so the gh call is checked explicitly.
+if ! all_stable="$(gh release list --exclude-drafts --exclude-pre-releases \
+	--limit 200 --json tagName -q '.[].tagName')"; then
+	echo "FAIL: gh release list failed" >&2
+	exit 1
+fi
+
 case "${TAG}" in
 	main-latest)
 		# main-latest always means "whatever's on main right now", so the
 		# single most recent stable release is unambiguously the one before
-		# it — no version-number comparison needed. gh release list already
-		# returns results newest-first, so --limit 1 is exact, not a cap that
-		# could hide an earlier candidate.
-		if ! OLDER_TAG="$(gh release list --exclude-drafts --exclude-pre-releases \
-			--limit 1 --json tagName -q '.[0].tagName // ""')"; then
-			echo "FAIL: gh release list failed" >&2
-			exit 1
-		fi
+		# it. sort -V | tail -1 picks the highest VERSION, not whichever
+		# release gh happened to create most recently — gh release list
+		# orders by creation date, and a maintenance-branch patch can be
+		# created after a newer line's release (the same v0.7.1-after-v0.8.1
+		# case above), which would make a date-ordered "newest" pick wrong
+		# here too.
+		OLDER_TAG="$(printf '%s\n' "${all_stable}" | sort -V | tail -n 1)"
 		;;
 	*)
-		# A real v* tag: compare by VERSION NUMBER, not by date. This repo
-		# keeps maintenance branches alive (release-0.6, release-0.7 both
-		# exist), so a patch tagged on an older line can be CREATED later in
-		# calendar time than a newer line's release — e.g. v0.7.1 tagged
-		# after v0.8.1 already exists. Date-based "older" would then pick
-		# v0.8.1 as the "older" release for v0.7.1, an unlabeled downgrade.
-		# Comparing version numbers directly sidesteps that: v0.7.1 sorts
-		# after v0.7.0 and before v0.8.0 regardless of when either was
-		# actually published.
-		#
-		# --limit 200, not the previous --limit 20: that cap applied BEFORE
-		# any filtering, so once 20+ stable releases existed, re-testing an
-		# old one could find zero candidates "older than TAG" even though
-		# earlier releases existed, silently skipping the upgrade leg while
-		# still reporting success. gh release list has no --paginate flag;
-		# 200 is comfortably beyond any realistic release count for a long
-		# while, without writing real pagination for a problem this project
-		# will not hit for years.
-		#
-		# set -eu alone won't catch a failure inside a pipeline under dash
-		# (no pipefail), so the gh call is checked explicitly.
-		if ! all_stable="$(gh release list --exclude-drafts --exclude-pre-releases \
-			--limit 200 --json tagName -q '.[].tagName')"; then
-			echo "FAIL: gh release list failed" >&2
-			exit 1
-		fi
 		# sort -V orders the full line "vX.Y.Z" the same way it would order
 		# bare dotted numbers — the "v" prefix is common to every line, so it
 		# never affects relative order. The release immediately before TAG in
 		# that order is the one with the highest version strictly less than
-		# it; if TAG is itself the lowest version present (or isn't in the
-		# list — e.g. a prerelease not yet promoted to a real release),
-		# `prev` is still unset and OLDER_TAG correctly comes out empty.
-		OLDER_TAG="$(printf '%s\n' "${all_stable}" | sort -V | awk -v want="${TAG}" '
+		# it.
+		#
+		# TAG itself is injected into the sorted list (not just looked up in
+		# it) because --exclude-pre-releases already dropped it if TAG is a
+		# prerelease (an -rc/-alpha tag) — without this, $0 == want never
+		# matches for any prerelease TAG, OLDER_TAG always comes out empty,
+		# and the upgrade leg silently never runs for the common case this
+		# repo actually tags with (v0.7.0 alone shipped 10 alphas and 3 RCs).
+		# `sort -V -u` drops the duplicate if TAG also happens to be a real
+		# stable release already in the list; either way TAG can never match
+		# its own `prev`, since the exact-match branch exits before `prev` is
+		# updated to TAG's own line.
+		#
+		# The first `-` is mapped to `~` before sorting because plain sort -V
+		# orders an RC AFTER its own GA (v0.9.0-rc.2 sorts after v0.9.0), so
+		# looking up v0.9.0-rc.2 unmapped would resolve to v0.9.0 once v0.9.0
+		# ships — an unlabeled downgrade in the other direction from the one
+		# above. GNU sort -V orders `~` before end-of-string, so the mapped
+		# `v0.9.0~rc.2` correctly sorts before `v0.9.0`; every stable tag
+		# today is a plain `vX.Y.Z` with no `-`, so the substitution is a
+		# no-op for them.
+		want="$(printf '%s' "${TAG}" | sed 's/-/~/')"
+		OLDER_TAG="$( { printf '%s\n' "${all_stable}"; printf '%s\n' "${want}"; } | sort -V -u | awk -v want="${want}" '
 			$0 == want { print prev; exit }
 			{ prev = $0 }
 		')"
@@ -246,21 +260,17 @@ esac
 
 log "Testing ${TAG} (upgrading from: ${OLDER_TAG:-none found; first release})"
 
-# No compatibility path for a pre-rename INSTALL_TAG (e.g. re-testing v0.8.0
-# itself, whose own "older" release resolves to the pre-rename v0.7.0): matches
-# this repo's own clean-break policy for the abctl->agentop rename — "There is
-# no abctl alias" and "No compatibility code for on-disk state either" (see
-# docs/superpowers/specs/2026-09-30-abctl-to-agentop-rename-design.md).
-#
-# Genuinely reachable, not a historical curiosity: re-testing v0.8.0 resolves
-# to v0.7.0 as its "older" release permanently (OLDER_TAG is anchored to
-# "before TAG", not to how many newer releases exist since), and this is the
-# intended, accepted failure for that one case — install.sh's own re-exec
-# bootstrap means the checkout step above no longer blocks it either. The
-# failure itself surfaces at assert_healthy below as "agentop service status
-# exited non-zero", not as a bare "command not found": AGENTOP is a fixed
-# path, so a missing binary there is still a real, if unglamorous, exit
-# status assert_healthy now checks directly.
+# No compatibility path for a pre-rename INSTALL_TAG (e.g. v0.8.0's own
+# "older" release resolving to the pre-rename v0.7.0): matches this repo's
+# own clean-break policy for the abctl->agentop rename — "There is no abctl
+# alias" and "No compatibility code for on-disk state either" (see
+# docs/superpowers/specs/2026-09-30-abctl-to-agentop-rename-design.md). Not
+# actually reachable in practice: the workflow's checkout is pinned to TAG's
+# own commit, and TAG=v0.8.0 is itself old enough to predate this script
+# (confirmed via the GitHub API: 404 for this file at that commit) — a run
+# testing v0.8.0 fails at "sh: can't open scripts/release_smoke_test_linux.sh"
+# before any of this executes. Kept rather than deleted: a future release old
+# enough to have this script but still pre-rename would reach here for real.
 INSTALL_TAG="${OLDER_TAG:-${TAG}}"
 log "Fresh install: ${INSTALL_TAG}"
 install_cortex "${INSTALL_TAG}"

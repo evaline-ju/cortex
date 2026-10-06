@@ -212,6 +212,63 @@ as a literal shell pipe does.
       to document the dependency explicitly: call `assert_running_binary_is_current`
       first, every time, or `assert_running_version_is` is checking the wrong
       thing.
+- [x] Fix (review, round 4): the round-2 version-sort replacement for the
+      `OLDER_TAG` lookup introduced a regression of its own —
+      `--exclude-pre-releases` drops `TAG` itself from the candidate list
+      whenever `TAG` is a prerelease (`-rc`/`-alpha`), so `$0 == want` never
+      matched and `OLDER_TAG` silently came out empty for the common case
+      this repo actually tags with (v0.7.0 alone shipped 10 alphas and 3
+      RCs) — the exact "upgrade leg silently skipped, run stays green" bug
+      class the `--limit 200` fix was meant to close. Fixed by injecting
+      `TAG` into the sorted list before the lookup instead of only searching
+      for it. That fix had its own bug, caught before landing: plain
+      `sort -V` orders a GA release AFTER its own RCs (`v0.9.0-rc.2` sorts
+      after `v0.9.0`), so once a GA ships, looking up its own RC resolves to
+      the GA — an unlabeled downgrade in the opposite direction from the one
+      `--limit 200` fixed. Fixed by mapping the tag's first `-` to `~` before
+      sorting (GNU `sort -V` orders `~` before end-of-string, so
+      `v0.9.0~rc.2` correctly sorts before `v0.9.0`); verified against the
+      live release list plus simulated pre-GA/post-GA scenarios for both
+      `v0.9.0-rc.2` and `v0.8.2-rc.1`. Also merged `main-latest`'s lookup into
+      the same fetch (`sort -V | tail -1` instead of a separate `--limit 1`
+      date-ordered call) — `gh release list` orders by creation date, and a
+      maintenance-branch patch tagged after a newer line's release would
+      have made `--limit 1` pick the wrong "newest" there too, the same
+      date-vs-version problem the `*)` branch exists to fix.
+- [x] Fix (review, round 4): restored the checkout's `ref:` pin to the
+      triggering commit, reversing the round-2 fix. The round-2 reasoning
+      didn't hold up: unpinning doesn't make either motivating re-run case
+      pass (an old release re-run still fails, just later and less clearly —
+      at the no-op leg's string match instead of at checkout), a GitHub
+      Actions re-run reuses the original event payload rather than
+      re-resolving `main`'s current tip, and running main's bleeding-edge
+      script against an older release's binary is an active hazard, not just
+      a missed opportunity — it already happened once, live, between this
+      PR's own reviews (see the `assert_healthy` conflict below). Pinning
+      means a release old enough to predate this script can't be
+      smoke-tested by re-running its workflow; accepted, since those
+      releases already shipped and the alternative breaks the common case
+      (every release going forward) to partially help the rare one.
+- [x] Fix (review, round 4): a separate, already-merged PR (#1292) changed
+      `agentop service status`'s healthy-wording from `healthy: <url>` to
+      `Cortex is healthy according to <url>` and landed directly on main
+      while this PR was still open, conflicting with this branch's own
+      `assert_healthy` rewrite. Resolved by keeping this PR's exit-status
+      check (main's side still piped through `tee`, losing the real failure
+      mode this PR exists to fix) together with main's wider needle
+      (`'healthy:\|Cortex is healthy according to'`) and its comment — a
+      fresh install always runs the PREVIOUS release's `agentop` first, so
+      the needle has to match whichever wording that older binary uses, not
+      just the newest one.
+- [x] Fix (review, round 4): corrected a factual claim repeated in both this
+      doc and the script's own comments — "`--limit 20` capped the candidate
+      pool BEFORE filtering" described `gh release list`'s behavior
+      backwards. `gh`'s `fetchReleases` drops drafts and prereleases
+      client-side and keeps paging until it collects `--limit` *matches*, so
+      `--limit 20` always meant 20 stable releases, with the jq/`-q` date
+      filter running after that, not before. The actual bug was narrower
+      than the original comment claimed: 20 stable releases just isn't
+      enough reach once this repo has shipped more than that.
 
 ## Result
 

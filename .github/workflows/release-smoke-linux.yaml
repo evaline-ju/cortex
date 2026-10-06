@@ -42,18 +42,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # No `ref:` pin to the triggering release's own commit: this checkout is
-      # only for the TEST SCRIPT itself, not the things under test (the
-      # release assets and install.sh both come over the network regardless
-      # of what's checked out here). Pinning to the release's commit broke
-      # re-running an old release's workflow outright — this script didn't
-      # exist yet at v0.8.0/v0.8.1 (confirmed via the GitHub API: 404 for
-      # scripts/release_smoke_test_linux.sh at both commits), so the checkout
-      # would succeed and the very next step would fail to find the script to
-      # run. Always running main's current copy means re-runs always reach
-      # the actual test logic, whichever release they're re-testing.
+      # Pinned to the release's own commit: the test SCRIPT has to match the
+      # vintage of the binaries it's testing, same reason install_cortex pins
+      # the installer URL to TRIGGER_SHA for a main-latest run below. Running
+      # main's current copy against an older release risks exactly the
+      # mismatch this workflow hit live once already — a since-fixed PR
+      # changed agentop's health-check wording, and a run of this script
+      # from AFTER that change against a release from BEFORE it would assert
+      # on output that release never produces.
+      #
+      # This does mean a release older than this script itself can't be
+      # smoke-tested by re-running its workflow — e.g. v0.8.0/v0.8.1 predate
+      # it entirely (confirmed via the GitHub API: 404 for
+      # scripts/release_smoke_test_linux.sh at both commits). That's accepted:
+      # those releases already shipped, re-running checks out the commit
+      # that was main's tip when the ORIGINAL run fired (not today's main
+      # either way), and the alternative — always running main's bleeding
+      # edge — breaks the common case (every release going forward) to
+      # partially help the uncommon one (re-testing something ancient).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       # A tag push's workflow_run.head_branch is the tag itself; a push to main
