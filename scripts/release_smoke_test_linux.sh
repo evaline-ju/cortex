@@ -181,20 +181,33 @@ case "${TAG}" in
 		;;
 esac
 
-# The most recent STABLE release OLDER than the tag under test — the
-# realistic "what a user who hasn't upgraded in a while" starting point. Not
+# The most recent STABLE release OLDER than the tag under test — specifically
+# the IMMEDIATELY preceding one, not just any older release. That's the N-1 ->
+# N transition every tag goes through, and the one most likely to contain a
+# regression THIS release just introduced: N-2 -> N-1 was already exercised
+# as a smoke test when N-1 itself shipped, so testing a wider jump re-covers
+# already-checked ground instead of the actual diff under test. Not
 # hardcoded: a fixed "known good" version would drift out of the release list
 # over time and stop being the second-most-recent release, silently testing
 # a narrower jump than intended.
 #
-# Compared by VERSION NUMBER, not by date. This repo keeps maintenance
+# Compared by VERSION NUMBER, not by date — and not by any other timestamp
+# either (a tag's own commit date has the identical problem below; this is
+# categorical, not about which clock you pick). This repo keeps maintenance
 # branches alive (release-0.6, release-0.7 both exist), so a patch tagged on
 # an older line can be CREATED later in calendar time than a newer line's
-# release — e.g. v0.7.1 tagged after v0.8.1 already exists. Date-based
+# release — e.g. v0.7.1 tagged after v0.8.1 already exists. Any date-based
 # "older" would then pick v0.8.1 as the "older" release for v0.7.1, an
-# unlabeled downgrade. Comparing version numbers directly sidesteps that:
-# v0.7.1 sorts after v0.7.0 and before v0.8.0 regardless of when either was
-# actually published.
+# unlabeled downgrade: no timestamp, however it's obtained, carries the
+# "which product line does this belong to" information that only the
+# dotted version number preserves. Walking git ancestry instead of release
+# metadata doesn't fix this either — a maintenance branch commit is often not
+# even an ancestor of the newer line's commit in the DAG, so ancestry would
+# answer "what's upstream of this commit" rather than "what's the previous
+# version in this product line," a different (and here, wrong) question.
+# Comparing version numbers directly sidesteps all of this: v0.7.1 sorts
+# after v0.7.0 and before v0.8.0 regardless of when or where either was
+# actually created.
 #
 # --limit 200: gh release list's --limit counts STABLE releases, not raw API
 # results — it drops drafts and prereleases on the client and keeps paging
@@ -237,10 +250,15 @@ case "${TAG}" in
 		# matches for any prerelease TAG, OLDER_TAG always comes out empty,
 		# and the upgrade leg silently never runs for the common case this
 		# repo actually tags with (v0.7.0 alone shipped 10 alphas and 3 RCs).
-		# `sort -V -u` drops the duplicate if TAG also happens to be a real
-		# stable release already in the list; either way TAG can never match
-		# its own `prev`, since the exact-match branch exits before `prev` is
-		# updated to TAG's own line.
+		# `--exclude-pre-releases` still has to stay on for fetching the POOL,
+		# though — this injection only gives the lookup a landmark to match
+		# against, it does not make prereleases eligible ANSWERS. We never
+		# want OLDER_TAG itself to be a prerelease (nobody's real upgrade
+		# baseline is an RC), and the algorithm can't accidentally pick TAG
+		# as its own answer either way: the exact-match branch exits before
+		# `prev` is updated to TAG's own line, and `sort -V -u` drops the
+		# duplicate on the rare case TAG is also already a real stable
+		# release in the list.
 		#
 		# The first `-` is mapped to `~` before sorting because plain sort -V
 		# orders an RC AFTER its own GA (v0.9.0-rc.2 sorts after v0.9.0), so
@@ -249,7 +267,14 @@ case "${TAG}" in
 		# above. GNU sort -V orders `~` before end-of-string, so the mapped
 		# `v0.9.0~rc.2` correctly sorts before `v0.9.0`; every stable tag
 		# today is a plain `vX.Y.Z` with no `-`, so the substitution is a
-		# no-op for them.
+		# no-op for them. Not an invented trick: this is the same
+		# `~`-sorts-first convention Debian's dpkg has used for prerelease
+		# version comparison for years, and GNU sort -V deliberately
+		# replicates it — reused here for the thing it was designed for, not
+		# repurposed. It does assume every tag is plain `vX.Y.Z` or
+		# `vX.Y.Z-suffix` with the hyphen only ever marking a prerelease,
+		# which is true of every tag this project has cut so far and is this
+		# project's own naming convention to keep true.
 		want="$(printf '%s' "${TAG}" | sed 's/-/~/')"
 		OLDER_TAG="$( { printf '%s\n' "${all_stable}"; printf '%s\n' "${want}"; } | sort -V -u | awk -v want="${want}" '
 			$0 == want { print prev; exit }
