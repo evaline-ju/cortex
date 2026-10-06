@@ -19,12 +19,13 @@ Reuses the exact `enable-linger` + wait-for-`/run/user/<uid>/bus` recipe
 
 The actual test logic lives in `scripts/release_smoke_test_linux.sh`, kept
 out of the YAML for the same reason `deploy/proxy-init/test-enforce-redirect.sh`
-is a separate script rather than inline `run:` steps. It always pipes
-`curl | sh` rather than invoking the checked-out `install.sh` as a local
-file — `install.sh`'s own re-exec bootstrap only re-fetches the tagged copy
-of itself (matching the requested `--ref`) when `$0` isn't a readable file,
-which is the exact condition a real `curl | sh` user hits and a local
-invocation would skip.
+is a separate script rather than inline `run:` steps. It downloads
+`install.sh` to a temp file and feeds that in on stdin, rather than invoking
+the checked-out copy as a local file argument — `install.sh`'s own re-exec
+bootstrap only re-fetches the tagged copy of itself (matching the requested
+`--ref`) when `$0` isn't a readable file, which is the condition a real
+`curl | sh` user hits (and a local file invocation would skip) just as much
+as a literal shell pipe does.
 
 **Spec:** none — #957 is its own checklist, not a design doc.
 
@@ -131,6 +132,143 @@ invocation would skip.
       happens: `release-binaries.yaml` PATCHes `main-latest`'s own tag ref to
       the triggering commit on every push to main, and `createdAt` follows
       the commit its tag points at. Corrected the comment accordingly.
+- [x] Fix (follow-up, decided in conversation): dropped `detect_cli` entirely
+      — matches this repo's own clean-break policy for the abctl rename (no
+      alias, no compatibility code) more closely than keeping a one-off
+      fallback for a single already-superseded release. Re-testing `v0.8.0`
+      itself now fails plainly rather than falling back to the pre-rename
+      CLI; accepted, since that case only affects one historical release and
+      the test's "no older release" first-run path isn't affected.
+- [x] Fix (review, round 2 — a separate PR landed `agentop setup`
+      mid-review): `install.sh` was rearchitected (#1203's follow-up) to hand
+      installation off to a new `agentop setup` subcommand instead of doing
+      it directly. Verified before touching anything further: the on-disk
+      layout, `agentop service uninstall`, the SHA-256 "already current"
+      stamp check, and the `enable`+`restart` split from #1203's own fix are
+      all unchanged in substance, just invoked one layer up through
+      `setup`'s step pipeline — none of this script's assertions needed to
+      change because of it, confirmed by reading the new
+      `cmd/agentop/cmd_setup.go`/`setup_step_*.go` directly rather than
+      assuming.
+- [x] Fix (review, round 2): the workflow's checkout pinned
+      `ref: ${{ github.event.workflow_run.head_sha }}` — the release's own
+      commit. This script didn't exist yet at `v0.8.0`/`v0.8.1` (confirmed
+      via the GitHub API: 404 for `scripts/release_smoke_test_linux.sh` at
+      both commits), so re-running an old release's workflow failed before
+      the test even started. Dropped the `ref:` pin — the checkout is only
+      for the test script itself; the release assets and `install.sh` both
+      come over the network regardless of what's checked out.
+- [x] Fix (review, round 2): `--limit 20` on the release lookup capped the
+      candidate pool BEFORE filtering, and date-based "older than TAG" broke
+      across maintenance branches (`release-0.6`/`release-0.7` both exist; a
+      patch tagged later on an older line could resolve to something with a
+      *higher* version number). Replaced the whole lookup: `main-latest`
+      just takes the single newest stable release (`--limit 1`, no date
+      comparison needed); a real `v*` tag now compares by VERSION NUMBER
+      (`sort -V` across up to 200 stable releases, not a 20-release
+      date-ordered cap) rather than by creation date. Verified against the
+      live release list and a simulated maintenance-branch case
+      (`v0.7.1` tagged after `v0.8.1`) that it resolves to `v0.7.0`, not
+      `v0.8.1`.
+- [x] Fix (review, round 2): `assert_healthy` still piped
+      `agentop service status | tee`, losing the command's own exit status
+      under dash — a missing `agentop` (exit 127) would read as "did not
+      report healthy" rather than "command not found". Checked directly now,
+      same pattern already used for `install_cortex`.
+- [x] Fix (review, round 2): uninstall's three checks (printed "Removed",
+      unit file gone, config unchanged) can all pass even if the proxy never
+      actually stopped — `removeService` only logs a failed
+      `systemctl --user disable --now`, then deletes the unit file and
+      prints success regardless. Added a direct
+      `systemctl --user is-active --quiet cortex.service` check.
+- [x] Fix (review, round 2): a `main-latest` run pinned the expected
+      *version string* to the triggering commit, but not the *installer
+      script* used to install it — that was always fetched from
+      `raw.githubusercontent.com/.../main/...`, cached up to 5 minutes. A
+      commit that changes the installer and the binaries together (as the
+      rename PR did) has a narrow window to be tested with a mismatched
+      pairing. `install_cortex` now fetches the installer from a SHA-pinned
+      URL whenever installing `main-latest`.
+- [x] Fix (review, round 2): a couple of this file's own comments overclaimed
+      — one said a cost "stops being reachable... once a newer stable
+      release exists" when `OLDER_TAG` is actually anchored to "before TAG"
+      permanently; another said a pre-rename re-test fails with
+      "command not found" when it actually surfaced as a misleading
+      "did not report healthy" (now fixed to fail as a direct, checked exit
+      status instead). Corrected both. Also fixed capitalization drift
+      ("Release Binaries" vs the workflow's real name, "Release binaries")
+      in prose comments that didn't get the trigger's own earlier fix.
+- [x] Fix (review, round 3): `assert_running_version_is` only ran inside the
+      upgrade block, so a run with no `OLDER_TAG` (the very first release, or
+      a `v*` tag whose own "older" release doesn't exist) never checked it had
+      installed the right thing at all. It also wasn't independent of
+      `assert_running_binary_is_current` the way its old comment implied — it
+      runs the binary sitting on disk, not the service's process, so on its
+      own it would pass even in the #1203 stale-process state (the disk
+      binary IS the new one there; only the running process is stale). Fixed
+      by calling both checks right after the fresh-install leg too (using
+      `OLDER_TAG` itself as the expected version there, since it's always a
+      real tag, never `main-latest`), and reworded both functions' comments
+      to document the dependency explicitly: call `assert_running_binary_is_current`
+      first, every time, or `assert_running_version_is` is checking the wrong
+      thing.
+- [x] Fix (review, round 4): the round-2 version-sort replacement for the
+      `OLDER_TAG` lookup introduced a regression of its own —
+      `--exclude-pre-releases` drops `TAG` itself from the candidate list
+      whenever `TAG` is a prerelease (`-rc`/`-alpha`), so `$0 == want` never
+      matched and `OLDER_TAG` silently came out empty for the common case
+      this repo actually tags with (v0.7.0 alone shipped 10 alphas and 3
+      RCs) — the exact "upgrade leg silently skipped, run stays green" bug
+      class the `--limit 200` fix was meant to close. Fixed by injecting
+      `TAG` into the sorted list before the lookup instead of only searching
+      for it. That fix had its own bug, caught before landing: plain
+      `sort -V` orders a GA release AFTER its own RCs (`v0.9.0-rc.2` sorts
+      after `v0.9.0`), so once a GA ships, looking up its own RC resolves to
+      the GA — an unlabeled downgrade in the opposite direction from the one
+      `--limit 200` fixed. Fixed by mapping the tag's first `-` to `~` before
+      sorting (GNU `sort -V` orders `~` before end-of-string, so
+      `v0.9.0~rc.2` correctly sorts before `v0.9.0`); verified against the
+      live release list plus simulated pre-GA/post-GA scenarios for both
+      `v0.9.0-rc.2` and `v0.8.2-rc.1`. Also merged `main-latest`'s lookup into
+      the same fetch (`sort -V | tail -1` instead of a separate `--limit 1`
+      date-ordered call) — `gh release list` orders by creation date, and a
+      maintenance-branch patch tagged after a newer line's release would
+      have made `--limit 1` pick the wrong "newest" there too, the same
+      date-vs-version problem the `*)` branch exists to fix.
+- [x] Fix (review, round 4): restored the checkout's `ref:` pin to the
+      triggering commit, reversing the round-2 fix. The round-2 reasoning
+      didn't hold up: unpinning doesn't make either motivating re-run case
+      pass (an old release re-run still fails, just later and less clearly —
+      at the no-op leg's string match instead of at checkout), a GitHub
+      Actions re-run reuses the original event payload rather than
+      re-resolving `main`'s current tip, and running main's bleeding-edge
+      script against an older release's binary is an active hazard, not just
+      a missed opportunity — it already happened once, live, between this
+      PR's own reviews (see the `assert_healthy` conflict below). Pinning
+      means a release old enough to predate this script can't be
+      smoke-tested by re-running its workflow; accepted, since those
+      releases already shipped and the alternative breaks the common case
+      (every release going forward) to partially help the rare one.
+- [x] Fix (review, round 4): a separate, already-merged PR (#1292) changed
+      `agentop service status`'s healthy-wording from `healthy: <url>` to
+      `Cortex is healthy according to <url>` and landed directly on main
+      while this PR was still open, conflicting with this branch's own
+      `assert_healthy` rewrite. Resolved by keeping this PR's exit-status
+      check (main's side still piped through `tee`, losing the real failure
+      mode this PR exists to fix) together with main's wider needle
+      (`'healthy:\|Cortex is healthy according to'`) and its comment — a
+      fresh install always runs the PREVIOUS release's `agentop` first, so
+      the needle has to match whichever wording that older binary uses, not
+      just the newest one.
+- [x] Fix (review, round 4): corrected a factual claim repeated in both this
+      doc and the script's own comments — "`--limit 20` capped the candidate
+      pool BEFORE filtering" described `gh release list`'s behavior
+      backwards. `gh`'s `fetchReleases` drops drafts and prereleases
+      client-side and keeps paging until it collects `--limit` *matches*, so
+      `--limit 20` always meant 20 stable releases, with the jq/`-q` date
+      filter running after that, not before. The actual bug was narrower
+      than the original comment claimed: 20 stable releases just isn't
+      enough reach once this repo has shipped more than that.
 
 ## Result
 

@@ -58,7 +58,20 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 # the bare ones under `set -e` and the one under `if !`) handles correctly.
 install_cortex() {
 	tmp="$(mktemp "${TMP_DIR}/install.XXXXXX")"
-	if ! curl -fsSL -o "${tmp}" https://raw.githubusercontent.com/rossoctl/cortex/main/scripts/install.sh; then
+	installer_url="https://raw.githubusercontent.com/rossoctl/cortex/main/scripts/install.sh"
+	if [ "$1" = "main-latest" ]; then
+		# Pin the installer to the exact commit that triggered this run,
+		# instead of "whatever main currently looks like": raw.githubusercontent.com
+		# caches responses for a few minutes, and a commit that changes
+		# install.sh and the binaries together (as the rename PR did) has a
+		# narrow window to be tested with a mismatched pairing — new
+		# binaries served with stale installer logic, or vice versa. A
+		# commit SHA in the URL is immutable content; the branch name "main"
+		# is not. By the time TAG is "main-latest", an earlier check already
+		# guarantees TRIGGER_SHA is non-empty.
+		installer_url="https://raw.githubusercontent.com/rossoctl/cortex/${TRIGGER_SHA}/scripts/install.sh"
+	fi
+	if ! curl -fsSL -o "${tmp}" "${installer_url}"; then
 		echo "FAIL: could not download install.sh" >&2
 		return 1
 	fi
@@ -81,12 +94,24 @@ assert_contains() {
 	fi
 }
 
-# Both wordings: the fresh install below runs the PREVIOUS release's agentop, which
-# says "healthy: <url>", where this one says "Cortex is healthy according to <url>".
-# GNU grep's \| alternation; this runs on ubuntu.
+# Checked directly, not piped through tee: a pipeline's exit status under
+# dash (no pipefail) is tee's, not agentop's — a missing agentop binary
+# (exit 127) would still let the pipeline "succeed" with an empty ${out},
+# so the real cause (command not found) gets reported as the unrelated
+# "did not report healthy" instead.
+#
+# Both wordings in the needle: the fresh install below runs the PREVIOUS
+# release's agentop, which says "healthy: <url>", where this one says
+# "Cortex is healthy according to <url>". GNU grep's \| alternation; this
+# runs on ubuntu.
 assert_healthy() {
 	out="$(mktemp "${TMP_DIR}/status.XXXXXX")"
-	"${AGENTOP}" service status | tee "${out}"
+	if ! "${AGENTOP}" service status >"${out}" 2>&1; then
+		cat "${out}" >&2
+		echo "FAIL: agentop service status exited non-zero" >&2
+		exit 1
+	fi
+	cat "${out}"
 	assert_contains "${out}" 'healthy:\|Cortex is healthy according to' "agentop service status did not report healthy"
 }
 
@@ -117,13 +142,20 @@ assert_running_binary_is_current() {
 	fi
 }
 
-# Confirms the running binary's own reported version matches what this run
-# installed — a second, independent signal alongside the inode check above,
-# and the one that also ties a main-latest run to the exact commit that
-# triggered it (see TRIGGER_SHA below): a later merge can re-point main-latest
-# and clobber its assets while this job is still running, so without this a
-# pass could be describing the NEXT build rather than the one actually under
-# test.
+# NOT independent of the check above — this runs the binary sitting at
+# PROXY_BIN on disk, not the service's own process, so on its own it would
+# pass even in the exact #1203 stale-process bug this script exists to catch
+# (the disk binary IS the new one in that state; only the running process
+# is stale). It only says something about the SERVICE because the preceding
+# assert_running_binary_is_current call already proved the service's
+# /proc/<pid>/exe points at this same PROXY_BIN path. Call both, in this
+# order, or this one is checking the wrong thing.
+#
+# What it adds beyond that: the exe-path check only proves "the service runs
+# the file at this path"; this proves that file's own self-reported version
+# is the one this run installed — which also ties a main-latest run to the
+# exact commit that triggered it (see TRIGGER_SHA below), since a later merge
+# can re-point main-latest and clobber its assets while this job still runs.
 assert_running_version_is() {
 	got="$("${PROXY_BIN}" --version)"
 	if [ "${got}" != "cortex $1" ]; then
@@ -149,62 +181,130 @@ case "${TAG}" in
 		;;
 esac
 
-# The most recent STABLE release created strictly BEFORE the tag under test —
-# the realistic "what a user who hasn't upgraded in a while" starting point.
-# Not hardcoded: a fixed "known good" version would drift out of the release
-# list over time and stop being the second-most-recent release, silently
-# testing a narrower jump than intended.
+# The most recent STABLE release OLDER than the tag under test — specifically
+# the IMMEDIATELY preceding one, not just any older release. That's the N-1 ->
+# N transition every tag goes through, and the one most likely to contain a
+# regression THIS release just introduced: N-2 -> N-1 was already exercised
+# as a smoke test when N-1 itself shipped, so testing a wider jump re-covers
+# already-checked ground instead of the actual diff under test. Not
+# hardcoded: a fixed "known good" version would drift out of the release list
+# over time and stop being the second-most-recent release, silently testing
+# a narrower jump than intended.
 #
-# "Before TAG", not just "the most recent other release": this workflow can be
-# triggered by re-running an OLD completed Release Binaries run, at which
-# point newer stable releases may already exist. Picking "the most recent
-# other release" in that case would select something NEWER than TAG, silently
-# turning the "upgrade" step into an unlabeled downgrade — and for a release
-# old enough (pre-rename artifact names, no install.sh at any path it
-# probes), the fresh install of that "older" release would fail outright.
+# Compared by VERSION NUMBER, not by date — and not by any other timestamp
+# either (a tag's own commit date has the identical problem below; this is
+# categorical, not about which clock you pick). This repo keeps maintenance
+# branches alive (release-0.6, release-0.7 both exist), so a patch tagged on
+# an older line can be CREATED later in calendar time than a newer line's
+# release — e.g. v0.7.1 tagged after v0.8.1 already exists. Any date-based
+# "older" would then pick v0.8.1 as the "older" release for v0.7.1, an
+# unlabeled downgrade: no timestamp, however it's obtained, carries the
+# "which product line does this belong to" information that only the
+# dotted version number preserves. Walking git ancestry instead of release
+# metadata doesn't fix this either — a maintenance branch commit is often not
+# even an ancestor of the newer line's commit in the DAG, so ancestry would
+# answer "what's upstream of this commit" rather than "what's the previous
+# version in this product line," a different (and here, wrong) question.
+# Comparing version numbers directly sidesteps all of this: v0.7.1 sorts
+# after v0.7.0 and before v0.8.0 regardless of when or where either was
+# actually created.
 #
-# createdAt, not publishedAt: release-binaries.yaml PATCHes main-latest's own
-# tag ref to the triggering commit on every push to main, and a release's
-# createdAt follows the commit its tag points at — the lightweight
-# main-latest tag's commit date for that one, an annotated v* tag's tagger
-# date for the rest. publishedAt stays frozen at whenever the release object
-# was first created and does not move with it, confirmed live across two
-# different days (main-latest's createdAt advanced from 2026-09-30T13:43:16Z
-# to 2026-10-01T15:37:57Z as main kept moving; publishedAt stayed at
-# 2026-09-09T21:11:29Z throughout). Anchoring on publishedAt would permanently
-# exclude every stable release published after that first day from ever being
-# picked for a main-latest run.
+# --limit 200: gh release list's --limit counts STABLE releases, not raw API
+# results — it drops drafts and prereleases on the client and keeps paging
+# until it collects that many (cli/cli's fetchReleases), so this is "the 200
+# most recent stable releases," comfortably beyond any realistic release
+# count for a long while. gh has no --paginate flag for this subcommand, so a
+# fixed high limit stands in for real pagination on a problem this project
+# will not hit for years.
 #
 # set -eu alone won't catch a failure inside a pipeline under dash (no
-# pipefail), so each gh call below is checked explicitly rather than trusted
-# to abort the script on its own.
-if ! tag_created_at="$(gh release view "${TAG}" --json createdAt -q '.createdAt')"; then
-	echo "FAIL: could not resolve the creation date for release ${TAG}" >&2
-	exit 1
-fi
-
-if ! OLDER_TAG="$(gh release list --exclude-drafts --exclude-pre-releases --limit 20 \
-	--json tagName,createdAt \
-	-q "[.[] | select(.createdAt < \"${tag_created_at}\")] | sort_by(.createdAt) | last | .tagName // \"\"")"; then
+# pipefail), so the gh call is checked explicitly.
+if ! all_stable="$(gh release list --exclude-drafts --exclude-pre-releases \
+	--limit 200 --json tagName -q '.[].tagName')"; then
 	echo "FAIL: gh release list failed" >&2
 	exit 1
 fi
 
+case "${TAG}" in
+	main-latest)
+		# main-latest always means "whatever's on main right now", so the
+		# single most recent stable release is unambiguously the one before
+		# it. sort -V | tail -1 picks the highest VERSION, not whichever
+		# release gh happened to create most recently — gh release list
+		# orders by creation date, and a maintenance-branch patch can be
+		# created after a newer line's release (the same v0.7.1-after-v0.8.1
+		# case above), which would make a date-ordered "newest" pick wrong
+		# here too.
+		OLDER_TAG="$(printf '%s\n' "${all_stable}" | sort -V | tail -n 1)"
+		;;
+	*)
+		# sort -V orders the full line "vX.Y.Z" the same way it would order
+		# bare dotted numbers — the "v" prefix is common to every line, so it
+		# never affects relative order. The release immediately before TAG in
+		# that order is the one with the highest version strictly less than
+		# it.
+		#
+		# TAG itself is injected into the sorted list (not just looked up in
+		# it) because --exclude-pre-releases already dropped it if TAG is a
+		# prerelease (an -rc/-alpha tag) — without this, $0 == want never
+		# matches for any prerelease TAG, OLDER_TAG always comes out empty,
+		# and the upgrade leg silently never runs for the common case this
+		# repo actually tags with (v0.7.0 alone shipped 10 alphas and 3 RCs).
+		# `--exclude-pre-releases` still has to stay on for fetching the POOL,
+		# though — this injection only gives the lookup a landmark to match
+		# against, it does not make prereleases eligible ANSWERS. We never
+		# want OLDER_TAG itself to be a prerelease (nobody's real upgrade
+		# baseline is an RC), and the algorithm can't accidentally pick TAG
+		# as its own answer either way: the exact-match branch exits before
+		# `prev` is updated to TAG's own line, and `sort -V -u` drops the
+		# duplicate on the rare case TAG is also already a real stable
+		# release in the list.
+		#
+		# The first `-` is mapped to `~` before sorting because plain sort -V
+		# orders an RC AFTER its own GA (v0.9.0-rc.2 sorts after v0.9.0), so
+		# looking up v0.9.0-rc.2 unmapped would resolve to v0.9.0 once v0.9.0
+		# ships — an unlabeled downgrade in the other direction from the one
+		# above. GNU sort -V orders `~` before end-of-string, so the mapped
+		# `v0.9.0~rc.2` correctly sorts before `v0.9.0`; every stable tag
+		# today is a plain `vX.Y.Z` with no `-`, so the substitution is a
+		# no-op for them. Not an invented trick: this is the same
+		# `~`-sorts-first convention Debian's dpkg has used for prerelease
+		# version comparison for years, and GNU sort -V deliberately
+		# replicates it — reused here for the thing it was designed for, not
+		# repurposed. It does assume every tag is plain `vX.Y.Z` or
+		# `vX.Y.Z-suffix` with the hyphen only ever marking a prerelease,
+		# which is true of every tag this project has cut so far and is this
+		# project's own naming convention to keep true.
+		want="$(printf '%s' "${TAG}" | sed 's/-/~/')"
+		OLDER_TAG="$( { printf '%s\n' "${all_stable}"; printf '%s\n' "${want}"; } | sort -V -u | awk -v want="${want}" '
+			$0 == want { print prev; exit }
+			{ prev = $0 }
+		')"
+		;;
+esac
+
 log "Testing ${TAG} (upgrading from: ${OLDER_TAG:-none found; first release})"
 
-# No compatibility path for a pre-rename INSTALL_TAG (e.g. re-testing v0.8.0
-# itself, whose own "older" release resolves to the pre-rename v0.7.0):
-# matches this repo's own clean-break policy for the abctl->agentop rename
-# ("no alias, no compatibility code" — see
-# docs/superpowers/specs/2026-09-30-abctl-to-agentop-rename-design.md). If
-# INSTALL_TAG predates the rename, this fails here with a plain
-# "command not found" rather than a clearer message — accepted, since it only
-# affects re-testing that one already-superseded release, a cost that stops
-# being reachable at all once a newer stable release exists to upgrade from.
+# No compatibility path for a pre-rename INSTALL_TAG (e.g. v0.8.0's own
+# "older" release resolving to the pre-rename v0.7.0): matches this repo's
+# own clean-break policy for the abctl->agentop rename — "There is no abctl
+# alias" and "No compatibility code for on-disk state either" (see
+# docs/superpowers/specs/2026-09-30-abctl-to-agentop-rename-design.md). Not
+# actually reachable in practice: the workflow's checkout is pinned to TAG's
+# own commit, and TAG=v0.8.0 is itself old enough to predate this script
+# (confirmed via the GitHub API: 404 for this file at that commit) — a run
+# testing v0.8.0 fails at "sh: can't open scripts/release_smoke_test_linux.sh"
+# before any of this executes. Kept rather than deleted: a future release old
+# enough to have this script but still pre-rename would reach here for real.
 INSTALL_TAG="${OLDER_TAG:-${TAG}}"
 log "Fresh install: ${INSTALL_TAG}"
 install_cortex "${INSTALL_TAG}"
 assert_healthy
+assert_running_binary_is_current
+# INSTALL_TAG is OLDER_TAG when it's set — always a real v* tag, never
+# main-latest, so its own version string IS the tag; expected_version (which
+# resolves main-latest's main-<sha> form) only applies when INSTALL_TAG == TAG.
+assert_running_version_is "${OLDER_TAG:-${expected_version}}"
 
 if [ -n "${OLDER_TAG}" ]; then
 	# A marker only this test writes, to prove config survives the upgrade
@@ -259,6 +359,16 @@ fi
 cfg_after="$(cksum <"${CFG}")"
 if [ "${cfg_before}" != "${cfg_after}" ]; then
 	echo "FAIL: uninstall changed the contents of ${CFG}; it promises to leave it untouched" >&2
+	exit 1
+fi
+# None of the checks above actually prove the proxy stopped. removeService
+# (cmd_service.go) only LOGS a failed `systemctl --user disable --now`, then
+# deletes the unit file regardless and still prints "Removed" — so all three
+# checks above would pass even if the old proxy kept serving, now with no
+# unit file left to manage or diagnose it. is-active asks systemd directly,
+# rather than inferring from the unit file's absence or a printed message.
+if systemctl --user is-active --quiet cortex.service; then
+	echo "FAIL: cortex.service is still active after uninstall" >&2
 	exit 1
 fi
 
