@@ -1,6 +1,10 @@
 package session
 
-import "time"
+import (
+	"time"
+
+	"github.com/rossoctl/cortex/core/pipeline"
+)
 
 // SeqSeeder is optionally implemented by a Recorder that keeps a session's events for longer
 // than the store does — the session archive. When the store creates an entry it asks every
@@ -80,4 +84,90 @@ func (s *Store) Clear() int {
 		}
 	}
 	return n
+}
+
+// Prior is a session's history from before a store entry began: what the session archive folded
+// under the id up to the seq the entry numbers after.
+type Prior struct {
+	// Fold is the earlier history's figures. SHARED AND IMMUTABLE: the keeper hands out the copy it
+	// published, so a caller reads it and never Adds to it.
+	Fold *SummaryFold
+	// CreatedAt is when the keeper first saw the session; zero when it does not know.
+	CreatedAt time.Time
+}
+
+// PriorKeeper is optionally implemented by a Recorder that keeps a session's history across the
+// store's restarts and evictions — the session archive. For every entry numbered after earlier
+// history (a SeqSeeder answered above zero when the entry was created), ListSessions asks for that
+// history and reports the session's row as the two together, so that — with session.max_events
+// unset, the default — a restart, a ttl or max_sessions changes nothing a list shows. With a cap
+// the entry's own figures shed what a trim drops while the archive's fold keeps it, so a restart
+// can raise them.
+//
+// ok is false when the keeper cannot say EXACTLY what came before, and the row then shows the
+// entry's own figures. That undercount is the safe side: the keeper records every event the store
+// appends, so anything but the history from before the entry would count the entry twice.
+//
+// Prior is called under the store's READ lock, on agentop's two-second poll: it must be a memory
+// lookup, must not block, and must not call back into the store.
+type PriorKeeper interface {
+	Prior(sessionID string, after uint64) (Prior, bool)
+}
+
+// priorLocked is the first PriorKeeper's answer for id's entry numbered after `after`. s.mu held.
+func (s *Store) priorLocked(id string, after uint64) (Prior, bool) {
+	for _, r := range s.recorders {
+		if pk, ok := r.(PriorKeeper); ok {
+			if p, ok := pk.Prior(id, after); ok && p.Fold != nil {
+				return p, true
+			}
+		}
+	}
+	return Prior{}, false
+}
+
+// withPriorLocked adds to sum — sess's row as ListSessions built it — the history id held before
+// sess began. Each figure merges by the rule that folds it, so the row is what a store that never
+// lost the session would report. s.mu held.
+func (s *Store) withPriorLocked(sum *SessionSummary, id string, sess *entry) {
+	if sess.after == 0 {
+		return
+	}
+	p, ok := s.priorLocked(id, sess.after)
+	if !ok {
+		return
+	}
+	f := p.Fold
+	sum.EventCount += f.events
+	sum.TotalTokens += f.tokens
+	// CostSum's addition for the sums, OR for the flags: a total that clamped on either side is a
+	// bound, whichever side it was.
+	cost, avoided := sess.cost, sess.avoided
+	cost.Add(f.cost.Micros)
+	avoided.Add(f.avoided.Micros)
+	cost.Saturated = cost.Saturated || f.cost.Saturated
+	avoided.Saturated = avoided.Saturated || f.avoided.Saturated
+	sum.CostMicros, sum.AvoidedMicros = cost.Micros, avoided.Micros
+	sum.Saturated = cost.Saturated || avoided.Saturated
+	// THE UNIT COUNTS, NOT THE RENDERED LISTS: currenciesOf renders dollars-only as nil, so a union
+	// of two rendered lists would drop "USD" from a session priced in dollars on one side only.
+	if len(f.units) > 0 {
+		units := make(map[string]int, len(f.units)+len(sess.units))
+		for u, n := range sess.units {
+			units[u] += n
+		}
+		for u, n := range f.units {
+			units[u] += n
+		}
+		sum.Currencies = currenciesOf(units)
+	}
+	// The earlier history's title as the one held and the entry's as the candidate. applyTitle
+	// then gives what folding both in order would, because the entry's title is itself the first
+	// at its best rank, or its latest /rename.
+	_, sum.Title = applyTitle(f.titleRank, f.title, sess.titleRank, sess.Title)
+	sum.Agent = s.agentOfLocked(id, sess, f.agents)
+	if !p.CreatedAt.IsZero() && p.CreatedAt.Before(sum.CreatedAt) {
+		sum.CreatedAt = p.CreatedAt
+	}
+	sum.PromptContext = pipeline.MergePromptContext(f.promptContext(), sum.PromptContext)
 }

@@ -130,6 +130,27 @@ func (a *Archive) Summaries() []session.SessionSummary {
 	return out
 }
 
+// Prior implements session.PriorKeeper: the fold of what id held before the store entry
+// numbering after `after` began. ok only when the writer has marked that entry's start, because
+// exactly then is before the history up to `after` and nothing of the entry's: begin runs in queue
+// order, after every earlier event and before any of the entry's. Until the writer takes the
+// entry's first event, and wherever it could mark none (begin found no state for the id: after a
+// clear, a prune, a whole-directory rename), the answer is false, and the store shows the entry's
+// own figures — an undercount, never a double count.
+//
+// A memory lookup under idxMu, safe under the store's read lock because idxMu is a LEAF lock: it
+// may be taken while the store's read lock is held, as here, but nothing is ever acquired while
+// idxMu is held, so no lock cycle can pass through it.
+func (a *Archive) Prior(sessionID string, after uint64) (session.Prior, bool) {
+	a.idxMu.RLock()
+	e := a.index[sessionID]
+	a.idxMu.RUnlock()
+	if e == nil || e.before == nil || e.startAfter != after {
+		return session.Prior{}, false
+	}
+	return session.Prior{Fold: e.before, CreatedAt: e.summary.CreatedAt}, true
+}
+
 // lastN keeps the newest n events pushed into it.
 type lastN struct {
 	buf  []*pipeline.SessionEvent

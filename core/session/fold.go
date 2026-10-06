@@ -76,12 +76,14 @@ func agentLabelIn(agents []sessionAgent, name string) string {
 // the session archive's running summary for a session the store may no longer hold.
 //
 // It uses the store's own rules — moneyOf through prepareAppend, sumTokens' response-only
-// token rule, applyTitle, applyAgent — so a fold over an untrimmed session's events reports
-// what ListSessions does. TestSummaryFold_AgreesWithListSessions holds that.
+// token rule, applyTitle, applyAgent, and entry.context's CTX fold — so a fold over an
+// untrimmed session's events reports what ListSessions does. TestSummaryFold_AgreesWithListSessions
+// holds that.
 //
 // ONE DIFFERENCE IS INHERENT: Agent is the first known agent's label, while the store prefers
 // the label of the agent that CLAIMED the session, which only the store knows. A resident
-// session's row therefore always comes from the store.
+// session's row therefore always comes from the store, which adds the archive's fold of the
+// history before its entry (PriorKeeper).
 //
 // The zero value is not ready — rankRename is 0, so a zero titleRank would claim the session
 // had been renamed. Use NewSummaryFold. Not safe for concurrent use.
@@ -94,6 +96,13 @@ type SummaryFold struct {
 	titleRank int
 	title     string
 	agents    []sessionAgent
+	// context is the CTX figure folded so far, by the store's own rule (entry.context), and
+	// restoredContext the figure a fold resumed from session.json started from. TWO FIELDS BECAUSE
+	// pipeline.PromptContextFold HAS NO RESTORE PATH: what persists is its published figure, and
+	// since the published order is the fold's order, merging the restored figure with what was
+	// folded since gives what one uninterrupted fold would have.
+	context         pipeline.PromptContextFold
+	restoredContext *pipeline.PromptContext
 }
 
 // NewSummaryFold returns an empty fold.
@@ -126,11 +135,17 @@ func (f *SummaryFold) Add(sessionID string, e *pipeline.SessionEvent) {
 	}
 	f.titleRank, f.title = applyTitle(f.titleRank, f.title, p.titleRank, p.titleText)
 	f.agents = applyAgent(f.agents, sessionID, p.agentName, e.Client)
+	f.context.Add(e)
 }
 
-// Summary sets EventCount, Title, Agent, TotalTokens, CostMicros, AvoidedMicros, Currencies
-// and Saturated on a SessionSummary for sessionID, and nothing else: the timestamps and the
-// live-only fields (Active, Adopted, PromptContext) are the caller's.
+// promptContext is the fold's CTX figure, nil when nothing can be said.
+func (f *SummaryFold) promptContext() *pipeline.PromptContext {
+	return pipeline.MergePromptContext(f.restoredContext, f.context.Publish())
+}
+
+// Summary sets EventCount, Title, Agent, TotalTokens, CostMicros, AvoidedMicros, Currencies,
+// Saturated and PromptContext on a SessionSummary for sessionID, and nothing else: the
+// timestamps and the live-only fields (Active, Adopted) are the caller's.
 func (f *SummaryFold) Summary(sessionID string) SessionSummary {
 	sum := SessionSummary{
 		ID:            sessionID,
@@ -141,6 +156,7 @@ func (f *SummaryFold) Summary(sessionID string) SessionSummary {
 		AvoidedMicros: f.avoided.Micros,
 		Currencies:    currenciesOf(f.units),
 		Saturated:     f.cost.Saturated || f.avoided.Saturated,
+		PromptContext: f.promptContext(),
 	}
 	if sessionID != DefaultSessionID && !strings.HasPrefix(sessionID, PendingPrefix) && len(f.agents) > 0 {
 		sum.Agent = f.agents[0].label
@@ -154,16 +170,17 @@ func (f *SummaryFold) Summary(sessionID string) SessionSummary {
 // TitleRank IS A POINTER because rankRename is 0: a document without it must decode to
 // rankNone, not to a rename that would lock the title against every later candidate.
 type foldJSON struct {
-	EventCount       int            `json:"eventCount"`
-	Title            string         `json:"title,omitempty"`
-	TitleRank        *int           `json:"titleRank,omitempty"`
-	Agents           []foldAgent    `json:"agents,omitempty"`
-	TotalTokens      int            `json:"totalTokens,omitempty"`
-	CostMicros       int64          `json:"costMicros,omitempty"`
-	CostSaturated    bool           `json:"costSaturated,omitempty"`
-	AvoidedMicros    int64          `json:"avoidedMicros,omitempty"`
-	AvoidedSaturated bool           `json:"avoidedSaturated,omitempty"`
-	Units            map[string]int `json:"units,omitempty"`
+	EventCount       int                     `json:"eventCount"`
+	Title            string                  `json:"title,omitempty"`
+	TitleRank        *int                    `json:"titleRank,omitempty"`
+	Agents           []foldAgent             `json:"agents,omitempty"`
+	TotalTokens      int                     `json:"totalTokens,omitempty"`
+	CostMicros       int64                   `json:"costMicros,omitempty"`
+	CostSaturated    bool                    `json:"costSaturated,omitempty"`
+	AvoidedMicros    int64                   `json:"avoidedMicros,omitempty"`
+	AvoidedSaturated bool                    `json:"avoidedSaturated,omitempty"`
+	Units            map[string]int          `json:"units,omitempty"`
+	PromptContext    *pipeline.PromptContext `json:"promptContext,omitempty"`
 }
 
 type foldAgent struct {
@@ -184,6 +201,7 @@ func (f *SummaryFold) MarshalJSON() ([]byte, error) {
 		AvoidedMicros:    f.avoided.Micros,
 		AvoidedSaturated: f.avoided.Saturated,
 		Units:            f.units,
+		PromptContext:    f.promptContext(),
 	}
 	for _, a := range f.agents {
 		j.Agents = append(j.Agents, foldAgent{Name: a.name, Label: a.label})
@@ -198,13 +216,14 @@ func (f *SummaryFold) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	*f = SummaryFold{
-		events:    j.EventCount,
-		tokens:    j.TotalTokens,
-		cost:      usage.CostSum{Micros: j.CostMicros, Saturated: j.CostSaturated},
-		avoided:   usage.CostSum{Micros: j.AvoidedMicros, Saturated: j.AvoidedSaturated},
-		units:     j.Units,
-		titleRank: rankNone,
-		title:     j.Title,
+		events:          j.EventCount,
+		tokens:          j.TotalTokens,
+		cost:            usage.CostSum{Micros: j.CostMicros, Saturated: j.CostSaturated},
+		avoided:         usage.CostSum{Micros: j.AvoidedMicros, Saturated: j.AvoidedSaturated},
+		units:           j.Units,
+		titleRank:       rankNone,
+		title:           j.Title,
+		restoredContext: j.PromptContext,
 	}
 	if j.TitleRank != nil {
 		f.titleRank = *j.TitleRank

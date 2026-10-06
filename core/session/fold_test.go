@@ -52,6 +52,11 @@ func foldFixture(t *testing.T) []pipeline.SessionEvent {
 	evs = append(evs, turn("and the third thing", 0,
 		event.Event{Source: event.SourceUsageFallback,
 			Avoided: []event.Saving{{Component: "tool-prune", TokensAvoided: 200, USD: 0.02, Tier: "input"}}}, claude)...)
+	// A main-agent turn with a tool manifest, so the fixture carries a CTX figure.
+	evs = append(evs, pipeline.SessionEvent{Phase: pipeline.SessionResponse, Client: claude,
+		At: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC),
+		Inference: &pipeline.InferenceExtension{TotalTokens: 300, PromptTokens: 9000,
+			Tools: []pipeline.InferenceTool{{Name: "read"}}}})
 	return evs
 }
 
@@ -74,11 +79,11 @@ func TestSummaryFold_AgreesWithListSessions(t *testing.T) {
 	if got.EventCount != want.EventCount || got.Title != want.Title || got.Agent != want.Agent ||
 		got.TotalTokens != want.TotalTokens || got.CostMicros != want.CostMicros ||
 		got.AvoidedMicros != want.AvoidedMicros || got.Saturated != want.Saturated ||
-		!slices.Equal(got.Currencies, want.Currencies) {
+		!slices.Equal(got.Currencies, want.Currencies) || !sameContext(got.PromptContext, want.PromptContext) {
 		t.Fatalf("fold  = %+v\nstore = %+v", got, want)
 	}
 	if want.CostMicros == 0 || want.AvoidedMicros == 0 || want.Title == "" || want.Agent == "" ||
-		len(want.Currencies) != 2 {
+		len(want.Currencies) != 2 || want.PromptContext == nil {
 		t.Fatalf("fixture no longer exercises every figure: %+v", want)
 	}
 }
@@ -140,3 +145,46 @@ func TestSummaryFold_AMissingTitleRankIsNotARename(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// sameContext compares two CTX figures by value, the time by instant.
+func sameContext(a, b *pipeline.PromptContext) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Tokens == b.Tokens && a.Stated == b.Stated && a.Msgs == b.Msgs && a.At.Equal(b.At)
+}
+
+// CTX survives session.json. PromptContextFold has no restore path, so the fold keeps the figure
+// it read and merges it with what it folds afterwards — which is the max one uninterrupted fold
+// takes, since the published order is the fold's order. Split at every event.
+func TestSummaryFold_PromptContextResumesFromJSON(t *testing.T) {
+	evs := foldFixture(t)
+	whole := NewSummaryFold()
+	for i := range evs {
+		whole.Add("s1", &evs[i])
+	}
+	want := whole.Summary("s1").PromptContext
+	if want == nil {
+		t.Fatal("fixture carries no CTX figure")
+	}
+	for split := range len(evs) + 1 {
+		f := NewSummaryFold()
+		for i := range evs[:split] {
+			f.Add("s1", &evs[i])
+		}
+		b, err := json.Marshal(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := NewSummaryFold()
+		if err := json.Unmarshal(b, g); err != nil {
+			t.Fatal(err)
+		}
+		for i := split; i < len(evs); i++ {
+			g.Add("s1", &evs[i])
+		}
+		if got := g.Summary("s1").PromptContext; !sameContext(got, want) {
+			t.Errorf("split %d: PromptContext = %+v, want %+v", split, got, want)
+		}
+	}
+}

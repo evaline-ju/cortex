@@ -100,7 +100,8 @@ func mergeBySeq(disk, mem []pipeline.SessionEvent, limit int) []pipeline.Session
 
 // withArchivedRows adds to the store's list every archived session it does not hold, marked
 // resident: false, and reports the archive's usage. A session in both is listed once, as its
-// resident row: the store knows what only it can — whether it is active, which agent claimed it.
+// resident row: the store knows what only it can — whether it is active, which agent claimed it —
+// and that row already carries the archive's earlier history (session.PriorKeeper).
 func (s *Server) withArchivedRows(resident []session.SessionSummary) ([]session.SessionSummary, *pipeline.ArchiveUsage) {
 	held := make(map[string]bool, len(resident))
 	for _, r := range resident {

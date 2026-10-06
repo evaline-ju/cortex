@@ -65,9 +65,10 @@ func sessionsColumns() []table.Column {
 		// Both come from the server's own sum over the session's events
 		// (session.SessionSummary.CostMicros / .AvoidedMicros), not from the strip's ring
 		// window: the durable ledger's row key carries no session dimension by design, and
-		// the ring covers only its rolling span. So these RESET when the proxy restarts
-		// while the strip's "today" figure does not — both are correct, and neither is a
-		// check on the other.
+		// the ring covers only its rolling span. So these continue across a proxy restart
+		// where it keeps a session archive and reset where it does not, while the strip's
+		// "today" figure always continues — both are correct, and neither is a check on the
+		// other.
 		{Title: "COST", Width: 10},
 		{Title: "SAVED", Width: 10},
 		// CTX(1M) replaces an ACTIVE column that carried a ● for a flag nobody acted on.

@@ -2298,11 +2298,12 @@ func (m *model) paneView() string {
 		//   - "lifetime" NAMES A SPAN, and this table has no single span. Each row covers its own
 		//     session, first event to last, and no two rows need cover the same duration. There
 		//     was no one duration for the word to be true about.
-		//   - WHERE IT DID IMPLY A SPAN, it implied the wrong one. The session store is in memory
-		//     and resets when the proxy restarts, so a session's lifetime cannot exceed proxy
-		//     uptime — measured on a freshly restarted local proxy, the COST column summed to
-		//     $4.04, matching the band's rolling hour, while the band's day read $18.80. The word
-		//     that sounds like "everything ever" was labelling the SHORTEST span on screen.
+		//   - WHERE IT DID IMPLY A SPAN, it implied the wrong one. Where no session archive runs,
+		//     the store is in memory and resets when the proxy restarts, so a session's lifetime
+		//     cannot exceed proxy uptime — measured on a freshly restarted local proxy before it
+		//     kept one, the COST column summed to $4.04, matching the band's rolling hour, while
+		//     the band's day read $18.80. The word that sounds like "everything ever" was
+		//     labelling the SHORTEST span on screen.
 		//   - It sat at the end of the title, one line above a band whose nearest cells are
 		//     explicitly clock-windowed, so it read as covering those too.
 		//

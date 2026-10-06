@@ -257,3 +257,29 @@ func TestHandleGet_FillsTheGapBehindAPinnedIntent(t *testing.T) {
 		}
 	}
 }
+
+// A session resumed after a restart lists its whole history — 10 events from before and 1 after —
+// in the default list and with ?archived=true alike. The archive marks the entry's start on its
+// own goroutine, so poll briefly for it.
+func TestHandleList_AResumedSessionListsItsWholeHistory(t *testing.T) {
+	ts, store, _ := restarted(t)
+	store.Append("s1", pipeline.SessionEvent{At: time.Now(), Phase: pipeline.SessionRequest})
+	for _, url := range []string{ts.URL + "/v1/sessions", ts.URL + "/v1/sessions?archived=true"} {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			var n int
+			for _, s := range getList(t, url).Sessions {
+				if s.ID == "s1" {
+					n = s.EventCount
+				}
+			}
+			if n == 11 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: s1 lists %d events, want 11", url, n)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}

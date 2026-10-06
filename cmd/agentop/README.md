@@ -772,11 +772,13 @@ agentop is for, and the other three are surfaces you visit and leave.
   is a check on the other.
 
   The table is also **not** a longer span than the band, which is the reading
-  worth heading off. The session store is in memory, so a session's figures only
-  reach back as far as the current proxy process — on a freshly restarted proxy
-  the whole COST column can sum to less than `TODAY`, because `TODAY` comes from
-  the durable cost ledger and survives restarts. `[?]` states both facts; the
-  title deliberately does not, since no single span is true of every row.
+  worth heading off. With a session archive (a local install) a session's figures
+  reach back through restarts to its first archived event. Without one — any
+  cluster sidecar — the store is in memory, so they reach back only as far as the
+  current proxy process, and on a freshly restarted proxy the whole COST column
+  can sum to less than `TODAY`, because `TODAY` comes from the durable cost ledger
+  and survives restarts. `[?]` states both facts; the title deliberately does
+  not, since no single span is true of every row.
 
   Rendered at 100 columns, where every column has its declared width; 93 is the
   narrowest terminal that carries them all at once:

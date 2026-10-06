@@ -123,15 +123,20 @@ var spendDrawerKeys = keyGroup{
 	// title could only name a span, and the table has no single span to name (see paneView's
 	// sessions case).
 	//
-	// "resets on proxy restart" rather than "lifetime", which is the correction that motivated
-	// dropping the title note: the store is in memory, so a session's figures cover only as far
-	// back as the current proxy process. A reader comparing the table against the band's day
-	// figure and finding it smaller is seeing that, not a bug.
+	// "continues across proxy restarts with a session archive, resets without one" rather than
+	// "lifetime", which is the correction that motivated dropping the title note. Without an
+	// archive the store is in memory, so a session's figures cover only as far back as the
+	// current proxy process. With one, every row reaches back through restarts — a resident row
+	// adds the archive's fold of what came before its entry, and a row only the archive holds is
+	// that fold — but a clear or retention can still drop a session whose cost the ledger keeps.
+	// A reader comparing the table against the band's day figure and finding it smaller is
+	// seeing that, not a bug.
 	//
 	// A NOTE NOW, not a binding with keys:"". The same sentence, no longer pretending to be a key.
 	notes: []string{
-		"Every band cell names its own span. The sessions table is per session and resets " +
-			"on proxy restart, so its figures can read smaller than the band's.",
+		"Every band cell names its own span. The sessions table is per session: with a " +
+			"session archive it continues across proxy restarts, without one it resets, so its " +
+			"figures can read smaller than the band's.",
 	},
 }
 

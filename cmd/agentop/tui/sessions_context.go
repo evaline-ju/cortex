@@ -12,9 +12,10 @@ import (
 // with whatever the server published for that row.
 //
 // NEITHER SOURCE DOMINATES, which is why this merges rather than preferring one. The server has
-// seen everything since the PROXY started; agentop only since IT attached, which is usually less —
-// but agentop's copy survives a proxy restart, and destroying a figure it still holds because the
-// server forgot is #870's shape. pipeline.MergePromptContext resolves it by the rule rather than by
+// seen everything since the PROXY started — and, where a session archive runs, what the archive
+// holds from before that; agentop only since IT attached, which is usually less. But where no
+// archive runs, agentop's copy survives a proxy restart and the server's does not, and destroying
+// a figure it still holds because the server forgot is #870's shape. pipeline.MergePromptContext resolves it by the rule rather than by
 // size: a stated figure beats an unstated one at any magnitude.
 //
 // AND MERGING MOVES THE FIGURE EITHER WAY, which "neither source dominates" must not be read as
