@@ -55,6 +55,7 @@ attestation runs before the load and prints nothing when it passes).
 Fail `REFUSING to bake … already instruments …` (exit 3): the app instruments itself — go to step 3 **without** `APP_CONTAINER`/`APP_IMAGE` (capture only).
 Fail `REFUSING to bake … no runnable Python found` (exit 3): outside the shim's envelope (DESIGN "The envelope") — same, capture only; or pass the interpreter as arg 3 if you know it.
 Fail `REFUSING to bake … is not present locally` (exit 3): wrong `IMAGE` — see Inputs; nothing was built.
+Fail `REFUSING: the shim could not be installed alongside …` (the build fails): no contrib release is paired with the app's `opentelemetry-api` (a core newer than its contrib release, or a package index that lags) — uv's own error is above the line.
 Fail `ATTESTATION FAILED` (exit 4): the bake itself is broken (the image was not loaded) — read the assertion it prints; not an app property.
 
 ## 3. Attach (once per Deployment)

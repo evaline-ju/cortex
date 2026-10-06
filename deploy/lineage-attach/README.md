@@ -318,7 +318,7 @@ BAKE — once per app image                 ATTACH — once per Deployment
 | `RECIPE.md` · `DESIGN.md` | the step-by-step; the reasoning, envelope and limits |
 | `attach-lineage.sh` | **the one generator** — every YAML byte of the attachment, `EMIT=patch` / `EMIT=cm`, env-driven, stdout only, every input validated or refused |
 | `sidecar-patch.sh` | the live applier: preconditions, then ConfigMap + patch + rollout wait; owns no YAML |
-| `Dockerfile.otel-shim` | the propagate-only layer, one recipe for every in-envelope app, instrumentors pinned to one contrib release |
+| `Dockerfile.otel-shim` | the propagate-only layer, one recipe for every in-envelope app, instrumentors on the contrib release paired with the app's own `opentelemetry-api` (a pinned default when it carries none, or one older than 1.34.0) |
 | `build-otel-shim.sh` | bakes, attests (gate off: nothing OTel-shaped loads; gate on: a `traceparent` is injected), kind-loads; refuses images it cannot safely wrap |
 | `lineage-propagate-hook.py` | the env-gated site hook the Dockerfile installs (`.pth` + module); read its docstring for the contract |
 | `container-runtime.sh` | sourced helper: docker vs podman, kind load either way |

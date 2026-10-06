@@ -184,13 +184,18 @@ the shim's interlock lets the image through.
 
 ### Baking is not purely additive
 
-The shim installs one pinned OpenTelemetry contrib release
-(`OTEL_CONTRIB_VERSION` in `Dockerfile.otel-shim`), and the resolver brings
-the SDK that release requires — on an image that already carries an older SDK,
-the bake *upgrades* it (observed: `opentelemetry-sdk 1.42.1 → 1.44.0`, semconv
-`0.63b1 → 0.65b0`). Harmless for an app that does not pin, but an app pinning
-an older SDK can be affected by being wrapped. Check the build output if your
-app is sensitive to those versions.
+The install resolves into the app's own environment, so it can move a package
+the OpenTelemetry set depends on (`wrapt`, `typing-extensions`); `uv pip check`
+fails the build when the app pins one. The OpenTelemetry core itself does not
+move when the app already carries it: each contrib release requires one exact
+core (`0.63b1` requires `opentelemetry-api==1.42.1`), so `Dockerfile.otel-shim`
+pins the install to the app's `opentelemetry-api` and the resolver lands on the
+paired release. An app with no OpenTelemetry, or with `opentelemetry-api` below
+1.34.0, gets `OTEL_CONTRIB_VERSION`; for the older app that moves its core, and
+`uv pip check` decides. (The releases paired with older cores instrument only
+`starlette<0.15`, and before `0.52b0` they lack the `initialize()` the hook
+calls. The releases paired with 1.34.0 to 1.40.x require `wrapt<2`, so a
+`wrapt` 2.x the app holds loosely is moved down.)
 
 The static `uv` used to install the shim is copied into the image and left
 there — a `rm` in a later layer would not reclaim the copy layer's space, so
