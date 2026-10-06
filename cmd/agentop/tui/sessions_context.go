@@ -160,9 +160,3 @@ func contextGauge(promptTokens, width int) string {
 // TestSessionsPicker_CachedMarkerRendersIntact, which exists because a styled cell had its
 // escape bytes measured against the column width and came out mangled.
 const cachedMarker = "cached"
-
-// archivedMarker names a row the proxy's session archive served because memory no longer holds
-// the session (H). It takes the UPDATED cell, as cachedMarker does, because it is the one thing
-// on the row saying why there is no live session behind it; the list's order still says how
-// recent it is.
-const archivedMarker = "archived"

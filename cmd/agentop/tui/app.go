@@ -259,11 +259,6 @@ type tickMsg time.Time
 type refreshTickMsg time.Time
 type sessionsLoadedMsg []session.SessionSummary
 
-// historyLoadedMsg is the session list fetched with history on: sessionsLoadedMsg's rows plus the
-// archive's disk-only ones, and its usage. A separate type rather than a change to
-// sessionsLoadedMsg, which eight files build and match on; its handler sets the usage and then
-// takes exactly the sessionsLoadedMsg path.
-type historyLoadedMsg struct{ list apiclient.SessionList }
 type pipelineLoadedMsg *apiclient.PipelineView
 type snapshotLoadedMsg struct {
 	// olderNotFetched is how many events precede the ones in this response, from the
@@ -408,14 +403,12 @@ type model struct {
 
 	// Data caches.
 	sessions []session.SessionSummary
+	// sessionsStale says a streamed event changed the session list since the table was last built.
+	// The table is rebuilt on the next 1s tick (flushSessionsTable) rather than per event: with
+	// history listed it holds thirty days of sessions, where a rebuild costs 6.4ms and 1.9MB, and
+	// events arrive several a second. The poll replaces the list every 2s regardless.
+	sessionsStale bool
 
-	// showHistory lists the sessions the proxy's session archive holds and memory no longer does
-	// (H). Not persisted, after agentScope's precedent: a view of the moment, not a preference.
-	// archiveUsage is the archive's size and bounds from the last history list, nil without one;
-	// historyNoticed keeps the "no archive here" notice to once per toggle.
-	showHistory    bool
-	archiveUsage   *pipeline.ArchiveUsage
-	historyNoticed bool
 	// clearConfirm is X's confirmation, modal while non-nil; clearGen counts completed clears,
 	// so a snapshot answered before one is not stored after it. See clear.go.
 	clearConfirm *clearConfirm
@@ -443,16 +436,17 @@ type model struct {
 	// AND EVERY ROW ABOVE THAT REBASES ALSO OWES rebuildSessionsTable, which is a second
 	// obligation and not a restatement of the first. Updating contextRun makes the figure right;
 	// the sessions table holds the gauge as a BAKED string, so nothing on screen changes until
-	// the rows are rebuilt. The streamed append had that call all along and the other three did
-	// not, so a session agentop streamed showed a gauge while a session it merely opened showed a
-	// dash — corrected in contextRun, and only visible when the next /v1/sessions poll happened
-	// to repaint. See TestSessionsTable_ASnapshotRepaintsTheGaugeItFilled.
+	// the rows are rebuilt. The streamed append had that rebuild all along — today by setting
+	// sessionsStale, so it lands on the next 1s tick — and the other three did not, so a session
+	// agentop streamed showed a gauge while a session it merely opened showed a dash — corrected
+	// in contextRun, and only visible when the next /v1/sessions poll happened to repaint. See TestSessionsTable_ASnapshotRepaintsTheGaugeItFilled.
 	events map[string][]pipeline.SessionEvent // sessionID → every event held for it
 	// contextRun is the CTX(1M) gauge's answer per session, folded forward as events
 	// arrive rather than recomputed from the whole slice — see sessionContextFor. The row
-	// loop asks for every session on every rebuild, and a rebuild happens on every streamed
-	// event, so a full scan there is O(events) per session per event. It REMEMBERS THE WINNING
-	// TURN under the rule's ordering rather than caching the slice, and that is what lets the
+	// loop asks for every session on every rebuild, and a rebuild happens on the 1s tick after
+	// streamed events and on every 2s poll rather than per event, so a full scan there is
+	// O(events) per session per rebuild. It REMEMBERS THE WINNING TURN under the rule's
+	// ordering rather than caching the slice, and that is what lets the
 	// events stop carrying the evidence (view=summary strips it) while the answer stays true.
 	// Which turn wins is not a question of size — see pipeline.PromptContextFold.
 	contextRun map[string]pipeline.PromptContextFold
@@ -1212,25 +1206,17 @@ func refreshTickCmd() tea.Cmd {
 	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg { return refreshTickMsg(t) })
 }
 
-// loadSessionsCmd fetches the current session list. Used at startup and after
-// each successful reconnect so we don't miss new sessions that appeared
-// while the stream was down.
+// loadSessionsCmd fetches the session list: every session the proxy holds in memory and, where it
+// runs a session archive, every one it holds only on disk — so neither a restart nor an eviction
+// takes a session off the list. A proxy without an archive ignores ?archived=true and sends its
+// resident sessions, which is all it has. Used at startup, on every refresh tick and after a clear.
 func (m *model) loadSessionsCmd() tea.Cmd {
-	if m.showHistory {
-		return func() tea.Msg {
-			list, err := m.client.ListSessionsArchived(m.ctx)
-			if err != nil {
-				return errMsg{where: "list sessions", err: err}
-			}
-			return historyLoadedMsg{list: list}
-		}
-	}
 	return func() tea.Msg {
-		summaries, err := m.client.ListSessions(m.ctx)
+		list, err := m.client.ListSessionsArchived(m.ctx)
 		if err != nil {
 			return errMsg{where: "list sessions", err: err}
 		}
-		return sessionsLoadedMsg(summaries)
+		return sessionsLoadedMsg(list.Sessions)
 	}
 }
 
@@ -1286,6 +1272,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		m.flushSessionsTable()
 		// In picker mode, skip the rate calculation — m.client may be nil
 		// after a back-out. Keep the ticker alive so it's ready when the
 		// user re-enters a session.
@@ -1301,34 +1288,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastTick, m.lastCt = now, m.eventCt
 		return m, tickCmd()
 
-	case historyLoadedMsg:
-		// A reply to a request made while history was on can land after H turned it off; its
-		// disk-only rows would then stay until the next poll. Drop it instead.
-		if !m.showHistory {
-			return m, nil
-		}
-		m.archiveUsage = msg.list.Archive
-		if !m.historyNoticed {
-			m.historyNoticed = true
-			if msg.list.Archive == nil {
-				m.setFlash("this Cortex has no session archive: showing live sessions only")
-			} else {
-				m.setFlash(fmt.Sprintf("history on: %s of sessions on disk, kept %d days",
-					formatBytes(msg.list.Archive.Bytes), msg.list.Archive.RetentionDays))
-			}
-		}
-		return m.Update(sessionsLoadedMsg(msg.list.Sessions))
-
 	case sessionsLoadedMsg:
-		// The server list says what is LIVE. It does not say what is worth
-		// keeping on screen.
+		// The server list says what the proxy holds: what is LIVE, and, where it
+		// runs a session archive, what is only on disk. It does not say what is
+		// worth keeping on screen.
 		//
 		// This used to drop cached events for every session the list omitted, and
 		// bounce the user back to the sessions pane. The session store is
-		// in-memory and per-pod, so agentop's copy is the only copy: a proxy restart
-		// (or any blip that empties /v1/sessions, which arrives as a normal
-		// message, not an error) destroyed the events someone was mid-investigation
-		// on, about two seconds after they looked away. That is #870.
+		// in-memory and per-pod, so agentop's copy can be the only copy: a proxy
+		// without a session archive lists nothing after a restart (one with an
+		// archive lists everything it holds, and the sessions it omits are then
+		// few), and any blip that empties /v1/sessions arrives as a normal
+		// message, not an error. Either destroyed the events someone was
+		// mid-investigation on, about two seconds after they looked away. That is
+		// #870.
 		//
 		// Cached events are now released in exactly one place: when the user
 		// returns to the picker and selects a different session (see keys.go).
@@ -2195,7 +2168,7 @@ func (m *model) handleStreamEvent(ev apiclient.StreamEvent) {
 			if !trailing {
 				m.sessions[i].UpdatedAt = e.At
 			}
-			goto sortAndRebuild
+			goto stale
 		}
 	}
 	// New session → create a stub summary; next list refresh will replace it.
@@ -2204,11 +2177,8 @@ func (m *model) handleStreamEvent(ev apiclient.StreamEvent) {
 			ID: e.SessionID, CreatedAt: e.At, UpdatedAt: e.At, EventCount: 1, Active: true,
 		})
 	}
-sortAndRebuild:
-	sort.Slice(m.sessions, func(i, j int) bool {
-		return m.sessions[i].UpdatedAt.After(m.sessions[j].UpdatedAt)
-	})
-	m.rebuildSessionsTable()
+stale:
+	m.sessionsStale = true
 	if m.pane == paneEvents && m.selectedSess == e.SessionID {
 		// TODO: coalesce these rebuilds. Every streamed event rebuilds the whole table
 		// for the session being watched: ~1.5ms flat plus ~0.23ms per 1000 events held
@@ -2219,6 +2189,19 @@ sortAndRebuild:
 		// bound it. Left alone because no session anyone has today is near it.
 		m.rebuildEventsTable()
 	}
+}
+
+// flushSessionsTable re-sorts the session list by recency and rebuilds its table when a streamed
+// event has changed it since the last rebuild. Called from the 1s tick; see sessionsStale.
+func (m *model) flushSessionsTable() {
+	if !m.sessionsStale {
+		return
+	}
+	m.sessionsStale = false
+	sort.Slice(m.sessions, func(i, j int) bool {
+		return m.sessions[i].UpdatedAt.After(m.sessions[j].UpdatedAt)
+	})
+	m.rebuildSessionsTable()
 }
 
 // View composes the full screen. The [?] key-help overlay is layered on

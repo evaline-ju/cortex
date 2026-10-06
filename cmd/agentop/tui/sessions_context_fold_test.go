@@ -12,9 +12,10 @@ import (
 // runs in production and the rescan is the definition.
 //
 // Why a fold at all: the sessions row loop asks for every session, rebuildSessionsTable runs on
-// every streamed event, and retention is unbounded. Measured before this — 6.1ms and 3.49MB per
-// call at 100k events, against ~14ns for the tail scan it replaced — ten sessions of that size
-// cost 60ms and 35MB for one arriving event, on the pane agentop opens on.
+// the 1s tick after streamed events and on every 2s poll rather than per event, and retention is
+// unbounded. Measured before this — 6.1ms and 3.49MB per call at 100k events, against ~14ns for
+// the tail scan it replaced — ten sessions of that size cost 60ms and 35MB per rebuild, on the
+// pane agentop opens on.
 func TestSessionContextFor_FoldMatchesAFullRescan(t *testing.T) {
 	base := time.Now()
 	const id = "s"

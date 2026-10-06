@@ -528,8 +528,8 @@ func TestCharacterize_ServiceInstall_OverAnArchivingProxy(t *testing.T) {
 	f.Close()
 
 	run := sc.install(t, true, false)
-	const want = "  The proxy's memory is cleared, but its session archive is not: H in\n" +
-		"  agentop lists the sessions it holds.\n"
+	const want = "  The proxy's memory is cleared, but its session archive is not: agentop\n" +
+		"  still lists every session it holds.\n"
 	if run.code != 0 || !strings.HasSuffix(run.out, want) || strings.Contains(run.out, "history is cleared") {
 		t.Fatalf("exit %d, stdout:\n%s\nwant it to end with:\n%s", run.code, run.out, want)
 	}

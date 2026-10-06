@@ -366,6 +366,9 @@ func TestSessionsPane_EventCountDoesNotFlipOnAStreamedEvent(t *testing.T) {
 			At: time.Now(), SessionID: id,
 			Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: "h",
 		}})
+		// The table is rebuilt on the tick, not on the event, so flush it first: without
+		// this the cell read below is the one the poll built, and no stream write could reach it.
+		m.flushSessionsTable()
 		if got := sessionsEventsCell(t, m, id); got != want {
 			t.Fatalf("streamed event %d changed EVENTS to %q, want %q", i+1, got, want)
 		}

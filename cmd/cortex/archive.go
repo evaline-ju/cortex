@@ -26,7 +26,7 @@ func sessionArchiveDir() (string, error) {
 // sessionArchiveRuns decides whether the session archive runs, and says why.
 //
 // ONLY ON A LOCAL INSTALL. A laptop is where a restart costs a user their history and where the
-// user can read it back (agentop's H) and erase it (X, or DELETE /v1/sessions). Elsewhere it is
+// user can read it back (agentop lists it) and erase it (X, or DELETE /v1/sessions). Elsewhere it is
 // off even when asked for — raw prompts on a cluster's volume need a decision of their own, and a
 // mounted path is not one. On a local install, config.ArchiveRunsOnLocalInstall decides.
 func sessionArchiveRuns(cfg *config.Config, configPath string) (bool, string) {

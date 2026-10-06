@@ -296,12 +296,8 @@ func (m *model) rebuildSessionsTable() {
 		if agentW > 0 {
 			row = append(row, sessionAgentCell(s, agentW))
 		}
-		updated := relTime(now, s.UpdatedAt)
-		if s.Resident != nil && !*s.Resident {
-			updated = archivedMarker
-		}
 		row = append(row,
-			updated,
+			relTime(now, s.UpdatedAt),
 			// The server's count, and only ever the server's: it is the complete one.
 			// agentop's own cache holds what it snapshotted plus what it has streamed
 			// since attaching, which for a session older than the connection is a
@@ -324,8 +320,10 @@ func (m *model) rebuildSessionsTable() {
 	}
 	// Sessions whose events agentop still holds but the server no longer lists.
 	// Retaining the events (#870) is only half a fix if there is no row to
-	// select them from: after a proxy restart the server lists nothing, so
-	// without this the picker is empty and the retained history is unreachable.
+	// select them from: a proxy without a session archive lists nothing after a
+	// restart, so without this the picker is empty and the retained history is
+	// unreachable. One with an archive lists everything it holds, and these rows
+	// are then mostly absent.
 	adopted := m.adoptedSessionIDs()
 	for _, id := range m.cachedOnlySessionIDs() {
 		// A scope lists only sessions the server names an agent for, and an adopted pending bucket

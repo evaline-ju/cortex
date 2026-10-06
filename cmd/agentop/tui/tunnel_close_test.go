@@ -95,6 +95,9 @@ func TestHandleStreamEvent_TunnelCloseDoesNotRefreshTheSession(t *testing.T) {
 		At: time.Now(), SessionID: "sess-A", Direction: pipeline.Outbound, Phase: pipeline.SessionResponse,
 		Host: "kube:6443", Tunnel: true, RequestID: "tun", StatusCode: 200,
 	}})
+	// The list is re-sorted on the tick, not on the event. Without the flush nothing sorts it
+	// and the order below would hold whatever the close did.
+	m.flushSessionsTable()
 
 	if m.sessions[0].ID != "sess-B" {
 		t.Errorf("session list leads with %q after a tunnel close; want sess-B, which spoke last", m.sessions[0].ID)
