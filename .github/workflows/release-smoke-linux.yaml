@@ -42,24 +42,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # Pinned to the release's own commit: the test SCRIPT has to match the
-      # vintage of the binaries it's testing, same reason install_cortex pins
-      # the installer URL to TRIGGER_SHA for a main-latest run below. Running
-      # main's current copy against an older release risks exactly the
-      # mismatch this workflow hit live once already — a since-fixed PR
-      # changed agentop's health-check wording, and a run of this script
-      # from AFTER that change against a release from BEFORE it would assert
-      # on output that release never produces.
+      # Pinned to the release's own commit, so the script asserts on output
+      # the binaries under test actually produce. The concrete risk this
+      # avoids: main's script asserts the no-op leg's "cortex <version> is
+      # installed and healthy.", which agentop setup prints — a run of
+      # main's current copy against an old enough release (one that
+      # predates agentop setup, e.g. v0.8.1) would assert on output that
+      # release never produces.
       #
-      # This does mean a release older than this script itself can't be
-      # smoke-tested by re-running its workflow — e.g. v0.8.0/v0.8.1 predate
-      # it entirely (confirmed via the GitHub API: 404 for
-      # scripts/release_smoke_test_linux.sh at both commits). That's accepted:
-      # those releases already shipped, re-running checks out the commit
-      # that was main's tip when the ORIGINAL run fired (not today's main
-      # either way), and the alternative — always running main's bleeding
-      # edge — breaks the common case (every release going forward) to
-      # partially help the uncommon one (re-testing something ancient).
+      # The cost: a release older than this script itself can't be
+      # smoke-tested by re-running its workflow — v0.8.0/v0.8.1 predate it
+      # entirely. That's accepted: those releases already shipped, and the
+      # alternative — always running main's bleeding edge — breaks the
+      # common case (every release going forward) to partially help the
+      # uncommon one (re-testing something ancient).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
