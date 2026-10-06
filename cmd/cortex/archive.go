@@ -1,10 +1,16 @@
 package main
 
 import (
+	"cmp"
+	"context"
 	"log/slog"
 	"path/filepath"
+	"slices"
+	"time"
 
 	"github.com/rossoctl/cortex/core/config"
+	"github.com/rossoctl/cortex/core/cost/usage"
+	"github.com/rossoctl/cortex/core/pipeline"
 	"github.com/rossoctl/cortex/core/session"
 	"github.com/rossoctl/cortex/core/session/archive"
 )
@@ -90,4 +96,73 @@ func openSessionArchive(cfg *config.Config, configPath string, sessions *session
 		"holds", "raw prompts, completions and tool results; readable by anyone who can read this directory",
 		"default", why)
 	return arch
+}
+
+// usageReplayBudget bounds the startup replay of the session archive into the usage ring. The
+// replay runs before any listener starts, so this is how long it may delay readiness. Over it the
+// replay is abandoned whole; see replayUsage.
+const usageReplayBudget = 5 * time.Second
+
+// replayUsage refills the usage ring — LAST 1H, the usage pane's duration windows — from the
+// session archive, so a restart leaves them as they were. It reads the last usage.MaxWindow of
+// archived events, reduces each with usage.ReplayCopy, sorts them by time and feeds them to
+// agg.Replay.
+//
+// RUN BEFORE ANY LISTENER STARTS, which is what keeps it simple. Nothing this process records can
+// be in the archive yet, so nothing is counted twice. No clear or rekey can race it. And feeding
+// in time order makes the ring's eviction and request pairing choose as they did live.
+//
+// NEVER THROUGH THE STORE: the store would hand every event to the cost ledger and the archive
+// again, writing durable rows twice. agg.Replay touches the ring and nothing else, and this takes
+// no store or ledger to reach either.
+//
+// ALL OR NOTHING. A read that does not finish within ctx is abandoned before anything is fed, and
+// the ring starts empty as it always did: a partial ring would show a LAST 1H that is too low as if
+// it were real.
+func replayUsage(ctx context.Context, arch *archive.Archive, agg *usage.Aggregator, now time.Time) (events, sessions, skipped int, err error) {
+	type replayed struct {
+		id string
+		e  pipeline.SessionEvent
+	}
+	// About 1KB a kept event (see usage.ReplayCopy), held until this returns. Keeping the decoded
+	// event instead would hold six hours of conversations at once.
+	var evs []replayed
+	skipped, err = arch.ReplaySince(ctx, now.Add(-usage.MaxWindow), func(id string, e *pipeline.SessionEvent) {
+		evs = append(evs, replayed{id, usage.ReplayCopy(e)})
+	})
+	if err != nil {
+		return 0, 0, skipped, err
+	}
+	// Seq breaks a tie within one session, where it is the order the store appended in; across
+	// sessions a tie has no order to keep.
+	slices.SortStableFunc(evs, func(x, y replayed) int {
+		if c := x.e.At.Compare(y.e.At); c != 0 {
+			return c
+		}
+		return cmp.Compare(x.e.Seq, y.e.Seq)
+	})
+	seen := make(map[string]bool)
+	for i := range evs {
+		if agg.Replay(evs[i].id, &evs[i].e) {
+			events++
+			seen[evs[i].id] = true
+		}
+	}
+	return events, len(seen), skipped, nil
+}
+
+// replayUsageAtStartup runs replayUsage within usageReplayBudget and says how it went.
+func replayUsageAtStartup(arch *archive.Archive, agg *usage.Aggregator) {
+	ctx, cancel := context.WithTimeout(context.Background(), usageReplayBudget)
+	defer cancel()
+	start := time.Now()
+	events, sessions, skipped, err := replayUsage(ctx, arch, agg, start)
+	took := time.Since(start)
+	if err != nil {
+		slog.Warn("usage: did not replay the session archive into the usage ring; LAST 1H and the usage pane start empty",
+			"error", err, "budget", usageReplayBudget, "took", took)
+		return
+	}
+	slog.Info("usage: replayed the session archive into the usage ring", "window", usage.MaxWindow,
+		"events", events, "sessions", sessions, "unreadableSegments", skipped, "took", took)
 }
