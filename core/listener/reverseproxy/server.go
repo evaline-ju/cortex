@@ -20,6 +20,7 @@ import (
 
 	"github.com/rossoctl/cortex/core/listener/httpx"
 	"github.com/rossoctl/cortex/core/listener/internal/bodyread"
+	"github.com/rossoctl/cortex/core/listener/internal/sessionevent"
 	"github.com/rossoctl/cortex/core/listener/internal/sseframe"
 	"github.com/rossoctl/cortex/core/listener/internal/tlssniff"
 	"github.com/rossoctl/cortex/core/listener/transparentproxy"
@@ -303,14 +304,14 @@ func (s *Server) WrapListener(inner net.Listener) net.Listener {
 func (s *Server) MTLSEnabled() bool { return s.mtlsCfg != nil }
 
 // eventTLS builds a *pipeline.EventTLS from the pctx's connection
-// state, extracting the peer SPIFFE ID via core/tlsconfig. Returns nil
-// for plaintext or absent TLS state — sites that pass the result
-// through to a SessionEvent get the right thing for any caller.
+// state. Returns nil for plaintext or absent TLS state — sites that pass
+// the result through to a SessionEvent get the right thing for any caller.
+//
+// Kept as a local alias because the accept paths below read better for it;
+// the derivation itself is shared with the other listeners, which record
+// the same field on a denial.
 func eventTLS(pctx *pipeline.Context) *pipeline.EventTLS {
-	if pctx == nil || pctx.TLS == nil {
-		return nil
-	}
-	return pipeline.NewEventTLS(pctx.TLS, authtls.PeerSPIFFEID(pctx.PeerCertificate()))
+	return sessionevent.TLS(pctx)
 }
 
 // Handler returns the HTTP handler for the reverse proxy.
@@ -717,35 +718,7 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 	// inboundSessionID helper, kept consistent so denial events land
 	// in the same bucket the accepted request would have.
 	sid := inboundSessionID(pctx)
-	var status int
-	var code, message string
-	if action.Violation != nil {
-		status = action.Violation.Status
-		if status == 0 {
-			status = pipeline.StatusFromCode(action.Violation.Code)
-		}
-		code = action.Violation.Code
-		message = action.Violation.Reason
-	}
-	ev := pipeline.SessionEvent{
-		At:          time.Now(),
-		Direction:   pipeline.Inbound,
-		Phase:       pipeline.SessionDenied,
-		RequestID:   pctx.RequestID(),
-		Client:      pctx.ClientInfo(),
-		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-		Host:        pctx.Host,
-		HTTPMethod:  pctx.Method,
-		HTTPPath:    pctx.Path,
-		StatusCode:  status,
-		Error: &pipeline.EventError{
-			Kind:    "policy",
-			Code:    code,
-			Message: message,
-		},
-		TLS: eventTLS(pctx),
-	}
-	s.Sessions.Append(sid, ev)
+	s.Sessions.Append(sid, sessionevent.Deny(pctx, action, pipeline.Inbound))
 }
 
 // requestScheme derives the URL scheme for an incoming server-side

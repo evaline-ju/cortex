@@ -25,6 +25,7 @@ import (
 	"errors"
 	"github.com/rossoctl/cortex/core/listener/httpx"
 	"github.com/rossoctl/cortex/core/listener/internal/bodyread"
+	"github.com/rossoctl/cortex/core/listener/internal/sessionevent"
 	"github.com/rossoctl/cortex/core/listener/internal/sseframe"
 	"github.com/rossoctl/cortex/core/listener/skiphost"
 	"github.com/rossoctl/cortex/core/peerproc"
@@ -1520,34 +1521,7 @@ func (s *Server) recordOutboundRejectIn(tl *tunnelLog, pctx *pipeline.Context, a
 	if s.Sessions == nil || pctx.Extensions.Invocations == nil {
 		return
 	}
-	var status int
-	var code, message string
-	if action.Violation != nil {
-		status = action.Violation.Status
-		if status == 0 {
-			status = pipeline.StatusFromCode(action.Violation.Code)
-		}
-		code = action.Violation.Code
-		message = action.Violation.Reason
-	}
-	ev := pipeline.SessionEvent{
-		At:          time.Now(),
-		Direction:   pipeline.Outbound,
-		Phase:       pipeline.SessionDenied,
-		RequestID:   pctx.RequestID(),
-		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-		Host:        pctx.Host,
-		HTTPMethod:  pctx.Method,
-		HTTPPath:    pctx.Path,
-		StatusCode:  status,
-		Error: &pipeline.EventError{
-			Kind:    "policy",
-			Code:    code,
-			Message: message,
-		},
-		Client: pctx.ClientInfo(),
-	}
-	s.appendOutbound(tl, sid, ev)
+	s.appendOutbound(tl, sid, sessionevent.Deny(pctx, action, pipeline.Outbound))
 }
 
 // connectDialTimeout bounds the upstream TCP dial for a CONNECT tunnel.

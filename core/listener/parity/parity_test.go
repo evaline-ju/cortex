@@ -34,6 +34,14 @@ var outboundListeners = []listenerRun{
 
 // TestParity_DenyOnRequest: pctx.Record before Reject must produce the
 // same phase:"denied" event on both listeners.
+//
+// The fixture authenticates and emits a plugin event before it denies,
+// which is not decoration. Until it did, the denial event under test was
+// the emptiest one this suite could build — no identity, no plugin
+// payload, no asserted duration — so the comparison reduced to the fields
+// every listener happened to agree on, and #936's three dropped fields
+// (Plugins, Identity, Duration on the reverse proxy) compared nil to nil.
+// A parity fixture only covers what it populates.
 func TestParity_DenyOnRequest(t *testing.T) {
 	f := fixture{
 		name:      "deny-on-request",
@@ -43,9 +51,23 @@ func TestParity_DenyOnRequest(t *testing.T) {
 			DenyStatus:    429,
 			DenyReason:    "spy.denied",
 			DenyDetails:   map[string]string{"cutoff_reason": "quota"},
+			Subject:       "alice@example.org",
+			ClientID:      "weather-agent",
+			Scopes:        []string{"openid", "weather.read"},
+			EmitOnRequest: true,
+			RequestEvent:  &spyEvent{Marker: "denied", Count: 1},
 		})},
 		method: "GET",
 		path:   "/parity/deny",
+		expectedPluginEvents: map[string]string{
+			spyPluginA: jsonOf(spyEvent{Marker: "denied", Count: 1}),
+		},
+		expectedIdentity: &identitySummary{
+			Subject:  "alice@example.org",
+			ClientID: "weather-agent",
+			Scopes:   []string{"openid", "weather.read"},
+		},
+		expectDuration: true,
 	}
 	assertParity(t, f, pipeline.SessionDenied, inboundListeners)
 }
@@ -81,9 +103,23 @@ func TestParity_OutboundDenyOnRequest(t *testing.T) {
 			DenyStatus:    403,
 			DenyReason:    "spy.blocked",
 			DenyDetails:   map[string]string{"cutoff_reason": "egress-policy"},
+			Subject:       "alice@example.org",
+			ClientID:      "weather-agent",
+			Scopes:        []string{"openid", "llm.invoke"},
+			EmitOnRequest: true,
+			RequestEvent:  &spyEvent{Marker: "blocked", Count: 1},
 		})},
 		method: "GET",
 		path:   "/parity/egress",
+		expectedPluginEvents: map[string]string{
+			spyPluginA: jsonOf(spyEvent{Marker: "blocked", Count: 1}),
+		},
+		expectedIdentity: &identitySummary{
+			Subject:  "alice@example.org",
+			ClientID: "weather-agent",
+			Scopes:   []string{"openid", "llm.invoke"},
+		},
+		expectDuration: true,
 	}
 	assertParity(t, f, pipeline.SessionDenied, outboundListeners)
 }
@@ -389,6 +425,16 @@ func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, list
 				t.Errorf("fixture %q listener %s: plugin event %q\n  got:  %s\n  want: %s", f.name, g.listener, key, gotJSON, wantJSON)
 			}
 		}
+		if f.expectedIdentity != nil {
+			if g.observed.Identity == nil {
+				t.Errorf("fixture %q listener %s: event carried no Identity; the caller authenticated as %q and the event cannot be attributed to them", f.name, g.listener, f.expectedIdentity.Subject)
+			} else if !reflect.DeepEqual(g.observed.Identity, f.expectedIdentity) {
+				t.Errorf("fixture %q listener %s: Identity\n  got:  %s\n  want: %s", f.name, g.listener, jsonPretty(g.observed.Identity), jsonPretty(f.expectedIdentity))
+			}
+		}
+		if f.expectDuration && !g.observed.HasDuration {
+			t.Errorf("fixture %q listener %s: event carried no Duration; the request completed, so it has one", f.name, g.listener)
+		}
 	}
 
 	// Pairwise compare against the first listener. All observations must
@@ -431,6 +477,15 @@ func observationDiff(a, b *observation) string {
 	}
 	if !reflect.DeepEqual(a.PluginKeys, b.PluginKeys) {
 		return "PluginKeys: " + jsonPretty(a.PluginKeys) + " vs " + jsonPretty(b.PluginKeys)
+	}
+	// One listener attributing the request while another publishes an
+	// anonymous event for the same authenticated caller. Same shared-gap
+	// blind spot as Inference below, covered by fixture.expectedIdentity.
+	if !reflect.DeepEqual(a.Identity, b.Identity) {
+		return "Identity: " + jsonPretty(a.Identity) + " vs " + jsonPretty(b.Identity)
+	}
+	if a.HasDuration != b.HasDuration {
+		return fmt.Sprintf("HasDuration: %v vs %v", a.HasDuration, b.HasDuration)
 	}
 	// One listener reporting token counts while another does not. Worth saying what
 	// this check CANNOT do, because that is how the gap it was added for survived: two

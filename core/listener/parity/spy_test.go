@@ -28,6 +28,23 @@ type spyConfig struct {
 	EmitOnResponse bool      `json:"emit_on_response"`
 	ResponseEvent  *spyEvent `json:"response_event"`
 
+	// EmitOnRequest publishes RequestEvent at OnRequest, BEFORE any deny.
+	// Without it a deny fixture's Plugins map is empty on every listener,
+	// so the PluginKeys comparison below comes down to empty-vs-empty and
+	// a listener that never snapshots Plugins at all compares equal to one
+	// that does. That is how the drift in #936 survived this suite.
+	EmitOnRequest bool      `json:"emit_on_request"`
+	RequestEvent  *spyEvent `json:"request_event"`
+
+	// Subject / ClientID / Scopes make the spy stand in for an auth
+	// plugin, which is the only thing that ever populates pctx.Identity
+	// (jwtvalidation/plugin.go:439 does exactly this assignment). A
+	// fixture that cannot authenticate cannot tell a listener that drops
+	// Identity from one that had none to record.
+	Subject  string   `json:"subject"`
+	ClientID string   `json:"client_id"`
+	Scopes   []string `json:"scopes"`
+
 	// RequiresLater names peer plugins that must appear at a HIGHER
 	// index in the same pipeline. Populates PluginCapabilities so the
 	// registry's dependency validator can reject wrong-order pipelines.
@@ -80,6 +97,19 @@ func (s *spyPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	if s.cfg.RecordRequestBody {
 		s.publish(pctx, bodyReqStrippedSuffix+pipeline.PluginEventSuffix, bodyObservation{Body: string(pctx.Body)})
 	}
+	// Authenticate and emit before deciding to deny: both must land on the
+	// denial event, since a denial is exactly when an operator needs to
+	// know who was denied and which plugin said so.
+	if s.cfg.Subject != "" || s.cfg.ClientID != "" {
+		pctx.Identity = spyIdentity{
+			subject:  s.cfg.Subject,
+			clientID: s.cfg.ClientID,
+			scopes:   s.cfg.Scopes,
+		}
+	}
+	if s.cfg.EmitOnRequest && s.cfg.RequestEvent != nil {
+		s.publish(pctx, pipeline.PluginEventSuffix, *s.cfg.RequestEvent)
+	}
 	if !s.cfg.DenyOnRequest {
 		return pipeline.Action{Type: pipeline.Continue}
 	}
@@ -107,6 +137,19 @@ func (s *spyPlugin) publish(pctx *pipeline.Context, suffix string, v any) {
 	}
 	pctx.Extensions.Custom[s.name+suffix] = v
 }
+
+// spyIdentity is the pipeline.Identity an authenticating plugin leaves on
+// pctx. Kept local to this package because every test file that needs one
+// defines its own; there is no shared stub to borrow.
+type spyIdentity struct {
+	subject  string
+	clientID string
+	scopes   []string
+}
+
+func (s spyIdentity) Subject() string  { return s.subject }
+func (s spyIdentity) ClientID() string { return s.clientID }
+func (s spyIdentity) Scopes() []string { return s.scopes }
 
 // spyStreamingPlugin wraps spyPlugin and adds OnResponseFrame, making it
 // a pipeline.StreamingResponder. Pipeline.RunResponse skips streaming

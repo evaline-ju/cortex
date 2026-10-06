@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/rossoctl/cortex/core/listener/httpx"
+	"github.com/rossoctl/cortex/core/listener/internal/sessionevent"
 	"github.com/rossoctl/cortex/core/listener/internal/sseframe"
 	"github.com/rossoctl/cortex/core/listener/skiphost"
 	"github.com/rossoctl/cortex/core/pipeline"
@@ -381,40 +382,7 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 	if s.Sessions == nil || pctx.Extensions.Invocations == nil {
 		return
 	}
-	var status int
-	var code, message string
-	if action.Violation != nil {
-		// Use the structured fields directly — Render() produces the HTTP
-		// wire payload (status, headers, JSON body) which is the wrong
-		// shape for a session event. We want the semantic Code + Reason.
-		status = action.Violation.Status
-		if status == 0 {
-			status = pipeline.StatusFromCode(action.Violation.Code)
-		}
-		code = action.Violation.Code
-		message = action.Violation.Reason
-	}
-	ev := pipeline.SessionEvent{
-		At:          time.Now(),
-		Direction:   pipeline.Inbound,
-		Phase:       pipeline.SessionDenied,
-		RequestID:   pctx.RequestID(),
-		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-		Plugins:     pipeline.SnapshotPlugins(pctx.Extensions.Custom),
-		Identity:    pipeline.SnapshotIdentity(pctx),
-		Host:        pctx.Host,
-		HTTPMethod:  pctx.Method,
-		HTTPPath:    pctx.Path,
-		StatusCode:  status,
-		Error: &pipeline.EventError{
-			Kind:    "policy",
-			Code:    code,
-			Message: message,
-		},
-		Duration: pipeline.DurationSince(pctx.StartedAt),
-		Client:   pctx.ClientInfo(),
-	}
-	s.Sessions.Append(inboundSessionID(pctx), ev)
+	s.Sessions.Append(inboundSessionID(pctx), sessionevent.Deny(pctx, action, pipeline.Inbound))
 }
 
 // recordOutboundReject emits a SessionDenied event for outbound requests
@@ -441,37 +409,7 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 	if sid == "" {
 		sid = session.DefaultSessionID
 	}
-	var status int
-	var code, message string
-	if action.Violation != nil {
-		status = action.Violation.Status
-		if status == 0 {
-			status = pipeline.StatusFromCode(action.Violation.Code)
-		}
-		code = action.Violation.Code
-		message = action.Violation.Reason
-	}
-	ev := pipeline.SessionEvent{
-		At:          time.Now(),
-		Direction:   pipeline.Outbound,
-		Phase:       pipeline.SessionDenied,
-		RequestID:   pctx.RequestID(),
-		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-		Plugins:     pipeline.SnapshotPlugins(pctx.Extensions.Custom),
-		Identity:    pipeline.SnapshotIdentity(pctx),
-		Host:        pctx.Host,
-		HTTPMethod:  pctx.Method,
-		HTTPPath:    pctx.Path,
-		StatusCode:  status,
-		Error: &pipeline.EventError{
-			Kind:    "policy",
-			Code:    code,
-			Message: message,
-		},
-		Duration: pipeline.DurationSince(pctx.StartedAt),
-		Client:   pctx.ClientInfo(),
-	}
-	s.Sessions.Append(sid, ev)
+	s.Sessions.Append(sid, sessionevent.Deny(pctx, action, pipeline.Outbound))
 }
 
 // recordInboundResponseSession appends a Phase:SessionResponse event for the
