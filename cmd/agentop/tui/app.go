@@ -779,9 +779,13 @@ type model struct {
 	// restoring into.
 	agentScope string
 	agentsTbl  table.Model
+	// agentRowLabels is the scope each agentsTbl row selects, "" for All agents.
+	agentRowLabels []string
 	// agentsErr is the last fetch failure, shown in the pane rather than swallowed: an empty
 	// breakdown and an unreachable endpoint look identical otherwise.
 	agentsErr error
+	// agentsFetchedAt is when the last per-agent fetch was issued, so the open pane polls.
+	agentsFetchedAt time.Time
 	// agentsGateOwesALook is the startup gate held open for one session list. Its reply can land
 	// before the connection's first list, and the list now votes — agentChoices counts the agents
 	// its sessions name — so a decline made without one is provisional. Set when the gate declines
@@ -1636,7 +1640,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the point is not to suggest otherwise to the next reader.
 			return m, tea.Batch(m.loadSessionsCmd(), m.loadPipelineCmd(), refreshTickCmd())
 		}
-		return m, tea.Batch(m.loadSessionsCmd(), refreshTickCmd(), harvestNow)
+		var agentsNow tea.Cmd
+		if m.pane == paneAgents && time.Since(m.agentsFetchedAt) >= agentsPollInterval {
+			agentsNow = m.fetchAgentRowsCmd(agentsOpenNever, paneNone)
+		}
+		return m, tea.Batch(m.loadSessionsCmd(), refreshTickCmd(), harvestNow, agentsNow)
 
 	case pipelineLoadedMsg:
 		m.pipelineFetching = false
@@ -2384,13 +2392,21 @@ func (m *model) paneView() string {
 		if m.agentScope != "" {
 			title += " · scoped to " + sanitizeLabel(m.agentScope)
 		}
+		hasRows := len(m.pickerRows()) > 0
 		switch {
-		case m.agentsErr != nil:
+		case m.agentsErr != nil && !hasRows:
 			// Named, not blank: an unreachable endpoint and a quiet day look identical
 			// otherwise, and only one of them is worth waiting out.
 			body = styleHint.Render("(agent breakdown unavailable: " + m.agentsErr.Error() + ")")
-		case len(m.pickerRows()) == 0:
+		case !hasRows:
 			body = styleHint.Render("(no agent traffic in this window)")
+		case m.agentsErr != nil:
+			// A failed refresh keeps the rows on screen, one line shorter to fit the hint.
+			tbl := m.agentsTbl
+			if m.bodyHeight > 1 {
+				tbl.SetHeight(m.bodyHeight - 1)
+			}
+			body = tbl.View() + "\n" + styleHint.Render(clipRow("(refresh failed: "+m.agentsErr.Error()+")", m.width))
 		default:
 			body = m.agentsTbl.View()
 		}

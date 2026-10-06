@@ -142,6 +142,9 @@ func (m *model) agentChoices() []agentRow {
 // before we give up".
 const agentsFetchTimeout = 5 * time.Second
 
+// agentsPollInterval is how often the open pane refetches its rows.
+const agentsPollInterval = 20 * time.Second
+
 // agentsWindow is the span the breakdown covers.
 //
 // A SYMBOLIC WINDOW, so the figures come from the durable cost ledger rather than the
@@ -199,6 +202,7 @@ func (m *model) fetchAgentRowsCmd(open agentsOpen, from paneID) tea.Cmd {
 		return nil
 	}
 	client := m.client
+	m.agentsFetchedAt = time.Now()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), agentsFetchTimeout)
 		defer cancel()
@@ -270,6 +274,10 @@ func (m *model) rebuildAgentsTable() {
 	// session names its agent, so a server that names none shows the table unchanged.
 	withSessions := m.sessionsNameAgents()
 	cursor := m.agentsTbl.Cursor()
+	prev, hadPrev := "", cursor >= 0 && cursor < len(m.agentRowLabels)
+	if hadPrev {
+		prev = m.agentRowLabels[cursor]
+	}
 	cols := agentsColumns()
 	if withSessions {
 		cols = append(cols[:1:1], append([]table.Column{{Title: "SESSIONS", Width: 8}}, cols[1:]...)...)
@@ -287,7 +295,10 @@ func (m *model) rebuildAgentsTable() {
 		all = append(all, "")
 	}
 	rows = append(rows, all)
+	labels := make([]string, 0, len(picker)+1)
+	labels = append(labels, "")
 	for _, a := range picker {
+		labels = append(labels, a.label)
 		requests, tokens := formatCount(int(a.Requests)), humanizeCount(a.Tokens)
 		if a.Requests == 0 {
 			// A row listed for its sessions, with no traffic in the window: agentChoices' added
@@ -310,6 +321,11 @@ func (m *model) rebuildAgentsTable() {
 		}
 	}
 	m.agentsTbl.SetRows(rows)
+	m.agentRowLabels = labels
+	// Follow the agent, not the index: a refresh can reorder the rows under the cursor.
+	if i := slices.Index(labels, prev); hadPrev && i >= 0 {
+		cursor = i
+	}
 	setCursorVisible(&m.agentsTbl, cursor)
 }
 
