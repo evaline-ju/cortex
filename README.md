@@ -2,8 +2,8 @@
 
 **See what your coding agent actually sends — and pay less for it.**
 
-Works with **Claude Code**, **OpenCode**, **IBM Bob** and **Codex**, and with any
-agent that can use an HTTPS proxy.
+Works with **Claude Code**, **OpenCode** and **IBM Bob**, and with any agent that can
+use an HTTPS proxy.
 
 <img src="./docs/assets/cortex-demo.svg" width="100%"
      alt="A terminal installs Cortex with one command and points Claude Code at it. Three Claude Code sessions run in separate directories, and agentop then lists all three with their token counts, cost and remaining context. Pressing $ breaks the spend down by tier, where cache reads dominate. Drilling into the busiest session shows the whole conversation and the fifteen-tool manifest it re-sends on every turn.">
@@ -40,22 +40,22 @@ looks wrong, `agentop doctor` checks the install and names the command that fixe
 
 | Agent | Connect it | |
 |---|---|---|
-| **Claude Code** | `agentop configure claude-code enable` | Or install with `--claude-code`. [Cut its token cost](./docs/laptop-token-savings.md) |
+| **Claude Code** | `agentop configure claude-code enable` | [Guide](./docs/agents/claude-code.md) |
 | **OpenCode** | `agentop configure opencode enable` | [Guide](./docs/agents/opencode.md) |
-| **IBM Bob** | `agentop configure bob enable` | Prints the CA trust step for you to run. [Guide](./cmd/agentop/README.md#routing-the-ibm-bob-editor-through-cortex-agentop-configure-bob) |
+| **IBM Bob** | `agentop configure bob enable` | [Guide](./cmd/agentop/README.md#routing-the-ibm-bob-editor-through-cortex-agentop-configure-bob) |
 | **Bob Shell** | `agentop configure bobshell enable` | [Guide](./cmd/agentop/README.md#typing-bob-instead-of-agentop-exec----bob-agentop-configure-bobshell) |
-| **Codex** | `agentop exec -- codex` | One run at a time for now; parsing is [in progress](https://github.com/rossoctl/cortex/issues/942) |
-| **Anything else** | `agentop exec -- <command>` | Or set its proxy to `localhost:47600` and trust `~/.cortex/ca/ca.crt`. [Guide](./cmd/agentop/README.md#running-one-command-through-cortex-agentop-exec) |
+| **Any other agent** | `agentop exec -- <command>` | [Guide](./cmd/agentop/README.md#running-one-command-through-cortex-agentop-exec) |
 
 `configure` asks before it writes, and its `status` and `disable` check and undo it.
-Traffic in the Anthropic Messages or OpenAI Chat Completions format is parsed into
-model calls and tokens from any agent, and priced wherever Cortex
-[has a rate](./docs/pricing.md). Other traffic is still listed, request by request.
+Any other agent can also be pointed at the proxy on `localhost:47600` with
+`~/.cortex/ca/ca.crt` trusted. Traffic in the Anthropic Messages or OpenAI Chat
+Completions format is parsed into model calls and tokens whichever agent sends it, and
+priced wherever Cortex [has a rate](./docs/pricing.md).
 
 ## What Cortex sees and keeps
 
-- **Local only.** The proxy listens on loopback, and Cortex sends nothing anywhere your
-  agent was not already sending it.
+- **Local only.** The proxy listens on loopback, and it only contacts the servers that
+  the programs using it ask for.
 - **Your own CA.** Created on your machine, with its key in `~/.cortex/ca`, readable
   only by you. Cortex never adds it to a keychain itself.
 - **Real certificates are still checked.** When a server's certificate fails, Cortex
