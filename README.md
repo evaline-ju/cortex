@@ -2,16 +2,17 @@
 
 **See what your coding agent actually sends — and pay less for it.**
 
+Works with **Claude Code**, **OpenCode** and **IBM Bob**, and with any agent that can
+use an HTTPS proxy.
+
 <img src="./docs/assets/cortex-demo.svg" width="100%"
      alt="A terminal installs Cortex with one command and points Claude Code at it. Three Claude Code sessions run in separate directories, and agentop then lists all three with their token counts, cost and remaining context. Pressing $ breaks the spend down by tier, where cache reads dominate. Drilling into the busiest session shows the whole conversation and the fifteen-tool manifest it re-sends on every turn.">
 
-Cortex sits in your agent's request path, decrypts its traffic, and shows you the model
-calls, tool calls and agent-to-agent messages as they happen. It can also strip the
-tool definitions your agent never calls, which is 4–20% of the prompt on every turn.
-
-**Think `top`, for your coding agent.** Where `top` shows which processes are eating
-your CPU, `agentop observe` shows which agent sessions are eating your tokens, your
-context window and your money — live, as they run.
+Cortex sits in your agent's request path on your own machine, decrypts the traffic,
+and shows you every model call, tool call and agent-to-agent message as it happens.
+**Think `top`, for your coding agent:** `agentop observe` shows which sessions are
+eating your tokens, your context window and your money, live. Cortex can also strip
+the tool definitions your agent never calls, 4–20% of the prompt on every turn.
 
 One binary, no Kubernetes. macOS or Linux, amd64 or arm64.
 
@@ -22,99 +23,90 @@ One binary, no Kubernetes. macOS or Linux, amd64 or arm64.
      Change both, or they drift — the --ref wording already did once. -->
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/scripts/install.sh \
-  | sh -s -- --claude-code
+# 1. Install. Setup lists every change it will make, and asks once.
+curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/scripts/install.sh | sh
+
+# 2. In a new terminal, connect your agent, once. The table below has each command.
+agentop configure claude-code enable    # or opencode, bob, bobshell
+
+# 3. Run your agent the way you always do. No flags, no environment variables.
+claude                                  # or opencode, bob
+
+# 4. In another terminal, watch its traffic live.
+agentop observe
 ```
 
-The script downloads the release, verifies its checksums, and hands off to
-`agentop setup`. Setup lists every change it will make — the binaries, your PATH, the
-config, the service, Claude Code's settings — and asks once. It ticks off each step as
-it finishes, and undoes them all if one fails. Cortex then runs as a background service
-that survives crashes and logins.
+That's all. From now on every session of that agent goes through Cortex, and nothing
+changes about how you start it. An agent that was already running picks up the change
+when it restarts. If anything looks wrong, `agentop doctor` checks the install and
+names the command that fixes it.
 
-Then open two new terminals:
+## Supported agents
 
-```sh
-agentop observe # the viewer
-claude          # as usual — no environment variables to set
-```
+| Agent | Connect it | |
+|---|---|---|
+| **Claude Code** | `agentop configure claude-code enable` | [Guide](./docs/agents/claude-code.md) |
+| **OpenCode** | `agentop configure opencode enable` | [Guide](./docs/agents/opencode.md) |
+| **IBM Bob** | `agentop configure bob enable` | [Guide](./cmd/agentop/README.md#routing-the-ibm-bob-editor-through-cortex-agentop-configure-bob) |
+| **Bob Shell** | `agentop configure bobshell enable` | [Guide](./cmd/agentop/README.md#typing-bob-instead-of-agentop-exec----bob-agentop-configure-bobshell) |
+| **Any other agent** | `agentop exec -- <command>` | [Guide](./cmd/agentop/README.md#running-one-command-through-cortex-agentop-exec) |
 
-Your agent's calls stream into `agentop`. Cortex only reads them; nothing is rewritten.
+Each `configure` command is a one-time setup: it asks before it writes, and afterwards
+you start the agent exactly as before. `status` and `disable` check and undo it. An
+agent without a `configure` command runs under `agentop exec`, or can be pointed at
+the proxy on `localhost:47600` with `~/.cortex/ca/ca.crt` trusted. Traffic in the Anthropic Messages or OpenAI Chat
+Completions format is parsed into model calls and tokens whichever agent sends it, and
+priced wherever Cortex [has a rate](./docs/pricing.md).
 
-- **[Cut token cost](./docs/laptop-token-savings.md)** — one more command
-- **[Start, stop, remove](./docs/laptop-service.md)** — `agentop service status | start | stop`
-- **Something wrong?** `agentop doctor` checks the install, changes nothing, and names
-  the command that fixes each problem it finds
-- **[Run it in Kubernetes](./docs/kubernetes.md)** — sidecars, Keycloak, SPIFFE/SPIRE
+## What Cortex sees and keeps
 
-**Any agent works**, not only Claude Code ([OpenCode](./docs/agents/opencode.md) has its
-own `agentop configure` command): point it at `localhost:47600` and trust
-`~/.cortex/ca/ca.crt`.
-
-`curl | sh` never executes unreleased code — the script re-runs the copy from the newest
-release. Pin or override with `--ref`
-([CONTRIBUTING.md](./CONTRIBUTING.md#installing-an-unreleased-build)). Add
-`--no-modify-path` to keep it out of your shell profile.
-
-**Full install guide:** [Cortex on your laptop](https://www.rossoctl.dev/docs/dev/get-started/laptop)
-— prerequisites, step-by-step walkthrough, service management and troubleshooting.
+- **Local only.** The proxy listens on loopback, and it only contacts the servers that
+  the programs using it ask for.
+- **Your own CA.** Created on your machine, with its key in `~/.cortex/ca`, readable
+  only by you. Cortex never adds it to a keychain itself.
+- **Real certificates are still checked.** When a server's certificate fails, Cortex
+  leaves that connection encrypted end to end.
+- **Read-only**, unless you turn on [tool pruning](./docs/laptop-token-savings.md).
+- **History on disk.** Sessions, prompts and replies included, are kept in
+  [`~/.cortex/sessions`](./docs/laptop-service.md#session-history-is-kept-in-cortexsessions),
+  and cost totals in `~/.cortex/cost`.
 
 ## Uninstall
 
 ```sh
-agentop uninstall
+agentop uninstall           # --purge also deletes ~/.cortex
 ```
 
-`agentop uninstall` lists what it will remove and asks once. It unroutes Claude Code and
-OpenCode (and IBM Bob, where Cortex routed it), stops and removes the service, takes out
-the PATH lines setup added unless other tools in `~/.local/bin` still need them, and
-deletes `agentop`, `cortex` and `cortex-session-dump` from `~/.local/bin`. A step that
-fails is reported with its fix, and the rest still run.
+It asks once, takes Cortex out of every agent it routed, and removes the service and
+binaries. [Remove it](./docs/laptop-service.md#remove-it) has the details.
 
-Claude Code and OpenCode go straight to their APIs again, and Cortex stops and no longer
-starts at login. Your config, CA and cost history stay in `~/.cortex`, so the install
-command above brings it back as it was (and `agentop configure opencode enable` for
-OpenCode). `agentop uninstall --purge` deletes `~/.cortex` as well, unless a removal
-before it failed: then `~/.cortex` stays, and the end lists it as left behind.
+## Learn more
 
-Restart any `claude` that was already running: it still points at Cortex.
-`claude --resume` picks the conversation back up. OpenCode needs no restart from you:
-`uninstall` restarts its background service when it finds it running.
+- [Running Cortex](./docs/laptop-service.md) — the service, how sessions are grouped,
+  troubleshooting
+- [agentop](./cmd/agentop/README.md) — every pane, key and command
+- [Pricing](./docs/pricing.md) — rates, gateway discounts, unpriced traffic
+- [Full install guide](https://www.rossoctl.dev/docs/dev/get-started/laptop) —
+  prerequisites and a walkthrough. Ending the install command in `sh -s -- --help`
+  lists the installer's options.
 
-To delete everything and check nothing is left, see
-[Remove it](./docs/laptop-service.md#remove-it). If `agentop` itself is gone,
-[remove it by hand](./docs/laptop-service.md#if-agentop-is-already-gone).
+## Beyond the laptop
 
-## Feedback
+The same binary runs as a Kubernetes sidecar, with what agentic workloads need in
+production: a verifiable identity per workload and the right credentials for each
+downstream call (**AuthBridge**), guardrails that block actions straying from the
+user's intent, egress control, and spend caps. Start with
+[Running Cortex in Kubernetes](./docs/kubernetes.md); the
+[plugin catalog](./docs/plugin-catalog.md) and
+[architecture reference](./docs/architecture.md) cover the rest.
 
-> [!NOTE]
-> **Cortex on a laptop is new, and we want to hear when it breaks.**
->
-> If the install failed, the numbers looked wrong, or anything was unclear:
->
-> - Open the **Laptop feedback** form → [new issue](https://github.com/rossoctl/cortex/issues/new/choose)
-> - Or say so in [Slack](https://ibm.biz/rossoctl-slack)
->
-> A half-finished install with the error pasted in is more useful to us than a polished
-> bug report you never sent.
+## Community
 
-## What else Cortex does
-
-Traffic visibility is the part you can use in a minute. The same binary provides the
-platform services agentic workloads need in production, as a sidecar or standalone:
-
-- **Identity & access** — a verifiable identity per workload, and the right credentials
-  for each downstream call, so an agent never holds a tool's secret. This layer is
-  **AuthBridge**.
-- **Guardrails** — block agent actions that stray from the user's intent or aren't
-  grounded in the conversation.
-- **Egress control** — govern which external services a workload can reach.
-- **Cost controls** — trim the context a workload sends, and cap its spend.
-
-Everything is a plugin in one pipeline; the [plugin catalog](./docs/plugin-catalog.md)
-lists what ships, and the [architecture reference](./docs/architecture.md) explains how
-a request flows through it. The shared library is [`core/`](./core/); the
-binaries live under [`cmd/`](./cmd/).
+Cortex on a laptop is new, so tell us when it breaks: use the **Laptop feedback** form
+under [new issue](https://github.com/rossoctl/cortex/issues/new/choose), or
+[Slack](https://ibm.biz/rossoctl-slack). A half-finished install with the error pasted
+in is more useful than a polished bug report you never sent. To work on Cortex, see
+[CONTRIBUTING.md](./CONTRIBUTING.md); to report a vulnerability, [SECURITY.md](./SECURITY.md).
 
 ## License
 
