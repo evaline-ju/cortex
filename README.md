@@ -26,15 +26,20 @@ One binary, no Kubernetes. macOS or Linux, amd64 or arm64.
 # 1. Install. Setup lists every change it will make, and asks once.
 curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/scripts/install.sh | sh
 
-# 2. Connect your agent. Each one's command is in the table below.
+# 2. In a new terminal, connect your agent, once. The table below has each command.
 agentop configure claude-code enable    # or opencode, bob, bobshell
 
-# 3. In a new terminal, watch while you use your agent as usual.
+# 3. Run your agent the way you always do. No flags, no environment variables.
+claude                                  # or opencode, bob
+
+# 4. In another terminal, watch its traffic live.
 agentop observe
 ```
 
-An agent that was already running picks up the change when it restarts. If anything
-looks wrong, `agentop doctor` checks the install and names the command that fixes it.
+That's all. From now on every session of that agent goes through Cortex, and nothing
+changes about how you start it. An agent that was already running picks up the change
+when it restarts. If anything looks wrong, `agentop doctor` checks the install and
+names the command that fixes it.
 
 ## Supported agents
 
@@ -46,9 +51,10 @@ looks wrong, `agentop doctor` checks the install and names the command that fixe
 | **Bob Shell** | `agentop configure bobshell enable` | [Guide](./cmd/agentop/README.md#typing-bob-instead-of-agentop-exec----bob-agentop-configure-bobshell) |
 | **Any other agent** | `agentop exec -- <command>` | [Guide](./cmd/agentop/README.md#running-one-command-through-cortex-agentop-exec) |
 
-`configure` asks before it writes, and its `status` and `disable` check and undo it.
-Any other agent can also be pointed at the proxy on `localhost:47600` with
-`~/.cortex/ca/ca.crt` trusted. Traffic in the Anthropic Messages or OpenAI Chat
+Each `configure` command is a one-time setup: it asks before it writes, and afterwards
+you start the agent exactly as before. `status` and `disable` check and undo it. An
+agent without a `configure` command runs under `agentop exec`, or can be pointed at
+the proxy on `localhost:47600` with `~/.cortex/ca/ca.crt` trusted. Traffic in the Anthropic Messages or OpenAI Chat
 Completions format is parsed into model calls and tokens whichever agent sends it, and
 priced wherever Cortex [has a rate](./docs/pricing.md).
 

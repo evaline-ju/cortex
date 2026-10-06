@@ -13,7 +13,9 @@ agentop configure claude-code status    # what is set
 agentop configure claude-code disable   # take it out again
 ```
 
-The installer's `--claude-code` flag runs the same `enable` as one of setup's steps.
+After `enable`, run `claude` the way you always do, with no flags and no environment
+variables. Every session goes through Cortex until you `disable` it. The installer's
+`--claude-code` flag runs the same `enable` as one of setup's steps.
 
 **What `enable` writes.** Seven keys in the `env` block of `~/.claude/settings.json`.
 Claude Code applies that block to every session on the machine, including background
