@@ -84,6 +84,20 @@ type fixture struct {
 	// assert content beyond the pairwise diff." Fixtures that want
 	// bug-catching (not just drift-catching) fill this in.
 	expectedPluginEvents map[string]string
+
+	// expectedIdentity, when non-nil, is asserted against EVERY listener
+	// rather than only compared between them. The pairwise diff cannot see
+	// a gap both legs share — two listeners that each record nothing agree
+	// perfectly — and for Identity the shared case is the likely one,
+	// since the two recorders that dropped it were copy-pasted from each
+	// other. Same argument the Inference comment in observationDiff makes.
+	expectedIdentity *identitySummary
+
+	// expectDuration asserts every listener reported a non-zero duration.
+	// Absolute for the same reason: a denial is a completed request, so
+	// "how long did it take" has an answer on every listener, and all four
+	// already stamp pctx.StartedAt at entry.
+	expectDuration bool
 }
 
 // contentType returns the fixture's response content-type or a sensible
@@ -111,8 +125,21 @@ func spyEntry(name string, cfg spyConfig) config.PluginEntry {
 
 // observation is the parity-comparable snapshot of a listener's session
 // event. Covers the operator-facing wire surface; per-listener locals
-// (Host casing, timestamps, RequestID, Duration, TLS, Identity) are
-// excluded — expanding coverage there is a follow-up fixture pass.
+// (Host casing, timestamps, RequestID) are excluded.
+//
+// Identity and Duration used to be excluded too, as "a follow-up fixture
+// pass". They were the follow-up: #936 found Identity, Duration and Plugins
+// recorded by extproc and dropped by both HTTP listeners on the deny path,
+// invisible here precisely because this struct did not carry them.
+//
+// TLS stays out, and not as a deferral. extproc legitimately has no client
+// TLS to report — Envoy terminates the handshake and ext_proc receives the
+// request over gRPC — so a cross-listener equality check on TLS would be
+// asserting something false, and it would pass here for the wrong reason
+// anyway: all three drivers run plaintext httptest servers, so every leg
+// records nil. TLS derivation is pinned by unit test in
+// listener/internal/sessionevent instead, which is where it can be given a
+// real tls.ConnectionState.
 type observation struct {
 	// PipelineRan is false when the listener rejected the request before
 	// the pipeline (e.g. request body too large). Overflow fixtures then
@@ -128,6 +155,17 @@ type observation struct {
 	// PluginEventJSON pins the raw JSON per plugin key so a snapshot
 	// difference between listeners surfaces as a value diff.
 	PluginEventJSON map[string]string
+	// Identity is who the request authenticated as, nil when the event
+	// carried none. Compared in full: a listener that drops the subject or
+	// the scopes publishes an event an operator cannot attribute, and an
+	// unattributable denial is the one denial that matters most.
+	Identity *identitySummary
+	// HasDuration is presence, not value. Every listener computes it as a
+	// live time.Since(pctx.StartedAt), so the figures legitimately differ
+	// between two legs of the same fixture and an equality check here
+	// would flake. What is comparable — and what was actually wrong — is
+	// whether a listener reports a duration at all.
+	HasDuration bool
 	// Inference is the token report the event carried, nil when it carried none.
 	//
 	// IT IS NOT A RESTATEMENT OF THE COST RECORD, which travels separately in
@@ -155,6 +193,16 @@ type inferenceSummary struct {
 	OutputTokens     int
 	ReasoningTokens  int
 	PresentKinds     uint8
+}
+
+// identitySummary mirrors pipeline.EventIdentity. Scopes compared as an
+// ordered slice because SnapshotIdentity copies them in the order the auth
+// plugin supplied, and nothing between there and the event reorders them.
+type identitySummary struct {
+	Subject  string
+	Scopes   []string
+	ClientID string
+	AgentID  string
 }
 
 // errorSummary mirrors pipeline.EventError so listener drift in the
@@ -218,7 +266,16 @@ func observe(t *testing.T, store *session.Store, wantDir pipeline.Direction, wan
 	obs := &observation{
 		Phase:           ev.Phase.String(),
 		StatusCode:      ev.StatusCode,
+		HasDuration:     ev.Duration > 0,
 		PluginEventJSON: map[string]string{},
+	}
+	if ev.Identity != nil {
+		obs.Identity = &identitySummary{
+			Subject:  ev.Identity.Subject,
+			Scopes:   ev.Identity.Scopes,
+			ClientID: ev.Identity.ClientID,
+			AgentID:  ev.Identity.AgentID,
+		}
 	}
 	if ev.Error != nil {
 		obs.Error = &errorSummary{Kind: ev.Error.Kind, Code: ev.Error.Code, Message: ev.Error.Message}

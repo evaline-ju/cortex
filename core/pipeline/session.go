@@ -158,7 +158,9 @@ type SessionEvent struct {
 
 	// Duration is the wall-clock time from request entry into the listener
 	// to response recording. Zero on request-phase events. On response
-	// events it's computed as now - matching-request.At.
+	// events it's computed as now - matching-request.At. On denied events
+	// it's DurationSince(pctx.StartedAt) — a denial ends the request, so
+	// it has a duration even though no response was ever recorded.
 	Duration time.Duration
 
 	// TLS, when non-nil, carries connection-level identity for events
