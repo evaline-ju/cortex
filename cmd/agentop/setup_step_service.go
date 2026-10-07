@@ -411,7 +411,7 @@ func (serviceStep) applyUnsupervised(env *setupEnv) (string, undo, error) {
 
 // waitUnloaded waits for a job an unload succeeded on to leave launchd: bootout
 // returns while teardown is still going, and the job's supervisor allows the
-// proxy up to 20s to drain. It is an error if the job is still there after
+// proxy up to 3s to stop. It is an error if the job is still there after
 // serviceBootoutTimeout, so a service undo that returns nil means the job is gone.
 // systemd's disable --now returns once the unit has stopped.
 //

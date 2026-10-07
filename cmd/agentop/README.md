@@ -85,7 +85,10 @@ session APIs that aren't in your kube context.
 
 With no `--endpoint`, agentop decides between the cluster picker and the Cortex
 running on this machine (read from `~/.cortex/config.yaml`, and probed first —
-a stale config from an install that is no longer running is ignored).
+a stale config from an install that is no longer running is ignored). A Cortex
+that is still starting — right after a restart it accepts connections a few
+seconds before it answers them — is waited for, up to 6s, with a line saying so;
+nothing listening goes to the picker at once.
 
 `--kubernetes` controls that choice and **defaults to false**, so a local Cortex
 that is answering wins and the picker appears only when none is:

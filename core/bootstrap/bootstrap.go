@@ -85,6 +85,21 @@ func StartSignalToggle() {
 // is returned so the caller can decide how to handle it; a serve-time failure
 // after bind is logged.
 func StartHealthServer(inboundH, outboundH *pipeline.Holder, addr string) (*http.Server, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return ServeHealthServer(inboundH, outboundH, listener), nil
+}
+
+// ServeHealthServer is StartHealthServer on a listener the caller already bound.
+//
+// The Serve* functions exist for a caller that binds every port before it opens anything
+// on disk. cmd/cortex does: on a laptop the session archive and cost ledger live in
+// ~/.cortex, opening them is not read-only, and a second proxy that got that far before
+// failing on a port was writing the files the first one was. Bound first, the port
+// refuses it before it has touched anything.
+func ServeHealthServer(inboundH, outboundH *pipeline.Holder, listener net.Listener) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -101,13 +116,9 @@ func StartHealthServer(inboundH, outboundH *pipeline.Holder, addr string) (*http
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := &http.Server{
-		Addr:              addr,
+		Addr:              listener.Addr().String(),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-	}
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
 	}
 	go func() {
 		slog.Info("health server listening", "addr", listener.Addr().String())
@@ -115,7 +126,7 @@ func StartHealthServer(inboundH, outboundH *pipeline.Holder, addr string) (*http
 			slog.Error("health server failed", "error", err)
 		}
 	}()
-	return srv, nil
+	return srv
 }
 
 // StartStatServer binds addr for the stats/config-inspection server, serves it
@@ -123,20 +134,26 @@ func StartHealthServer(inboundH, outboundH *pipeline.Holder, addr string) (*http
 // is returned so the caller can decide how to handle it (the mains log.Fatalf);
 // a serve-time failure after bind is logged.
 func StartStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus, pricingTable http.Handler, addr string) (*observe.StatServer, error) {
-	srv := observe.NewStatServer(addr, cfgProvider, statsProvider,
-		observe.WithReloadStatus(reloadStatus),
-		observe.WithPricingTable(pricingTable))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
+	return ServeStatServer(cfgProvider, statsProvider, reloadStatus, pricingTable, listener), nil
+}
+
+// ServeStatServer is StartStatServer on a listener the caller already bound. See
+// ServeHealthServer for why.
+func ServeStatServer(cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus, pricingTable http.Handler, listener net.Listener) *observe.StatServer {
+	srv := observe.NewStatServer(listener.Addr().String(), cfgProvider, statsProvider,
+		observe.WithReloadStatus(reloadStatus),
+		observe.WithPricingTable(pricingTable))
 	go func() {
 		slog.Info("stat server listening", "addr", listener.Addr().String())
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("stat server failed", "error", err)
 		}
 	}()
-	return srv, nil
+	return srv
 }
 
 // ServerOption adjusts the http.Server StartHTTPServer builds, before it serves.
@@ -165,18 +182,24 @@ func newHTTPServer(addr string, handler http.Handler, opts []ServerOption) *http
 // an ephemeral ":0" to the OS-assigned port). A bind failure is returned so the
 // caller can decide how to handle it; a serve-time failure after bind is logged.
 func StartHTTPServer(name string, handler http.Handler, addr string, opts ...ServerOption) (*http.Server, error) {
-	srv := newHTTPServer(addr, handler, opts)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
+	return ServeHTTPServer(name, handler, listener, opts...), nil
+}
+
+// ServeHTTPServer is StartHTTPServer on a listener the caller already bound. See
+// ServeHealthServer for why.
+func ServeHTTPServer(name string, handler http.Handler, listener net.Listener, opts ...ServerOption) *http.Server {
+	srv := newHTTPServer(listener.Addr().String(), handler, opts)
 	go func() {
 		slog.Info("HTTP server listening", "name", name, "addr", listener.Addr().String())
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP server failed", "name", name, "error", err)
 		}
 	}()
-	return srv, nil
+	return srv
 }
 
 // StartReverseProxyServer mirrors StartHTTPServer but uses the
@@ -188,14 +211,22 @@ func StartHTTPServer(name string, handler http.Handler, addr string, opts ...Ser
 // operators expecting a separate :8443 port for TLS get a clear hint
 // that this is the same :8080 with byte-peek detection.
 func StartReverseProxyServer(name string, rp *reverseproxy.Server, addr string) (*http.Server, error) {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           rp.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	listener, err := rp.Listen(addr)
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
+	}
+	return ServeReverseProxyServer(name, rp, listener), nil
+}
+
+// ServeReverseProxyServer is StartReverseProxyServer on a listener the caller already
+// bound, plain: it applies the server's mTLS posture itself, exactly as rp.Listen would
+// have. See ServeHealthServer for why the bind is the caller's.
+func ServeReverseProxyServer(name string, rp *reverseproxy.Server, inner net.Listener) *http.Server {
+	listener := rp.WrapListener(inner)
+	srv := &http.Server{
+		Addr:              inner.Addr().String(),
+		Handler:           rp.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
 		slog.Info("Reverse server listening", "name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
@@ -203,7 +234,7 @@ func StartReverseProxyServer(name string, rp *reverseproxy.Server, addr string) 
 			slog.Error("Reverse server failed", "name", name, "error", err)
 		}
 	}()
-	return srv, nil
+	return srv
 }
 
 // StartTransparentInboundServer binds the inbound transparent listener and
@@ -231,9 +262,16 @@ func StartTransparentInboundServer(name string, rp *reverseproxy.Server, addr st
 	if err != nil {
 		return nil, fmt.Errorf("%s: listen on %q: %w", name, addr, err)
 	}
+	return ServeTransparentInboundServer(name, rp, tcpLn), nil
+}
+
+// ServeTransparentInboundServer is StartTransparentInboundServer on a TCP listener the
+// caller already bound — a *net.TCPListener, for the SO_ORIGINAL_DST reason above. See
+// ServeHealthServer for why the bind is the caller's.
+func ServeTransparentInboundServer(name string, rp *reverseproxy.Server, tcpLn *net.TCPListener) *http.Server {
 	listener := rp.WrapListener(transparentproxy.NewInboundListener(tcpLn))
 	srv := &http.Server{
-		Addr:              addr,
+		Addr:              tcpLn.Addr().String(),
 		Handler:           rp.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Carries each connection's recovered original destination into the
@@ -247,5 +285,5 @@ func StartTransparentInboundServer(name string, rp *reverseproxy.Server, addr st
 			slog.Error("Transparent inbound server failed", "name", name, "error", err)
 		}
 	}()
-	return srv, nil
+	return srv
 }

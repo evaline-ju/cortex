@@ -72,9 +72,9 @@ func requireRealSystemd(t *testing.T) {
 	}
 }
 
-// slowScript writes a throwaway script that mimics the real proxy's graceful
-// shutdown: it ignores nothing, but takes a couple of seconds to actually exit
-// once asked to, and otherwise just idles. A trivial script that died instantly
+// slowScript writes a throwaway script that mimics a proxy that takes a moment to
+// stop: it ignores nothing, but takes a couple of seconds to actually exit once
+// asked to, and otherwise just idles. A trivial script that died instantly
 // would hide a slow-teardown bug the same way it did for the darwin bootout race
 // (see the comment on TestWaitBootedOut_RealLaunchd).
 func slowScript(t *testing.T) string {

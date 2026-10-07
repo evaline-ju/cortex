@@ -457,14 +457,14 @@ if err := outboundPipeline.Start(initCtx); err != nil {
 
 // ... serve traffic ...
 
-// After listeners have drained on SIGTERM:
+// After listeners have drained (a pod) or closed (a local install) on SIGTERM:
 outboundPipeline.Stop(shutdownCtx) // reverse order within each pipeline
 inboundPipeline.Stop(shutdownCtx)
 ```
 
 Semantics:
 - `Start` — Init runs **in declaration order**, fails fast on the first error. The returned error names the offending plugin. No Shutdown is invoked on plugins whose Init already ran successfully — the intent is hard-fail on startup, not unwind.
-- `Stop` — Shutdown runs **in reverse declaration order (LIFO)** so a plugin that depends on an earlier plugin's resources can still use them while cleaning up. Best-effort: errors from one Shutdown are logged but do not stop the sequence. Bounded by the caller's ctx deadline.
+- `Stop` — Shutdown runs **in reverse declaration order (LIFO)** so a plugin that depends on an earlier plugin's resources can still use them while cleaning up. Best-effort: errors from one Shutdown are logged but do not stop the sequence. Bounded by the caller's ctx deadline — in `cmd/cortex`, 15s in a pod and 1s on a local install, whose stop has to finish inside its supervisor's 3s.
 
 A minimal Init/Shutdown plugin example — a rate-limiter that refreshes its quota store in the background:
 

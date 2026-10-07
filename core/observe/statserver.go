@@ -147,3 +147,9 @@ func (s *StatServer) Serve(l net.Listener) error {
 func (s *StatServer) Shutdown(ctx context.Context) error {
 	return s.server.Shutdown(ctx)
 }
+
+// Close stops the server at once: the listener closes and any request in flight is
+// dropped. For a stop that frees the port immediately; Shutdown is the draining one.
+func (s *StatServer) Close() error {
+	return s.server.Close()
+}

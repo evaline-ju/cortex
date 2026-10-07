@@ -95,6 +95,16 @@ func renderUnitFor(goos string, p servicePaths) string {
 	if goos == "darwin" {
 		// HOME is set explicitly: the config interpolates ${HOME} at load, and an
 		// agent's environment is minimal enough not to rely on inheritance.
+		//
+		// ExitTimeOut=5 is launchd's own default for this job, measured, and pinned
+		// so the order of the stop does not rest on a value Apple documents only as
+		// "system-defined". When it runs out launchd SIGKILLs the supervisor and only
+		// SIGTERMs the rest of the process group — which a proxy that has already
+		// taken its one SIGTERM ignores, so it lives on, orphaned, holding its ports.
+		// The supervisor's own kill (superviseStopGrace, 3s, cmd/cortex/supervise.go)
+		// therefore has to land first, and the proxy closes rather than drains so it
+		// is gone long before either. A supervisor that waited 20s made every restart
+		// with a request in flight crash-loop its replacement on the bind.
 		return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -116,6 +126,7 @@ func renderUnitFor(goos string, p servicePaths) string {
   <key>StandardOutPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>StandardErrorPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>ProcessType</key><string>Background</string>
+  <key>ExitTimeOut</key><integer>5</integer>
 </dict>
 </plist>
 `
@@ -129,12 +140,11 @@ func renderUnitFor(goos string, p servicePaths) string {
 	// every listener here is loopback, so ordering against the network would be a
 	// dependency that never arrives.
 	//
-	// TimeoutStopSec=20: narrows systemd's own default (90s) down toward the proxy's
-	// 15s shutdown deadline (cmd/cortex/main.go), rather than adding headroom
-	// to nothing — matches the macOS supervisor's 20s wait for the same shutdown
-	// (supervise.go). 15s bounds the HTTP servers and pipelines specifically; a couple
-	// of unbounded flushes run after that deadline, which is what the 5s of slack over
-	// 15 is actually for.
+	// TimeoutStopSec=5: the plist's ExitTimeOut, for the same stop. A local install's
+	// proxy closes its listeners on SIGTERM rather than draining them (cmd/cortex/main.go)
+	// and is gone in well under a second, so this only ever ends one that hangs — which
+	// systemd's own default would let hold a restart for 90s. There is no supervisor in
+	// between here: KillMode=control-group signals the proxy directly.
 	return `[Unit]
 Description=Cortex local proxy (cortex)
 Documentation=https://github.com/rossoctl/cortex
@@ -147,7 +157,7 @@ Type=simple
 ExecStart=` + shQuote(p.binary) + ` --config ` + shQuote(p.configFile) + `
 Restart=on-failure
 RestartSec=10
-TimeoutStopSec=20
+TimeoutStopSec=5
 StandardOutput=append:` + p.logFile + `
 StandardError=append:` + p.logFile + `
 
@@ -178,10 +188,11 @@ func loadService(goos string, p servicePaths, progress io.Writer) error {
 		// upgrade produced: the running service could not be replaced, the install
 		// rolled back, and Cortex was left stopped.
 		//
-		// Our teardown is slow on purpose: bootout SIGTERMs the supervisor, which
-		// forwards to the proxy and waits out its 15s graceful shutdown before
-		// insisting. A trivial job dies fast enough to hide this, which is why every
-		// test that started from nothing or ran uninstall first passed.
+		// Our teardown is not instant: bootout SIGTERMs the supervisor, which forwards
+		// to the proxy and waits up to superviseStopGrace (3s) before insisting — and a
+		// previous release's supervisor waited out a 15s drain until launchd's exit
+		// timeout cut it off. A trivial job dies fast enough to hide this, which is why
+		// every test that started from nothing or ran uninstall first passed.
 		if !waitBootedOutf(target, serviceBootoutTimeout, progress) {
 			if bootoutErr != nil && !strings.Contains(string(bootoutOut), "No such process") {
 				return fmt.Errorf("could not remove the previous %s: %v: %s",
@@ -402,9 +413,10 @@ func isProxyComm(comm string) bool {
 	return filepath.Base(strings.TrimSpace(comm)) == "cortex"
 }
 
-// stopPID asks politely, then waits. The proxy allows itself 15s to drain, so
-// this waits longer than that before giving up rather than reporting success on a
-// process that still holds the ports.
+// stopPID asks politely, then waits. A proxy from before restarts stopped draining
+// allows itself 15s to, and this may be stopping one, so it waits longer than that
+// before giving up rather than reporting success on a process that still holds the
+// ports. A current one is gone in well under a second.
 func stopPID(pid int) error {
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		return err

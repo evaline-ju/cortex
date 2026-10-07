@@ -8,6 +8,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/cortex/core/listener/reverseproxy"
+	"github.com/rossoctl/cortex/core/pipeline"
 )
 
 // TestInitLogging verifies InitLogging maps LOG_LEVEL to the process level and
@@ -99,5 +102,80 @@ func TestStartHTTPServer_PassesItsOptionsOn(t *testing.T) {
 	defer func() { _ = srv.Close() }()
 	if srv.ConnContext == nil {
 		t.Error("StartHTTPServer dropped its options: ConnContext is nil")
+	}
+}
+
+// The Serve* functions are the Start* ones minus the bind, for a caller that binds every
+// port before it opens anything on disk (cmd/cortex does, so a second instance gives up
+// before touching the first one's files). Each must serve exactly the listener it is handed.
+
+func boundListener(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ln
+}
+
+func getStatus(t *testing.T, url string) int {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestServeHTTPServer_ServesTheListenerItIsHanded(t *testing.T) {
+	ln := boundListener(t)
+	srv := ServeHTTPServer("test", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}), ln, WithConnContext(func(ctx context.Context, _ net.Conn) context.Context { return ctx }))
+	defer func() { _ = srv.Close() }()
+	if got := getStatus(t, "http://"+ln.Addr().String()+"/"); got != http.StatusTeapot {
+		t.Errorf("status = %d, want the handler's %d", got, http.StatusTeapot)
+	}
+	if srv.ConnContext == nil {
+		t.Error("ServeHTTPServer dropped its options: ConnContext is nil")
+	}
+}
+
+func TestServeHealthServer_ServesTheListenerItIsHanded(t *testing.T) {
+	p, err := pipeline.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := pipeline.NewHolder(p)
+	ln := boundListener(t)
+	srv := ServeHealthServer(h, h, ln)
+	defer func() { _ = srv.Close() }()
+	if got := getStatus(t, "http://"+ln.Addr().String()+"/healthz"); got != http.StatusOK {
+		t.Errorf("/healthz = %d, want 200", got)
+	}
+}
+
+func TestServeReverseProxyServer_ServesTheListenerItIsHanded(t *testing.T) {
+	backend := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})}
+	bln := boundListener(t)
+	go func() { _ = backend.Serve(bln) }()
+	defer func() { _ = backend.Close() }()
+
+	p, err := pipeline.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, err := reverseproxy.NewServer(pipeline.NewHolder(p), nil, "http://"+bln.Addr().String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := boundListener(t)
+	srv := ServeReverseProxyServer("test", rp, ln)
+	defer func() { _ = srv.Close() }()
+	if got := getStatus(t, "http://"+ln.Addr().String()+"/"); got != http.StatusTeapot {
+		t.Errorf("status = %d, want the backend's %d", got, http.StatusTeapot)
 	}
 }

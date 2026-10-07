@@ -3,6 +3,7 @@ package observe
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,4 +146,29 @@ func TestNewStatServerCustomAddr(t *testing.T) {
 	if s.server.Addr != "127.0.0.1:8888" {
 		t.Errorf("server.Addr = %q, want 127.0.0.1:8888", s.server.Addr)
 	}
+}
+
+// Close is the stop a local install uses: it releases the port at once rather than
+// waiting on requests in flight, so the proxy replacing this one can bind it.
+func TestStatServerClose_ReleasesItsPort(t *testing.T) {
+	s := NewStatServer(":0", func() *config.Config { return newTestConfig() }, func() *auth.Stats { return auth.NewStats() })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	served := make(chan error, 1)
+	go func() { served <- s.Serve(ln) }()
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := <-served; err != http.ErrServerClosed {
+		t.Errorf("Serve returned %v, want http.ErrServerClosed", err)
+	}
+	again, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("port still held after Close: %v", err)
+	}
+	_ = again.Close()
 }
