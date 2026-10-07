@@ -58,7 +58,14 @@ than repeating them, so a re-measurement changes one place and not four.
 
 So what a restart costs is the requests in flight at that moment, not the sessions. A
 session that reports an error has lost one request and will recover; it does not need
-restarting. When a restart genuinely is needed, `agentop service install` says how many
+restarting.
+
+A restart does not wait for those requests either. On a stop the proxy closes every port at
+once and exits, typically in well under a second, and its supervisor kills one that has not
+gone within 3s — inside launchd's 5s, so no proxy is ever left behind holding the ports. The
+proxy that replaces it binds its ports before it opens anything in `~/.cortex`, then replays
+the session archive (up to 5s, see below) before it serves; a client that connects during
+the replay is answered when it ends rather than refused. When a restart genuinely is needed, `agentop service install` says how many
 connections it is about to cut. Setup does not pass that line on.
 
 To restart deliberately: `agentop service restart`.
