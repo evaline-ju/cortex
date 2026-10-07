@@ -79,6 +79,30 @@ type spyConfig struct {
 	// count at SessionEvent.Plugins[<name>/resp-body]. Only meaningful
 	// on the spyStreamingPlugin variant.
 	RecordResponseFrames bool `json:"record_response_frames"`
+
+	// RequestInvocation is recorded via pctx.Record at OnRequest when
+	// non-nil, which is the only way a spy that does NOT deny appears in
+	// SessionEvent.Invocations at all: the deny branch below used to be
+	// this plugin's sole Record site. Without it no fixture could put two
+	// plugins on the record at once, and ordering is unobservable with
+	// one — a one-element slice compares equal under every ordering rule,
+	// which is why invocationsEqual's set comparison went unquestioned.
+	RequestInvocation *invocationRecord `json:"request_invocation"`
+}
+
+// invocationRecord is a fixture-specified pipeline.Invocation. Action is
+// a plain string rather than pipeline.InvocationAction so a fixture can
+// hand the spy any of the five vocabulary values through the JSON config
+// round-trip without the knob caring which.
+//
+// Plugin, Phase and Path are deliberately absent: Context.Record
+// back-fills all three (context.go:534-543), and a fixture that supplied
+// them would be asserting its own literals rather than the framework's
+// attribution.
+type invocationRecord struct {
+	Action  string            `json:"action"`
+	Reason  string            `json:"reason"`
+	Details map[string]string `json:"details,omitempty"`
 }
 
 // bodyObservation is what the spy publishes about the bodies it saw.
@@ -135,6 +159,16 @@ func (s *spyPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	}
 	if s.cfg.EmitOnRequest && s.cfg.RequestEvent != nil {
 		s.publish(pctx, pipeline.PluginEventSuffix, *s.cfg.RequestEvent)
+	}
+	// Recorded before the deny branch so a spy configured with both lands
+	// its own observation first, in the order a real gate would: observe
+	// what you saw, then refuse.
+	if s.cfg.RequestInvocation != nil {
+		pctx.Record(pipeline.Invocation{
+			Action:  pipeline.InvocationAction(s.cfg.RequestInvocation.Action),
+			Reason:  s.cfg.RequestInvocation.Reason,
+			Details: s.cfg.RequestInvocation.Details,
+		})
 	}
 	if !s.cfg.DenyOnRequest {
 		return pipeline.Action{Type: pipeline.Continue}

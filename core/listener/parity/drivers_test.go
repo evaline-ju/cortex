@@ -75,9 +75,11 @@ type fixture struct {
 	pipelineRefusedPreRun bool
 
 	// expectedWireStatus, when non-zero, is asserted against every
-	// listener's wire status. Only meaningful together with
-	// pipelineRefusedPreRun — on the success path extproc has no HTTP
-	// transport and reports 0.
+	// listener's wire status. Meaningful whenever the listener produced a
+	// status of its own: a pre-pipeline refusal (pipelineRefusedPreRun) or
+	// a pipeline denial, where extproc reports the ImmediateResponse code.
+	// NOT meaningful on the success path — there extproc has no HTTP
+	// transport to report from and returns 0.
 	expectedWireStatus int
 
 	// expectedPluginEvents anchors correctness — maps each expected
@@ -99,6 +101,23 @@ type fixture struct {
 	// "how long did it take" has an answer on every listener, and all four
 	// already stamp pctx.StartedAt at entry.
 	expectDuration bool
+
+	// expectedInvocations, when non-nil, pins each listener's invocation
+	// list EXACTLY and IN ORDER — length, order and every field.
+	//
+	// Absolute rather than pairwise for the usual reason: the pairwise diff
+	// cannot see a gap both legs share, and an invocation list is one of
+	// the easier things for every listener to get wrong together, since all
+	// of them snapshot it through the same SnapshotInvocations call. The
+	// pairwise check does now compare order (invocationsEqual stopped
+	// sorting), so the two are complementary — this one catches a shared
+	// drop or reorder, that one catches a split.
+	//
+	// Order is the contract #948 is about: SnapshotInvocations walks the
+	// whole slice and agentop renders one row per entry in slice order, so
+	// a listener that reordered them would tell an operator a different
+	// story about which gate spoke first.
+	expectedInvocations []invocationSummary
 
 	// expectedUpstream, when non-nil, pins the request AS THE UPSTREAM
 	// RECEIVED IT on every listener — the bytes and the Content-Length that
@@ -145,6 +164,18 @@ func buildParityPipeline(entries []config.PluginEntry, deps plugins.Deps) (*pipe
 func spyEntry(name string, cfg spyConfig) config.PluginEntry {
 	raw, _ := json.Marshal(cfg)
 	return config.PluginEntry{Name: name, Config: raw}
+}
+
+// spyEntryShadow is spyEntry wrapped in on_error: observe — the shadow
+// mode an operator rolls a new gate out under. The plugin is dispatched
+// normally and its Reject is downgraded: Pipeline.Run flips the deny
+// record's Shadow flag and CONTINUES to the next plugin
+// (pipeline/pipeline.go:120), so a fixture pairing one of these with an
+// enforcing spy gets both plugins on the record from one request.
+func spyEntryShadow(name string, cfg spyConfig) config.PluginEntry {
+	e := spyEntry(name, cfg)
+	e.OnError = pipeline.ErrorPolicyObserve
+	return e
 }
 
 // observation is the parity-comparable snapshot of a listener's session
@@ -261,6 +292,13 @@ type invocationSummary struct {
 	Action  string
 	Reason  string
 	Details map[string]string
+	// Shadow is whether the plugin ran under on_error: observe and its
+	// deny was downgraded to a report. Compared because it is the ONLY
+	// thing separating "this request was refused" from "this request
+	// would have been refused once we enforce": drop the flag and a
+	// shadow-mode rollout reads as an outage. The framework stamps it in
+	// Pipeline.Run, so both listeners must carry it through unchanged.
+	Shadow bool
 }
 
 // observe returns the sole event matching (direction, phase) in the
@@ -334,6 +372,7 @@ func observe(t *testing.T, store *session.Store, wantDir pipeline.Direction, wan
 				Action:  string(inv.Action),
 				Reason:  inv.Reason,
 				Details: inv.Details,
+				Shadow:  inv.Shadow,
 			})
 		}
 	}
