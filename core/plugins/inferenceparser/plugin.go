@@ -77,6 +77,8 @@ func (p *InferenceParser) OnRequest(_ context.Context, pctx *pipeline.Context) p
 		ext = parseAnthropicRequest(pctx.Body)
 	case dialectOpenAI:
 		ext = parseOpenAIRequest(pctx.Body)
+	case dialectResponses:
+		ext = parseResponsesRequest(pctx.Headers, pctx.Body)
 	default:
 		return pipeline.Action{Type: pipeline.Continue}
 	}
@@ -201,16 +203,23 @@ func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) 
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
+	d := dialectFor(endpointPath(pctx))
 	if ext.Stream {
-		if dialectFor(endpointPath(pctx)) == dialectAnthropic {
+		switch d {
+		case dialectAnthropic:
 			parseAnthropicSSE(pctx.ResponseBody, ext)
-		} else {
+		case dialectResponses:
+			parseResponsesSSE(pctx.ResponseBody, ext)
+		default:
 			parseInferenceSSE(pctx.ResponseBody, ext)
 		}
 	} else {
-		if dialectFor(endpointPath(pctx)) == dialectAnthropic {
+		switch d {
+		case dialectAnthropic:
 			parseAnthropicJSON(pctx.ResponseBody, ext)
-		} else {
+		case dialectResponses:
+			parseResponsesJSON(pctx.ResponseBody, ext)
+		default:
 			parseInferenceJSON(pctx.ResponseBody, ext)
 		}
 	}
@@ -430,22 +439,39 @@ func (p *InferenceParser) OnResponseFrame(_ context.Context, pctx *pipeline.Cont
 		p.settleCost(pctx)
 		return pipeline.Action{Type: pipeline.Continue}
 	}
-	if settle.IsEventStream(pctx) {
+	// settle.IsEventStream(pctx) is the Content-Type check (text/event-stream). OR'd with
+	// carriesSSEFraming(frame): the Responses API's chatgpt.com-hosted gateway (Codex)
+	// sends real SSE wire bytes — event:/data: lines — under Content-Type:
+	// application/json. Trusting the header alone would route that body to the JSON arm
+	// below, where it fails to unmarshal as a single object and parses nothing. This is
+	// the one dialect among the three known to mislabel itself this way; the other two
+	// are only ever reached here with a correct header, so the fallback costs them
+	// nothing — carriesSSEFraming is cheap (a prefix check) and false for an ordinary
+	// JSON body.
+	if settle.IsEventStream(pctx) || carriesSSEFraming(frame) {
 		// An SSE body delivered whole, with its wire framing intact — not frame by frame.
 		// Both proxy listeners fall back to the buffered path for a text/event-stream
 		// response when a plugin in the chain declares WritesResponseBody (a body they
 		// must rewrite cannot also be forwarded as it arrives), and then deliver the
 		// entire stream as this one frame. Folding it as a single chunk parses nothing; it
 		// has to go through the SSE reader.
-		if dialectFor(endpointPath(pctx)) == dialectAnthropic {
+		switch dialectFor(endpointPath(pctx)) {
+		case dialectAnthropic:
 			parseAnthropicSSE(frame, ext)
-		} else {
+		case dialectResponses:
+			parseResponsesSSE(frame, ext)
+		default:
 			parseInferenceSSE(frame, ext)
 		}
-	} else if dialectFor(endpointPath(pctx)) == dialectAnthropic {
-		parseAnthropicJSON(frame, ext)
 	} else {
-		parseInferenceJSON(frame, ext)
+		switch dialectFor(endpointPath(pctx)) {
+		case dialectAnthropic:
+			parseAnthropicJSON(frame, ext)
+		case dialectResponses:
+			parseResponsesJSON(frame, ext)
+		default:
+			parseInferenceJSON(frame, ext)
+		}
 	}
 	logInferenceFinalized(ext)
 	p.settleCost(pctx)
@@ -539,11 +565,14 @@ func normalizeSSE(body []byte) []byte {
 // endpoint speaks. Extracted so the mid-stream and terminal call sites cannot drift apart
 // on which parser a path gets.
 func foldResponseFrame(pctx *pipeline.Context, frame []byte, state *inferenceStreamState, ext *pipeline.InferenceExtension) {
-	if dialectFor(endpointPath(pctx)) == dialectAnthropic {
+	switch dialectFor(endpointPath(pctx)) {
+	case dialectAnthropic:
 		foldAnthropicFrame(frame, state, ext)
-		return
+	case dialectResponses:
+		foldResponsesFrame(frame, state, ext)
+	default:
+		foldOpenAIFrame(frame, state, ext)
 	}
-	foldOpenAIFrame(frame, state, ext)
 }
 
 // foldOpenAIFrame folds one OpenAI streaming chunk (data: {choices,usage}) into

@@ -10,6 +10,7 @@ const (
 	dialectNone      dialect = iota // not an endpoint this parser reads
 	dialectOpenAI                   // OpenAI chat completions, or legacy completions
 	dialectAnthropic                // Anthropic Messages
+	dialectResponses                // OpenAI Responses API
 )
 
 // anthropicMessagesPath is the Anthropic Messages endpoint, and the ending that marks the
@@ -25,6 +26,16 @@ const anthropicMessagesPath = "/v1/messages"
 // /openai/deployments/<d>.
 const completionsSuffix = "/completions"
 
+// responsesSuffix ends every OpenAI Responses-API path: the public /v1/responses, and
+// Codex's chatgpt.com-hosted gateway at /backend-api/codex/responses — both end in
+// "/responses" even though they share no common prefix, which is why this is a suffix of
+// just the last segment rather than anchored to "/v1" the way completionsSuffix could
+// afford to be loose about its own prefix. The same "match by ending, verify by body"
+// split applies as it does for the other two dialects: a path that happens to end this
+// way but whose body carries no `input` array is rejected by parseResponsesRequest, not
+// here.
+const responsesSuffix = "/responses"
+
 // dialectFor reports which dialect path speaks, from how it ends. One function for the
 // request and every response-side call site, so a request and its response cannot be read
 // as different dialects.
@@ -32,7 +43,8 @@ const completionsSuffix = "/completions"
 // THE END OF THE PATH, NOT THE WHOLE OF IT. Providers mount these APIs under prefixes of
 // their own, and matching whole paths needed a code change for each one. What keeps an
 // unrelated endpoint that happens to end the same way out of the inference record is the
-// body check in parseOpenAIRequest and parseAnthropicRequest, not this function.
+// body check in parseOpenAIRequest, parseAnthropicRequest and parseResponsesRequest, not
+// this function.
 //
 // path must already be query-free (endpointPath). A trailing slash is not trimmed: no
 // client is known to send one, and TestInferenceParser_BobNonInferencePathsAreIgnored pins
@@ -43,6 +55,8 @@ func dialectFor(path string) dialect {
 		return dialectAnthropic
 	case strings.HasSuffix(path, completionsSuffix):
 		return dialectOpenAI
+	case strings.HasSuffix(path, responsesSuffix):
+		return dialectResponses
 	}
 	return dialectNone
 }
