@@ -763,6 +763,12 @@ Note: commit *message* examples elsewhere in this doc use lowercase
 (`feat:` / `fix:`) — that is fine for commits, but the PR *title* check rejects
 lowercase prefixes. Use `Fix:` / `Feat:` / `Docs:` in PR titles.
 
+The prefix also files the PR in the release notes, which
+`scripts/release_notes.sh` builds from the PRs merged since the previous
+release: `Feat`/`Feature` under New features, `Fix`/`Bug fix`/`Perf` under Bug
+fixes, `Breaking change` (or `!` before the colon) under Breaking changes, and
+everything else under a collapsed Other changes.
+
 ## Container Images
 
 All images are pushed to `ghcr.io/rossoctl/cortex/` from
