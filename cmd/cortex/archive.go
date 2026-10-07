@@ -119,7 +119,7 @@ const usageReplayBudget = 5 * time.Second
 // ALL OR NOTHING. A read that does not finish within ctx is abandoned before anything is fed, and
 // the ring starts empty as it always did: a partial ring would show a LAST 1H that is too low as if
 // it were real.
-func replayUsage(ctx context.Context, arch *archive.Archive, agg *usage.Aggregator, now time.Time) (events, sessions, skipped int, err error) {
+func replayUsage(ctx context.Context, arch *archive.Archive, agg *usage.Aggregator, now time.Time) (events, sessions, incomplete int, err error) {
 	type replayed struct {
 		id string
 		e  pipeline.SessionEvent
@@ -127,11 +127,11 @@ func replayUsage(ctx context.Context, arch *archive.Archive, agg *usage.Aggregat
 	// About 1KB a kept event (see usage.ReplayCopy), held until this returns. Keeping the decoded
 	// event instead would hold six hours of conversations at once.
 	var evs []replayed
-	skipped, err = arch.ReplaySince(ctx, now.Add(-usage.MaxWindow), func(id string, e *pipeline.SessionEvent) {
+	incomplete, err = arch.ReplaySince(ctx, now.Add(-usage.MaxWindow), func(id string, e *pipeline.SessionEvent) {
 		evs = append(evs, replayed{id, usage.ReplayCopy(e)})
 	})
 	if err != nil {
-		return 0, 0, skipped, err
+		return 0, 0, incomplete, err
 	}
 	// Seq breaks a tie within one session, where it is the order the store appended in; across
 	// sessions a tie has no order to keep.
@@ -148,7 +148,7 @@ func replayUsage(ctx context.Context, arch *archive.Archive, agg *usage.Aggregat
 			seen[evs[i].id] = true
 		}
 	}
-	return events, len(seen), skipped, nil
+	return events, len(seen), incomplete, nil
 }
 
 // replayUsageAtStartup runs replayUsage within usageReplayBudget and says how it went.
@@ -156,7 +156,7 @@ func replayUsageAtStartup(arch *archive.Archive, agg *usage.Aggregator) {
 	ctx, cancel := context.WithTimeout(context.Background(), usageReplayBudget)
 	defer cancel()
 	start := time.Now()
-	events, sessions, skipped, err := replayUsage(ctx, arch, agg, start)
+	events, sessions, incomplete, err := replayUsage(ctx, arch, agg, start)
 	took := time.Since(start)
 	if err != nil {
 		slog.Warn("usage: did not replay the session archive into the usage ring; LAST 1H and the usage pane start empty",
@@ -164,5 +164,5 @@ func replayUsageAtStartup(arch *archive.Archive, agg *usage.Aggregator) {
 		return
 	}
 	slog.Info("usage: replayed the session archive into the usage ring", "window", usage.MaxWindow,
-		"events", events, "sessions", sessions, "unreadableSegments", skipped, "took", took)
+		"events", events, "sessions", sessions, "incompleteSegments", incomplete, "took", took)
 }

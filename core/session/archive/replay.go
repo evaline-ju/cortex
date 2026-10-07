@@ -12,8 +12,7 @@ import (
 
 // ReplaySince calls fn for every archived event at or after cutoff that is not a tunnel row,
 // stamped with the id its session has now. Order is per segment in seq order; segments and
-// sessions come in any order, so a caller that needs time order sorts what it collects. It
-// reports how many segments could not be read; the rest still replay.
+// sessions come in any order, so a caller that needs time order sorts what it collects.
 //
 // FOR STARTUP, BEFORE ANY LISTENER. It reads the index as it stands when called. Called before
 // the store serves traffic, it sees exactly what earlier processes wrote, since a process never
@@ -25,24 +24,27 @@ import (
 // event (see usage.ReplayCopy).
 //
 // It returns ctx.Err() as soon as ctx is done, checked between events, so a deadline bounds it.
-func (a *Archive) ReplaySince(ctx context.Context, cutoff time.Time, fn func(sessionID string, e *pipeline.SessionEvent)) (skipped int, err error) {
-	type source struct{ id, path string }
+func (a *Archive) ReplaySince(ctx context.Context, cutoff time.Time, fn func(sessionID string, e *pipeline.SessionEvent)) (incomplete int, err error) {
+	type source struct {
+		id, path string
+		open     bool
+	}
 	var srcs []source
 	a.idxMu.RLock()
 	for id, e := range a.index {
-		for _, seg := range e.segments {
+		for i, seg := range e.segments {
 			if seg.Events > 0 && !seg.LastWrite.Before(cutoff) {
-				srcs = append(srcs, source{id, filepath.Join(e.dir, seg.File)})
+				srcs = append(srcs, source{id, filepath.Join(e.dir, seg.File), e.open && i == len(e.segments)-1})
 			}
 		}
 	}
 	a.idxMu.RUnlock()
 	for _, src := range srcs {
 		if err := ctx.Err(); err != nil {
-			return skipped, err
+			return incomplete, err
 		}
 		var stop error
-		_, rerr := readSegment(src.path, func(ev *pipeline.SessionEvent) bool {
+		truncated, rerr := readSegment(src.path, func(ev *pipeline.SessionEvent) bool {
 			if stop = ctx.Err(); stop != nil {
 				return false
 			}
@@ -55,10 +57,12 @@ func (a *Archive) ReplaySince(ctx context.Context, cutoff time.Time, fn func(ses
 		})
 		switch {
 		case stop != nil:
-			return skipped, stop
+			return incomplete, stop
 		case rerr != nil && !errors.Is(rerr, fs.ErrNotExist):
-			skipped++ // a segment pruned or renamed since the snapshot is ErrNotExist, and not a loss
+			incomplete++ // a segment pruned or renamed since the snapshot is ErrNotExist, and not a loss
+		case truncated && !src.open:
+			incomplete++
 		}
 	}
-	return skipped, nil
+	return incomplete, nil
 }
