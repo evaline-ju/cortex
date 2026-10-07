@@ -239,16 +239,15 @@ as a literal shell pipe does.
       triggering commit, reversing the round-2 fix. The round-2 reasoning
       didn't hold up: unpinning doesn't make either motivating re-run case
       pass (an old release re-run still fails, just later and less clearly —
-      at the no-op leg's string match instead of at checkout), a GitHub
-      Actions re-run reuses the original event payload rather than
-      re-resolving `main`'s current tip, and running main's bleeding-edge
-      script against an older release's binary is an active hazard, not just
-      a missed opportunity — it already happened once, live, between this
-      PR's own reviews (see the `assert_healthy` conflict below). Pinning
-      means a release old enough to predate this script can't be
-      smoke-tested by re-running its workflow; accepted, since those
-      releases already shipped and the alternative breaks the common case
-      (every release going forward) to partially help the rare one.
+      at the no-op leg's string match instead of at checkout), and running
+      main's bleeding-edge script against an older release's binary is an
+      active hazard, not just a missed opportunity: main's script asserts
+      the no-op leg's `cortex <version> is installed and healthy.`, which
+      `agentop setup` prints and which a release old enough (e.g. `v0.8.1`)
+      predates. Pinning means a release old enough to predate this script
+      can't be smoke-tested by re-running its workflow; accepted, since
+      those releases already shipped and the alternative breaks the common
+      case (every release going forward) to partially help the rare one.
 - [x] Fix (review, round 4): a separate, already-merged PR (#1292) changed
       `agentop service status`'s healthy-wording from `healthy: <url>` to
       `Cortex is healthy according to <url>` and landed directly on main

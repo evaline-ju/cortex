@@ -291,11 +291,11 @@ log "Testing ${TAG} (upgrading from: ${OLDER_TAG:-none found; first release})"
 # alias" and "No compatibility code for on-disk state either" (see
 # docs/superpowers/specs/2026-09-30-abctl-to-agentop-rename-design.md). Not
 # actually reachable in practice: the workflow's checkout is pinned to TAG's
-# own commit, and TAG=v0.8.0 is itself old enough to predate this script
-# (confirmed via the GitHub API: 404 for this file at that commit) — a run
-# testing v0.8.0 fails at "sh: can't open scripts/release_smoke_test_linux.sh"
-# before any of this executes. Kept rather than deleted: a future release old
-# enough to have this script but still pre-rename would reach here for real.
+# own commit, and TAG=v0.8.0 predates this script — a run testing v0.8.0
+# fails at "sh: 0: cannot open scripts/release_smoke_test_linux.sh: No such
+# file" (dash's exact wording, checked under ubuntu:24.04) before any of
+# this executes. Kept rather than deleted: a future release old enough to
+# have this script but still pre-rename would reach here for real.
 INSTALL_TAG="${OLDER_TAG:-${TAG}}"
 log "Fresh install: ${INSTALL_TAG}"
 install_cortex "${INSTALL_TAG}"
