@@ -335,8 +335,10 @@ func TestReverseProxy_BufferedResponseToStreamRequest_ParsesTheEnvelope(t *testi
 
 // TestReverseProxy_StreamedUnparsedEndpoint_CoverageBoundary states, through the real
 // listener, exactly how far the "settle every path" fix reaches on a STREAMED response to
-// an endpoint the parser cannot read — /v1/responses, /v1/complete, an Azure deployment
-// path, anything off the dialect list.
+// an endpoint the parser cannot read — /v1/embeddings, /v1/rerank, an Azure deployment
+// path, anything off the dialect list. (/v1/responses used to be this test's example until
+// the inference-parser learned the Responses API dialect — see dialect_test.go's
+// TestDialectFor — so it moved to a path that is still genuinely off the list.)
 //
 // The dispatch is path-agnostic: the extension is nil, the terminal frame settles, and
 // what happens next is decided by the cost header alone. So coverage is exactly "did the
@@ -390,9 +392,9 @@ func TestReverseProxy_StreamedUnparsedEndpoint_CoverageBoundary(t *testing.T) {
 			proxy := httptest.NewServer(srv.Handler())
 			defer proxy.Close()
 
-			// /v1/responses is off the parser's dialect list, so Extensions.Inference stays
+			// /v1/embeddings is off the parser's dialect list, so Extensions.Inference stays
 			// nil and this is the unparsed-endpoint path.
-			postThrough(t, proxy.URL, "/v1/responses", `{"model":"gpt-4o","input":"hi","stream":true}`)
+			postThrough(t, proxy.URL, "/v1/embeddings", `{"model":"gpt-4o","input":"hi"}`)
 
 			settled, loaded, _, _, _ := probe.snapshotCost()
 			if !loaded {
