@@ -425,6 +425,75 @@ func TestUsageStackedChart_FitsTheChartBudget(t *testing.T) {
 	}
 }
 
+// TestUsageStackedChart_LongLabelsWrapLegend covers the wrapping path the sibling
+// test above misses: its "200"/"429"/"500" fit one legend line at every width,
+// matching stackedChartFloor's lower bound. Model names wrap to 2+ lines, so a
+// floor stuck at the minimum let the caption overrun the budget.
+//
+// Fixtures: three names wrap to 2 legend lines at w≤80 (frame=16); five names
+// wrap to 3 at w≤80 (frame=17). The max-lines check pins the arithmetic; the
+// caption-present check pins whether the gate took the slot.
+func TestUsageStackedChart_LongLabelsWrapLegend(t *testing.T) {
+	threeNames := func(i int) map[string]int64 {
+		return map[string]int64{
+			"claude-3-5-sonnet-20241022": int64(100 * (i + 1)),
+			"gpt-4o-2024-11-20":          int64(50 * (i + 1)),
+			"gemini-1.5-pro-002":         int64(20 * (i + 1)),
+		}
+	}
+	fiveNames := func(i int) map[string]int64 {
+		m := threeNames(i)
+		m["llama-3.1-70b-instruct"] = int64(10 * (i + 1))
+		m["mistral-large-2411"] = int64(5 * (i + 1))
+		return m
+	}
+	snapFor := func(fn func(int) map[string]int64) *usage.Snapshot {
+		per := make([]map[string]int64, 10)
+		for i := range per {
+			per[i] = fn(i)
+		}
+		return &usage.Snapshot{Window: "today", BucketSeconds: 60, Group: usage.GroupModel,
+			Buckets: mkSeriesBuckets(per)}
+	}
+	three, five := snapFor(threeNames), snapFor(fiveNames)
+	hasCaption := func(lines []string) bool {
+		return len(lines) > 0 && strings.TrimSpace(stripANSI(lines[0])) == "tok"
+	}
+
+	for _, tc := range []struct {
+		name          string
+		snap          *usage.Snapshot
+		width, budget int
+		maxLines      int
+		wantCaption   bool
+	}{
+		// Three names: frame = barChartFloor(13) + blank + 2-line legend = 16.
+		{"3 names w=66 budget=frame", three, 66, 16, 16, false},
+		{"3 names w=66 budget=frame+1", three, 66, 17, 17, true},
+		{"3 names w=80 budget=frame", three, 80, 16, 16, false},
+		// Five names: 3-line legend at w≤80, frame=17.
+		{"5 names w=66 budget=frame", five, 66, 17, 17, false},
+		{"5 names w=66 budget=frame+1", five, 66, 18, 18, true},
+		{"5 names w=80 budget=frame", five, 80, 17, 17, false},
+		// Wide terminal: three names fit one legend line, frame=15.
+		{"3 names w=100 budget=frame", three, 100, 15, 15, false},
+		{"3 names w=100 budget=frame+1", three, 100, 16, 16, true},
+		// Below axisCaptionWidth: never captions, regardless of budget.
+		{"below axisCaptionWidth", three, 65, 20, 16, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := renderUsageChart(tc.snap, metricTokens, usage.GroupModel, tc.width, tc.budget)
+			if len(lines) > tc.maxLines {
+				t.Errorf("%d rows, want ≤%d:\n%s", len(lines), tc.maxLines,
+					stripANSI(strings.Join(lines, "\n")))
+			}
+			if got := hasCaption(lines); got != tc.wantCaption {
+				t.Errorf("caption present = %v, want %v", got, tc.wantCaption)
+			}
+		})
+	}
+}
+
 // TestUsagePane_CaptionCostsNoRowsAtAnyFitSize is the case this branch actually broke,
 // asserted on the COMPOSED view rather than on the chart alone.
 //

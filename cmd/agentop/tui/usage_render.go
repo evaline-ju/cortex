@@ -189,8 +189,9 @@ const axisCaptionWidth = 66
 const (
 	// barChartFloor: ten plot rows plus the axis rule, the time labels and the value row.
 	barChartFloor = plotRows + 3
-	// stackedChartFloor: the same, plus the blank separator and at least one legend line.
-	// renderLegend emits one line per wrap and never zero, so one is its minimum.
+	// stackedChartFloor is the stacked frame's MINIMUM height: bar frame + blank
+	// separator + one legend line (renderLegend's minimum). The caption gate
+	// uses the actual legend height — see renderStackedBarsIn's `frameFloor`.
 	stackedChartFloor = barChartFloor + 2
 )
 

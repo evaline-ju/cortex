@@ -264,8 +264,14 @@ func renderStackedBarsIn(buckets []usage.Bucket, m usageMetric, group usage.Grou
 	// same thing in every bucket and in the legend.
 	letters := assignLetters(legendSeries)
 
-	out := make([]string, 0, plotRows+5)
-	if caption := axisCaptionIn(m, width, height, stackedChartFloor, unit); caption != "" {
+	// Render the legend first so the caption gate sees its real line count:
+	// renderLegendIn wraps at narrow widths (long model names), and
+	// stackedChartFloor's one-line lower bound let the caption overrun the pane.
+	legend := renderLegendIn(legendSeries, group, m, letters, rank, width, unit)
+	frameFloor := barChartFloor + 1 + len(legend)
+
+	out := make([]string, 0, plotRows+4+len(legend))
+	if caption := axisCaptionIn(m, width, height, frameFloor, unit); caption != "" {
 		out = append(out, caption)
 	}
 	lastAxisLabel := ""
@@ -296,7 +302,7 @@ func renderStackedBarsIn(buckets []usage.Bucket, m usageMetric, group usage.Grou
 	out = append(out, renderTimeLabels(buckets))
 	out = append(out, renderValues(buckets, m, unit))
 	out = append(out, "")
-	out = append(out, renderLegendIn(legendSeries, group, m, letters, rank, width, unit)...)
+	out = append(out, legend...)
 	return out
 }
 
