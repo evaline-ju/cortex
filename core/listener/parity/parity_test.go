@@ -4,6 +4,8 @@
 package parity
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -280,6 +282,157 @@ func TestParity_OutboundHeaderOnlyResponse(t *testing.T) {
 	assertParity(t, f, pipeline.SessionResponse, outboundListeners)
 }
 
+// TestParity_RequestBodyMutation: a plugin that rewrites the request body
+// must put ITS bytes — not the client's — on the wire to the upstream, with a
+// Content-Length that agrees with them, on every deployment shape.
+//
+// The suite could compare plugin-visible bodies before this (ReadsBody) but
+// never the bytes a listener forwarded, and the forwarding paths have nothing
+// in common: the proxies swap Request.Body and re-stamp the header in Go,
+// extproc returns an Envoy BodyMutation proto with a content-length
+// SetHeaders entry beside it. A rewrite dropped on one of them is silent in
+// every direction — the plugin's SetBody returns, the modify Invocation and
+// the body-mutation event are recorded identically on both listeners, and the
+// upstream simply acts on the original request. tool-prune ships on this
+// contract today, so "the oversized tool manifest was pruned" and "the
+// upstream received the pruned manifest" were two different claims and only
+// the first one was tested here.
+//
+// Three things are pinned together, and the combination is the point:
+//
+//   - /req-body is the ORIGINAL body, proving the plugin was handed the
+//     client's bytes rather than its own.
+//   - body-mutation/event is the framework's own account of the rewrite,
+//     asserted as exact JSON including both digests, so a listener that
+//     publishes a mutation it did not perform disagrees with the wire.
+//   - expectedUpstream is the rewrite as the upstream actually received it.
+//
+// Asserting the wire alone would pass for a listener that forwarded correct
+// bytes under a stale length; asserting the event alone is what already
+// passed while the question was open.
+func TestParity_RequestBodyMutation(t *testing.T) {
+	reqBody := []byte(`{"prompt":"hello","tools":["alpha","beta","gamma"]}`)
+	mutated := []byte(`{"prompt":"hello","tools":["alpha"]}`)
+	f := fixture{
+		name:      "request-body-mutation",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginA, spyConfig{
+			RecordRequestBody: true,
+			MutateRequestBody: mutated,
+		})},
+		method:         "POST",
+		path:           "/parity/mutate",
+		reqBody:        reqBody,
+		upstreamStatus: 200,
+		upstreamBody:   []byte(`{"reply":"ok"}`),
+		expectedPluginEvents: map[string]string{
+			spyPluginA + bodyReqStrippedSuffix: jsonOf(bodyObservation{Body: string(reqBody)}),
+			bodyMutationKey:                    bodyMutationJSON(spyPluginA, reqBody, mutated),
+		},
+		expectedUpstream: &upstreamSummary{
+			Body:          string(mutated),
+			ContentLength: fmt.Sprintf("%d", len(mutated)),
+		},
+	}
+	// SessionRequest, not SessionResponse: the rewrite is a request-phase
+	// event, so this is the phase that carries both the modify Invocation and
+	// the body-mutation payload. On the response event they are out of scope
+	// and the fixture would assert the rewrite against the half of the
+	// timeline that never saw it.
+	assertParity(t, f, pipeline.SessionRequest, inboundListeners)
+}
+
+// TestParity_OutboundRequestBodyMutation is the egress mirror, and the shape
+// that actually runs in production: tool-prune and context-guru both sit on
+// the outbound pipeline, rewriting an agent's request on its way to the model
+// gateway. extproc vs forwardproxy here is Kubernetes envoy-sidecar vs the
+// laptop proxy-sidecar — the two shapes a prune has to behave the same in.
+func TestParity_OutboundRequestBodyMutation(t *testing.T) {
+	reqBody := []byte(`{"model":"claude","tools":["alpha","beta","gamma"]}`)
+	mutated := []byte(`{"model":"claude","tools":["alpha"]}`)
+	f := fixture{
+		name:      "outbound-request-body-mutation",
+		direction: pipeline.Outbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginA, spyConfig{
+			RecordRequestBody: true,
+			MutateRequestBody: mutated,
+		})},
+		method:         "POST",
+		path:           "/parity/mutate",
+		reqBody:        reqBody,
+		upstreamStatus: 200,
+		upstreamBody:   []byte(`{"reply":"ok"}`),
+		expectedPluginEvents: map[string]string{
+			spyPluginA + bodyReqStrippedSuffix: jsonOf(bodyObservation{Body: string(reqBody)}),
+			bodyMutationKey:                    bodyMutationJSON(spyPluginA, reqBody, mutated),
+		},
+		expectedUpstream: &upstreamSummary{
+			Body:          string(mutated),
+			ContentLength: fmt.Sprintf("%d", len(mutated)),
+		},
+	}
+	assertParity(t, f, pipeline.SessionRequest, outboundListeners)
+}
+
+// TestParity_RequestBodyMutationToEmpty: a rewrite DOWN TO ZERO BYTES, which
+// is a distinct wire shape rather than an edge case for its own sake — it is
+// what a truncating plugin emits at its limit, and it is the one mutation that
+// cannot be told apart from "no mutation happened" by looking at the body
+// alone. Both halves have to carry it: zero bytes AND a Content-Length of 0,
+// against a request that arrived with a body. A listener that treats an empty
+// replacement as nothing to do leaves the original body and its original
+// length on the wire, and every other assertion in this suite still passes.
+func TestParity_RequestBodyMutationToEmpty(t *testing.T) {
+	reqBody := []byte(`{"prompt":"hello"}`)
+	mutated := []byte{}
+	f := fixture{
+		name:      "request-body-mutation-to-empty",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginA, spyConfig{
+			RecordRequestBody: true,
+			MutateRequestBody: mutated,
+		})},
+		method:         "POST",
+		path:           "/parity/mutate-empty",
+		reqBody:        reqBody,
+		upstreamStatus: 200,
+		upstreamBody:   []byte(`{"reply":"ok"}`),
+		expectedPluginEvents: map[string]string{
+			spyPluginA + bodyReqStrippedSuffix: jsonOf(bodyObservation{Body: string(reqBody)}),
+			bodyMutationKey:                    bodyMutationJSON(spyPluginA, reqBody, mutated),
+		},
+		expectedUpstream: &upstreamSummary{Body: "", ContentLength: "0"},
+	}
+	assertParity(t, f, pipeline.SessionRequest, inboundListeners)
+}
+
+// bodyMutationKey is the SessionEvent.Plugins key the framework publishes a
+// body rewrite under. Not a plugin name: pipeline.Context.emitBodyMutation
+// uses a fixed synthetic prefix precisely so the key survives plugin renames,
+// and spelling it once here keeps the fixtures honest about that.
+const bodyMutationKey = "body-mutation"
+
+// bodyMutationJSON is the exact payload the framework publishes for one
+// rewrite. Built here rather than copied from pipeline's unexported
+// bodyMutationEvent struct, which means the field NAMES are asserted too — an
+// operator dashboard reads these keys, so a rename is a breaking change and
+// should fail something.
+//
+// The digests are recomputed from the fixture's own bytes, so they assert the
+// framework hashed the bodies it claims to have hashed. The point of carrying
+// them at all is that the raw bodies must NOT travel here: the session API has
+// no auth, so a before/after digest is how a rewrite stays auditable without
+// publishing whatever credential the body held.
+func bodyMutationJSON(plugin string, before, after []byte) string {
+	return fmt.Sprintf(`{"phase":"request","plugin":%q,"length_before":%d,"length_after":%d,"sha256_before":%q,"sha256_after":%q}`,
+		plugin, len(before), len(after), sha256Hex(before), sha256Hex(after))
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // TestParity_InboundRequestBodyOverflow: a body exceeding both
 // listeners' 1 MiB cap must be rejected before the pipeline runs, with
 // the same wire status.
@@ -435,6 +588,14 @@ func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, list
 		if f.expectDuration && !g.observed.HasDuration {
 			t.Errorf("fixture %q listener %s: event carried no Duration; the request completed, so it has one", f.name, g.listener)
 		}
+		if f.expectedUpstream != nil {
+			switch {
+			case g.observed.Upstream == nil:
+				t.Errorf("fixture %q listener %s: nothing reached the upstream, so the request the fixture pins was never forwarded", f.name, g.listener)
+			case !reflect.DeepEqual(g.observed.Upstream, f.expectedUpstream):
+				t.Errorf("fixture %q listener %s: upstream received\n  got:  %s\n  want: %s", f.name, g.listener, jsonPretty(g.observed.Upstream), jsonPretty(f.expectedUpstream))
+			}
+		}
 	}
 
 	// Pairwise compare against the first listener. All observations must
@@ -486,6 +647,15 @@ func observationDiff(a, b *observation) string {
 	}
 	if a.HasDuration != b.HasDuration {
 		return fmt.Sprintf("HasDuration: %v vs %v", a.HasDuration, b.HasDuration)
+	}
+	// One listener putting a plugin's rewrite on the wire while the other
+	// forwards the original bytes — the split case of the gap
+	// fixture.expectedUpstream covers absolutely, and the one no session-event
+	// field can show, since both listeners record the same successful modify
+	// Invocation either way. Nil on both legs when a fixture made no upstream
+	// claim, so this is inert for every fixture that did not opt in.
+	if !reflect.DeepEqual(a.Upstream, b.Upstream) {
+		return "Upstream: " + jsonPretty(a.Upstream) + " vs " + jsonPretty(b.Upstream)
 	}
 	// One listener reporting token counts while another does not. Worth saying what
 	// this check CANNOT do, because that is how the gap it was added for survived: two

@@ -58,6 +58,23 @@ type spyConfig struct {
 	// SessionEvent.Plugins[<name>/req-body].
 	RecordRequestBody bool `json:"record_request_body"`
 
+	// MutateRequestBody, when non-nil, is the exact byte string the spy
+	// hands to pctx.SetBody at OnRequest — making it stand in for
+	// tool-prune, which is the in-tree plugin whose whole job is this and
+	// whose cross-shape behaviour had no fixture here.
+	//
+	// Non-nil ALSO flips PluginCapabilities.WritesRequestBody (which
+	// Normalize promotes to ReadsBody, so the body gets buffered without
+	// ReadsBody being set too). Deriving the capability from the knob
+	// rather than giving it its own bool keeps the two from drifting
+	// apart in a fixture: a spy that mutates always declares it.
+	//
+	// An EMPTY-but-non-nil value is meaningful and reachable — []byte{}
+	// rewrites the request to a zero-length body, which is a different
+	// wire shape from a body-less request and the one a truncating
+	// plugin produces at its limit.
+	MutateRequestBody []byte `json:"mutate_request_body"`
+
 	// RecordResponseFrames publishes accumulated frame bytes + terminal
 	// count at SessionEvent.Plugins[<name>/resp-body]. Only meaningful
 	// on the spyStreamingPlugin variant.
@@ -81,8 +98,9 @@ func (s *spyPlugin) Name() string { return s.name }
 
 func (s *spyPlugin) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		RequiresLater: s.cfg.RequiresLater,
-		ReadsBody:     s.cfg.ReadsBody,
+		RequiresLater:     s.cfg.RequiresLater,
+		ReadsBody:         s.cfg.ReadsBody,
+		WritesRequestBody: s.cfg.MutateRequestBody != nil,
 	}
 }
 
@@ -96,6 +114,14 @@ func (s *spyPlugin) Configure(raw json.RawMessage) error {
 func (s *spyPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	if s.cfg.RecordRequestBody {
 		s.publish(pctx, bodyReqStrippedSuffix+pipeline.PluginEventSuffix, bodyObservation{Body: string(pctx.Body)})
+	}
+	// Rewrite AFTER recording, so a fixture can pin both halves of the
+	// mutation independently: /req-body is what the listener handed the
+	// plugin, and the upstream capture is what the listener sent on. Read
+	// the other way round the two would be the same assertion twice, and a
+	// listener that forwarded the ORIGINAL bytes would still look right.
+	if s.cfg.MutateRequestBody != nil {
+		pctx.SetBody(s.cfg.MutateRequestBody)
 	}
 	// Authenticate and emit before deciding to deny: both must land on the
 	// denial event, since a denial is exactly when an operator needs to
