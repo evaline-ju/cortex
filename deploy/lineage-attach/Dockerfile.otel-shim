@@ -67,8 +67,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.24@sha256:816fdce3387ed2142e37d2e56e1b1b97c
 # `--system --break-system-packages` lets the install land in a non-venv
 # python too; both flags are inert when --python is a venv.
 ARG OTEL_CONTRIB_VERSION=0.65b0
-RUN pin="$("${VENV_PYTHON}" -c 'from importlib.metadata import version; v = version("opentelemetry-api"); \
-        assert tuple(map(int, v.split(".")[:2])) >= (1, 34); print("opentelemetry-api==" + v)' 2>/dev/null)" \
+# The floor is an expression, not an `assert`: RUN inherits the base image's
+# ENV, and PYTHONOPTIMIZE strips asserts.
+RUN pin="$("${VENV_PYTHON}" -c 'from importlib.metadata import version; import sys; v = version("opentelemetry-api"); \
+        tuple(map(int, v.split(".")[:2])) >= (1, 34) or sys.exit(1); print("opentelemetry-api==" + v)' 2>/dev/null)" \
       || pin="opentelemetry-distro==${OTEL_CONTRIB_VERSION}"; \
     echo "the bake is pinned to ${pin}"; \
     uv pip install --no-cache --python "${VENV_PYTHON}" --system --break-system-packages "${pin}" \
@@ -81,7 +83,7 @@ RUN pin="$("${VENV_PYTHON}" -c 'from importlib.metadata import version; v = vers
       opentelemetry-instrumentation-aiohttp-client \
       opentelemetry-instrumentation-urllib3 \
       opentelemetry-instrumentation-threading \
-      || { echo "REFUSING: the shim could not be installed alongside ${pin} (uv's error is above; if it found no solution, no contrib release is paired with that version)" >&2; exit 1; }
+      || { echo "REFUSING: the shim could not be installed alongside ${pin} (uv's error is above; RECIPE step 2 reads it)" >&2; exit 1; }
 # The install resolves into the app's OWN environment, so it may move a package
 # an app dependency pins (wrapt, deprecated, typing-extensions are the usual
 # suspects) — and the attestations import only OpenTelemetry, never the app.
