@@ -41,6 +41,14 @@ const (
 	// superviseHealthyRun is how long a child must survive for its run to count as
 	// healthy, resetting the backoff.
 	superviseHealthyRun = 10 * time.Second
+	// superviseStopGrace is how long a stop waits for the proxy before killing it. It must
+	// fit inside launchd's exit timeout — 5s, pinned as ExitTimeOut in the plist agentop
+	// writes — because launchd SIGKILLs the supervisor when that runs out and only SIGTERMs
+	// the rest of the process group, which a proxy that has already taken its one SIGTERM
+	// ignores. Waiting 20s here is how a restart left the old proxy orphaned on its ports
+	// while the new one crash-looped on the bind. A local install's proxy stops in well
+	// under a second (it closes rather than drains), so this only ever ends a stuck one.
+	superviseStopGrace = 3 * time.Second
 )
 
 // runSupervisor re-executes this binary without the supervise flag and restarts it
@@ -87,9 +95,8 @@ func runSupervisor(flagName string) error {
 			_ = cmd.Process.Signal(syscall.SIGTERM) //nolint:errcheck
 			select {
 			case <-done:
-			case <-time.After(20 * time.Second):
-				// Longer than the proxy's own 15s shutdown deadline, then insist.
-				slog.Warn("supervisor: proxy did not exit in 20s; killing it")
+			case <-time.After(superviseStopGrace):
+				slog.Warn("supervisor: proxy did not exit in time; killing it", "waited", superviseStopGrace)
 				_ = cmd.Process.Kill() //nolint:errcheck
 				<-done
 			}

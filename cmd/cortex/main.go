@@ -545,6 +545,19 @@ func main() {
 	// process would run with an empty registry until the first successful reload.
 	applyPricing(cfg)
 
+	// Every port, before the plugins start and before the ledger and the session archive open:
+	// a port another proxy holds then stops this one before it has touched their files. See
+	// listeners.go. log.Fatalf rather than fatalf is right here and only here — nothing is open
+	// yet for fatalf to flush.
+	plan, perr := listenerPlan(cfg, localInstall)
+	if perr != nil {
+		log.Fatalf("%v", perr)
+	}
+	listeners, lerr := reserveListeners(plan)
+	if lerr != nil {
+		log.Fatalf("%v — is another cortex already running? Nothing on disk was opened", lerr)
+	}
+
 	initCtx, initCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer initCancel()
 	if err := inboundPipeline.Start(initCtx); err != nil {
@@ -885,11 +898,8 @@ func main() {
 			if localInstall {
 				slog.Warn("local install: transparent inbound listener not started (no iptables to REDIRECT to it)")
 			} else {
-				rpHTTP, rerr := bootstrap.StartTransparentInboundServer("transparent-inbound", rpSrv, cfg.Listener.TransparentInboundAddr)
-				if rerr != nil {
-					fatalf("transparent-inbound listen: %v", rerr)
-				}
-				httpServers = append(httpServers, rpHTTP)
+				httpServers = append(httpServers, bootstrap.ServeTransparentInboundServer(
+					"transparent-inbound", rpSrv, listeners.takeTCP("transparent-inbound")))
 			}
 		} else {
 			rpSrv, rerr := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
@@ -897,11 +907,8 @@ func main() {
 				fatalf("creating reverse proxy: %v", rerr)
 			}
 			rpSrv.Shared = sharedStore
-			rpHTTP, rerr := bootstrap.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
-			if rerr != nil {
-				fatalf("reverse-proxy listen: %v", rerr)
-			}
-			httpServers = append(httpServers, rpHTTP)
+			httpServers = append(httpServers, bootstrap.ServeReverseProxyServer(
+				"reverse-proxy", rpSrv, listeners.take("reverse-proxy")))
 		}
 	}
 
@@ -950,12 +957,8 @@ func main() {
 				slog.Info("process attribution on: header-less requests are filed by the process that sent them")
 			}
 		}
-		fpHTTP, herr := bootstrap.StartHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr,
-			bootstrap.WithConnContext(fpSrv.ConnContext))
-		if herr != nil {
-			fatalf("forward-proxy listen: %v", herr)
-		}
-		httpServers = append(httpServers, fpHTTP)
+		httpServers = append(httpServers, bootstrap.ServeHTTPServer("forward-proxy", fpSrv.Handler(),
+			listeners.take("forward-proxy"), bootstrap.WithConnContext(fpSrv.ConnContext)))
 
 		// Outbound transparent listener (enforce-redirect mode). It shares the
 		// forward proxy's outbound pipeline via HandleTransparentConn, so explicit
@@ -963,8 +966,8 @@ func main() {
 		// tunnelled identically. Closed explicitly on shutdown (not an *http.Server).
 		// Skipped for a local install, --local or not: no iptables there, so nothing
 		// is ever REDIRECTed to it.
-		if !localInstall {
-			transparentLn = startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
+		if !localInstall && cfg.Listener.TransparentProxyAddr != "" {
+			transparentLn = startTransparentProxy(fpSrv, listeners.takeTCP("transparent-proxy"))
 		}
 	}
 
@@ -975,10 +978,8 @@ func main() {
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv, statErr := bootstrap.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler(), pricingRegistry.Handler(), cfg.Stats.StatsAddress)
-	if statErr != nil {
-		fatalf("stat server listen: %v", statErr)
-	}
+	statSrv := bootstrap.ServeStatServer(rld.ConfigProvider(), statsProvider, rld.Handler(), pricingRegistry.Handler(),
+		listeners.take("stats"))
 
 	// Warm the plugin catalog at boot so any factory that violates the
 	// constructor contract surfaces here rather than on the first
@@ -1002,10 +1003,11 @@ func main() {
 			// binds loopback-only, and its one user owns the history. See sessionapi.handleClear.
 			sessionapi.WithClearAllowed(cfg.Listener.BindLoopbackOnly),
 		)
+		sessionLn := listeners.take("session-api")
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",
 				"addr", cfg.Listener.SessionAPIAddr)
-			if err := sessionAPISrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := sessionAPISrv.Server().Serve(sessionLn); err != nil && err != http.ErrServerClosed {
 				fatalf("session API: %v", err)
 			}
 		}()
@@ -1013,29 +1015,60 @@ func main() {
 
 	slog.Info("cortex starting", "version", version, "mode", cfg.Mode, "logLevel", bootstrap.LogLevel().String())
 
-	healthSrv, healthErr := bootstrap.StartHealthServer(inboundH, outboundH, cfg.Listener.HealthAddr)
-	if healthErr != nil {
-		fatalf("health server listen: %v", healthErr)
+	healthSrv := bootstrap.ServeHealthServer(inboundH, outboundH, listeners.take("health"))
+	if err := listeners.claimed(); err != nil {
+		fatalf("%v", err)
 	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-sigCh
-	slog.Info("shutting down", "signal", sig)
+	stopping := time.Now()
+	// A pod drains: endpoint removal propagates after SIGTERM, so callers are still routed
+	// here while it runs. A local install does not, because what it is stopping for is a
+	// restart and its clients retry. Draining there made every restart wait out the longest
+	// open request — and one stream that never ends held it to the 15s deadline, past
+	// launchd's 5s exit timeout, which orphaned this process on its ports. It never covered
+	// the traffic that matters either: a bridged HTTPS tunnel is hijacked, and Shutdown does
+	// not track hijacked connections, so only plain-HTTP requests were ever waited for.
+	drain := !localInstall
+	slog.Info("shutting down", "signal", sig, "drain", drain)
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Without a drain only the plugins' Stop is left to bound, and the whole stop has to fit
+	// inside the supervisor's superviseStopGrace.
+	shutdownBudget := 15 * time.Second
+	if !drain {
+		shutdownBudget = time.Second
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownBudget)
 	defer shutdownCancel()
 
-	for _, srv := range httpServers {
-		srv.Shutdown(shutdownCtx)
-	}
-	if transparentLn != nil {
-		_ = transparentLn.Close()
-	}
-	statSrv.Shutdown(shutdownCtx)
-	healthSrv.Shutdown(shutdownCtx)
-	if sessionAPISrv != nil {
-		sessionAPISrv.Shutdown(shutdownCtx)
+	if drain {
+		for _, srv := range httpServers {
+			srv.Shutdown(shutdownCtx)
+		}
+		if transparentLn != nil {
+			_ = transparentLn.Close()
+		}
+		statSrv.Shutdown(shutdownCtx)
+		healthSrv.Shutdown(shutdownCtx)
+		if sessionAPISrv != nil {
+			sessionAPISrv.Shutdown(shutdownCtx)
+		}
+	} else {
+		// Every port first, so the proxy replacing this one can bind the moment it starts;
+		// the requests in flight are dropped with their connections.
+		for _, srv := range httpServers {
+			_ = srv.Close()
+		}
+		if transparentLn != nil {
+			_ = transparentLn.Close()
+		}
+		_ = statSrv.Close()
+		_ = healthSrv.Close()
+		if sessionAPISrv != nil {
+			_ = sessionAPISrv.Server().Close()
+		}
 	}
 	outboundPipeline.Stop(shutdownCtx)
 	inboundPipeline.Stop(shutdownCtx)
@@ -1069,29 +1102,18 @@ func main() {
 	if sessions != nil {
 		sessions.Close()
 	}
+	slog.Info("stopped", "took", time.Since(stopping).Round(time.Millisecond))
 }
 
-// startTransparentProxy binds the outbound transparent listener and serves it
-// in a goroutine, dispatching each REDIRECTed connection through the forward
-// proxy's outbound pipeline. Returns the listener (for shutdown), or nil when
-// addr is empty (transparent capture disabled). Bind failures are fatal —
-// enforce-redirect iptables would otherwise REDIRECT to a dead port and break
-// all egress silently.
-func startTransparentProxy(fp *forwardproxy.Server, addr string) *net.TCPListener {
-	if addr == "" {
-		return nil
-	}
-	la, err := net.ResolveTCPAddr("tcp", addr)
-	if err != nil {
-		fatalf("resolve transparent-proxy addr %q: %v", addr, err)
-	}
-	ln, err := net.ListenTCP("tcp", la)
-	if err != nil {
-		fatalf("transparent-proxy listen on %q: %v", addr, err)
-	}
+// startTransparentProxy serves the outbound transparent listener in a goroutine,
+// dispatching each REDIRECTed connection through the forward proxy's outbound
+// pipeline. Returns the listener (for shutdown). The bind is reserveListeners',
+// and its failure is fatal there — enforce-redirect iptables would otherwise
+// REDIRECT to a dead port and break all egress silently.
+func startTransparentProxy(fp *forwardproxy.Server, ln *net.TCPListener) *net.TCPListener {
 	srv := transparentproxy.NewServer(fp.HandleTransparentConn)
 	go func() {
-		slog.Info("transparent proxy listening", "addr", addr)
+		slog.Info("transparent proxy listening", "addr", ln.Addr().String())
 		if err := srv.Serve(ln); err != nil {
 			fatalf("transparent-proxy serve: %v", err)
 		}
