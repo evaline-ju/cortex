@@ -577,7 +577,15 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, tl *tunne
 		// declares WritesRequestBody (mutating a body we've already started
 		// forwarding is incompatible with streaming) — fall back to
 		// buffered with a warning log instead.
-		if (isEventStream(resp.Header.Get("Content-Type")) || isKnownMislabeledSSE(r.Host, r.URL.Path)) && resp.Body != nil {
+		// mislabeled is gated on 2xx: an error from this endpoint (we've seen 401, 405, 429
+		// in practice) still carries a plain JSON body like {"detail":"..."}. Routing that
+		// into the SSE path finds no "data:" lines, so sseframe.Reader emits nothing and the
+		// caller gets an empty body — losing the error detail Codex itself surfaces to the
+		// user. Confirmed on live traffic: before this gate, a 405 that used to arrive as
+		// `{"detail":"Method Not Allowed"}` arrived as the literal string "Unknown error"
+		// once isKnownMislabeledSSE started matching every status, not just success.
+		mislabeled := resp.StatusCode/100 == 2 && isKnownMislabeledSSE(r.Host, r.URL.Path)
+		if (isEventStream(resp.Header.Get("Content-Type")) || mislabeled) && resp.Body != nil {
 			if s.OutboundPipeline.WritesResponseBody() {
 				// A response mutator needs the whole response to rewrite it, so
 				// it can't stream — fall back to the buffered path with a warning.

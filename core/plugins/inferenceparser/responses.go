@@ -19,14 +19,22 @@ import (
 // lives under `input`, not `messages`, and a tool manifest can arrive as its
 // own input item (type "additional_tools") rather than a top-level `tools`
 // field — see responsesInputItem.
+//
+// Input is json.RawMessage rather than []responsesInputItem directly: the
+// documented API accepts input as EITHER that array OR a bare string (a
+// shorthand for one user message, the common one-shot usage shown in
+// OpenAI's own docs). Codex always sends the array form — this is a real
+// gap for the public endpoint that our one live sample never exercised, not
+// something confirmed on live traffic the way the rest of this file is. See
+// parseResponsesRequest for where the two shapes are told apart.
 type responsesRequest struct {
-	Model           string               `json:"model"`
-	Input           []responsesInputItem `json:"input"`
-	Stream          bool                 `json:"stream"`
-	ToolChoice      any                  `json:"tool_choice"`
-	Temperature     *float64             `json:"temperature"`
-	MaxOutputTokens *int                 `json:"max_output_tokens"`
-	TopP            *float64             `json:"top_p"`
+	Model           string          `json:"model"`
+	Input           json.RawMessage `json:"input"`
+	Stream          bool            `json:"stream"`
+	ToolChoice      any             `json:"tool_choice"`
+	Temperature     *float64        `json:"temperature"`
+	MaxOutputTokens *int            `json:"max_output_tokens"`
+	TopP            *float64        `json:"top_p"`
 }
 
 // responsesInputItem is one entry of a Responses API request's `input`
@@ -146,6 +154,21 @@ func flattenResponsesContent(raw json.RawMessage) string {
 	return ""
 }
 
+// maxDecodedRequestSize caps how large a zstd-decompressed request body is
+// allowed to grow to, independent of the wire-size cap the listener already
+// enforces (32 MiB as of this writing). zstd.NewReader's own default
+// (WithDecoderMaxMemory) is 64 GiB — a highly compressible body well within
+// the wire cap could otherwise decompress far past it. 64 MiB is generous
+// relative to any real request seen so far (a live Codex sample decompressed
+// to ~65 KB) while still bounding the worst case.
+const maxDecodedRequestSize = 64 << 20
+
+// requestZstd is a single decoder shared across requests rather than one
+// constructed per call. klauspost/compress/zstd documents DecodeAll as safe
+// to call concurrently on one Decoder — the size limit below applies to each
+// call independently, not to total memory across concurrent requests.
+var requestZstd, _ = zstd.NewReader(nil, zstd.WithDecoderMaxMemory(maxDecodedRequestSize))
+
 // maybeDecompressRequest returns body decompressed per the request's
 // Content-Encoding header, or body unchanged when the header names an
 // encoding this function doesn't handle, or isn't present at all.
@@ -155,21 +178,17 @@ func flattenResponsesContent(raw json.RawMessage) string {
 // body (every listener hands plugins the raw bytes it read off the wire), so
 // this is the one dialect among the three that needs its own decode step.
 //
-// A failed decompression (truncated body, or a header that lied) returns the
-// original compressed bytes rather than erroring: the caller's subsequent
-// json.Unmarshal then fails too, and the request is treated the same as any
-// other body this parser cannot read, rather than this function needing its
-// own error path every caller must thread through.
+// A failed decompression (truncated body, a header that lied, or a body
+// that would exceed maxDecodedRequestSize) returns the original compressed
+// bytes rather than erroring: the caller's subsequent json.Unmarshal then
+// fails too, and the request is treated the same as any other body this
+// parser cannot read, rather than this function needing its own error path
+// every caller must thread through.
 func maybeDecompressRequest(headers http.Header, body []byte) []byte {
 	if headers == nil || !strings.EqualFold(headers.Get("Content-Encoding"), "zstd") {
 		return body
 	}
-	dec, err := zstd.NewReader(nil)
-	if err != nil {
-		return body
-	}
-	defer dec.Close()
-	out, err := dec.DecodeAll(body, nil)
+	out, err := requestZstd.DecodeAll(body, nil)
 	if err != nil {
 		return body
 	}
@@ -178,9 +197,9 @@ func maybeDecompressRequest(headers http.Header, body []byte) []byte {
 
 // parseResponsesRequest builds an InferenceExtension from an OpenAI Responses
 // API request body. Returns nil for an empty or non-JSON body, or one
-// without an input array — the one thing every Responses API request
-// carries (see parseOpenAIRequest for why dialectFor's loose suffix match
-// needs this kind of body check as a backstop).
+// without a supported input value — the one thing every Responses API
+// request carries (see parseOpenAIRequest for why dialectFor's loose suffix
+// match needs this kind of body check as a backstop).
 func parseResponsesRequest(headers http.Header, body []byte) *pipeline.InferenceExtension {
 	body = maybeDecompressRequest(headers, body)
 	if len(body) == 0 {
@@ -190,7 +209,23 @@ func parseResponsesRequest(headers http.Header, body []byte) *pipeline.Inference
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil
 	}
-	if req.Input == nil {
+	// Input is either the documented array, or a bare string shorthand for one user
+	// message. Try the array first — the shape every live sample this file was built
+	// from actually sends — and fall back to the string form before giving up.
+	var input []responsesInputItem
+	if err := json.Unmarshal(req.Input, &input); err != nil {
+		var text string
+		if err := json.Unmarshal(req.Input, &text); err != nil {
+			return nil
+		}
+		input = []responsesInputItem{{
+			Type:         "message",
+			Role:         "user",
+			Content:      text,
+			ContentBytes: contentBytes(req.Input),
+		}}
+	}
+	if input == nil {
 		return nil
 	}
 	ext := &pipeline.InferenceExtension{
@@ -202,7 +237,7 @@ func parseResponsesRequest(headers http.Header, body []byte) *pipeline.Inference
 		ToolChoice:  req.ToolChoice,
 		IsAction:    true,
 	}
-	for _, item := range req.Input {
+	for _, item := range input {
 		if item.Type == "message" {
 			ext.Messages = append(ext.Messages, pipeline.InferenceMessage{
 				Role:         item.Role,
@@ -358,18 +393,25 @@ type responsesStreamEvent struct {
 	Response *struct {
 		Status string         `json:"status"`
 		Usage  responsesUsage `json:"usage"`
-	} `json:"response"` // response.completed's full snapshot
+	} `json:"response"` // the full snapshot on response.completed/incomplete/failed
 }
 
 // foldResponsesFrame folds one Responses API SSE event into the running
 // stream state. The completion accumulates from response.output_text.delta
-// events; usage and a best-effort finish reason arrive together on the
-// terminal response.completed event. Every other event type in the sequence
-// carries nothing this parser extracts and is silently ignored — not
-// unrecognized, just uninteresting. Unlike foldAnthropicFrame, an unknown
-// type is not logged here: the full event vocabulary was confirmed on live
-// traffic rather than inferred from docs, so anything outside it is more
-// likely a wire change worth its own look than routine.
+// events; usage and a best-effort finish reason arrive together on whichever
+// terminal event ends the stream — response.completed on the one live sample
+// this file was built from, plus the two other terminal events the published
+// schema documents: response.incomplete (hit a limit, was cancelled) and
+// response.failed (an upstream error). All three carry the same response
+// snapshot shape, so one case handles them identically; OpenAI's own
+// documented example for response.failed shows usage: null, so the
+// hasAny() guard below is what keeps a failure from asserting a zero usage
+// that was never reported. Every other event type in the sequence carries
+// nothing this parser extracts and is silently ignored — not unrecognized,
+// just uninteresting. Unlike foldAnthropicFrame, an unknown type is not
+// logged here: the full event vocabulary was confirmed on live traffic
+// rather than inferred from docs, so anything outside it is more likely a
+// wire change worth its own look than routine.
 func foldResponsesFrame(frame []byte, state *inferenceStreamState, ext *pipeline.InferenceExtension) {
 	var ev responsesStreamEvent
 	if err := json.Unmarshal(frame, &ev); err != nil {
@@ -382,7 +424,7 @@ func foldResponsesFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 		if ev.Delta != nil {
 			state.completion.WriteString(*ev.Delta)
 		}
-	case "response.completed":
+	case "response.completed", "response.incomplete", "response.failed":
 		if ev.Response == nil {
 			return
 		}

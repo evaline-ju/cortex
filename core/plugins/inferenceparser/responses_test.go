@@ -243,3 +243,83 @@ func TestInferenceParser_ResponsesAPI_NonStreamingResponse(t *testing.T) {
 		t.Errorf("TotalTokens = %d, want 11", ext.TotalTokens)
 	}
 }
+
+// Codex always sends `input` as an array, but the published schema also allows a bare
+// string as a shorthand for one user message — the common one-shot usage shown in
+// OpenAI's own docs. Pins that this shorthand still produces telemetry instead of
+// silently returning nil.
+func TestInferenceParser_ResponsesAPI_StringInput(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{
+		Path: "/v1/responses",
+		Body: []byte(`{"model": "gpt-6-luna", "input": "Tell me a joke"}`),
+	}
+	p.OnRequest(context.Background(), pctx)
+	ext := pctx.Extensions.Inference
+	if ext == nil {
+		t.Fatal("Extensions.Inference is nil — a string-valued input must still parse")
+	}
+	if len(ext.Messages) != 1 || ext.Messages[0].Role != "user" || ext.Messages[0].Content != "Tell me a joke" {
+		t.Errorf("Messages = %+v, want one user message \"Tell me a joke\"", ext.Messages)
+	}
+}
+
+// zstd.NewReader defaults to a 64 GiB decoded-size limit — far beyond the 32 MiB wire-size
+// cap the listener already enforces for the compressed body. Pins that a payload
+// decompressing past maxDecodedRequestSize is rejected (treated as unreadable, same as any
+// other body this parser can't use) rather than allowed to grow unbounded.
+func TestInferenceParser_ResponsesAPI_ZstdDecodeSizeCapped(t *testing.T) {
+	// A single repeated byte compresses to a tiny fraction of its decoded size, which is
+	// exactly the "small wire body, huge decoded body" shape the cap defends against.
+	huge := bytes.Repeat([]byte("a"), maxDecodedRequestSize+1)
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatalf("zstd.NewWriter: %v", err)
+	}
+	compressed := enc.EncodeAll(huge, nil)
+	if err := enc.Close(); err != nil {
+		t.Fatalf("enc.Close: %v", err)
+	}
+	t.Logf("huge body: %d bytes decoded, %d bytes compressed", len(huge), len(compressed))
+
+	out := maybeDecompressRequest(http.Header{"Content-Encoding": []string{"zstd"}}, compressed)
+	if len(out) == len(huge) {
+		t.Fatal("decompression succeeded past maxDecodedRequestSize — the cap did not apply")
+	}
+	// Rejected decompression falls back to the original (still-compressed) bytes per
+	// maybeDecompressRequest's documented contract.
+	if !bytes.Equal(out, compressed) {
+		t.Error("expected the original compressed bytes back when the decoded size cap is exceeded")
+	}
+}
+
+// response.incomplete and response.failed are documented terminal events, distinct from
+// response.completed, that this parser must also fold usage/status from — a request that
+// hits a token limit or fails outright must not silently report zero usage just because
+// our one live sample happened to end cleanly.
+func TestInferenceParser_ResponsesAPI_IncompleteEventFoldsUsage(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{Path: "/backend-api/codex/responses"}
+	pctx.Extensions.Inference = &pipeline.InferenceExtension{Model: "gpt-6-luna", Stream: true, IsAction: true}
+
+	frames := [][]byte{
+		[]byte(`{"type":"response.output_text.delta","delta":"partial"}`),
+		[]byte(`{"type":"response.incomplete","response":{"status":"incomplete",` +
+			`"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}`),
+	}
+	for _, f := range frames {
+		p.OnResponseFrame(context.Background(), pctx, f, false)
+	}
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	ext := pctx.Extensions.Inference
+	if ext.Completion != "partial" {
+		t.Errorf("Completion = %q, want partial", ext.Completion)
+	}
+	if ext.FinishReason != "incomplete" {
+		t.Errorf("FinishReason = %q, want incomplete", ext.FinishReason)
+	}
+	if ext.TotalTokens != 11 {
+		t.Errorf("TotalTokens = %d, want 11 — usage on response.incomplete must still be folded", ext.TotalTokens)
+	}
+}
