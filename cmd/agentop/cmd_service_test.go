@@ -84,6 +84,13 @@ func TestRenderUnit_BothPlatforms(t *testing.T) {
 		if !strings.Contains(u, "<key>RunAtLoad</key><true/>") {
 			t.Error("does not start at login")
 		}
+		// ExitTimeOut pinned, not left to launchd's system-defined default (5s measured):
+		// the supervisor's own kill (superviseStopGrace, 3s, cmd/cortex/supervise.go) has to
+		// land first, or launchd SIGKILLs the supervisor mid-wait and orphans the proxy on
+		// its ports. See the rationale comment in renderUnitFor's darwin branch.
+		if !strings.Contains(u, "<key>ExitTimeOut</key><integer>5</integer>") {
+			t.Error("ExitTimeOut is missing or not 5; a stop relies on launchd's unstated default")
+		}
 	})
 
 	t.Run("linux restarts on failure only", func(t *testing.T) {
@@ -104,13 +111,13 @@ func TestRenderUnit_BothPlatforms(t *testing.T) {
 				t.Errorf("unit missing %q:\n%s", want, u)
 			}
 		}
-		// TimeoutStopSec must exceed the proxy's own 15s graceful-shutdown deadline
-		// (cmd/cortex/main.go), explicitly — not by accident of whatever
-		// systemd's own default happens to be. See the rationale comment above
-		// renderUnitFor's linux branch.
-		if !strings.Contains(u, "TimeoutStopSec=20\n") {
-			t.Error("TimeoutStopSec is missing or not 20; stop relies on an unasserted " +
-				"value, which could end up shorter than the proxy's 15s drain")
+		// TimeoutStopSec is the macOS ExitTimeOut's counterpart, explicitly — not
+		// whatever systemd's own default (90s) happens to be. A local install's proxy
+		// closes rather than drains, so it stops in well under a second; this bounds the
+		// one that hangs. See the rationale comment above renderUnitFor's linux branch.
+		if !strings.Contains(u, "TimeoutStopSec=5\n") {
+			t.Error("TimeoutStopSec is missing or not 5; a stuck proxy would hold a " +
+				"restart for systemd's 90s default")
 		}
 		// StartLimit* must sit in [Unit]. systemd moved them there in v229 and
 		// deprecated them in [Service], where they can be ignored outright —

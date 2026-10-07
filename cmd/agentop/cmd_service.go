@@ -78,9 +78,11 @@ service.
 var serviceReadyTimeout = 15 * time.Second
 
 // serviceBootoutTimeout bounds the wait for a previous job to leave the domain.
-// Longer than the supervisor's own teardown: it SIGTERMs the proxy, allows its 15s
-// graceful shutdown, then insists at 20s. A var so a test of a teardown that never
-// ends need not wait it out.
+// Far longer than a teardown takes — the supervisor insists after 3s, and launchd
+// removes the job within its 5s exit timeout either way — because what it waits on
+// may be a previous release's job, and a launchctl slow to report the removal is
+// not a failed one. A var so a test of a teardown that never ends need not wait it
+// out.
 var serviceBootoutTimeout = 30 * time.Second
 
 // servicePaths is everything the platform-specific bits need, gathered so tests

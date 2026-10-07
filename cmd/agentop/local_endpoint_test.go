@@ -2,12 +2,14 @@ package main
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const endpointCfg = `mode: proxy-sidecar
@@ -186,5 +188,95 @@ func TestLocalFallbackNamesABrokenConfig(t *testing.T) {
 		if !strings.HasPrefix(errOut.String(), want) || strings.Contains(errOut.String(), "no local Cortex is configured") {
 			t.Errorf("%s: stderr =\n%s\nwant it to start %q", name, errOut.String(), want)
 		}
+	}
+}
+
+// A proxy binds every port before it replays its session archive, and serves only once
+// the replay is done — up to usageReplayBudget (5s) later. The kernel accepts a connection
+// to a socket that is bound but not yet served, so "connected, no answer yet" means a
+// Cortex that is starting: worth waiting for, where a 400ms answer deadline sent agentop
+// to the cluster picker on every launch that met a restart.
+func TestLocalSessionAPIUp_WaitsForAProxyStillStarting(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"sessions":[]}`))
+	})}
+	defer srv.Close()
+	time.AfterFunc(time.Second, func() { _ = srv.Serve(ln) })
+
+	if !localSessionAPIUp("http://" + ln.Addr().String()) {
+		t.Error("a proxy that started serving 1s after the connection was reported down")
+	}
+}
+
+// The wait is bounded: something that accepts and never answers is given up on.
+func TestLocalSessionAPIUp_GivesUpOnOneThatNeverAnswers(t *testing.T) {
+	saved := localStartupWait
+	localStartupWait = time.Second
+	t.Cleanup(func() { localStartupWait = saved })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	start := time.Now()
+	if localSessionAPIUp("http://" + ln.Addr().String()) {
+		t.Error("a socket nothing serves was reported up")
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("took %s, want it bounded by localStartupWait", took)
+	}
+}
+
+// Nothing listening is answered at the connect, so the startup wait never applies to it:
+// a machine whose Cortex is stopped still reaches the picker at once.
+func TestLocalSessionAPIUp_RefusedIsImmediate(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := "http://" + ln.Addr().String()
+	_ = ln.Close()
+
+	start := time.Now()
+	if localSessionAPIUp(dead) {
+		t.Error("a closed port was reported up")
+	}
+	if took := time.Since(start); took > localProbeTimeout+500*time.Millisecond {
+		t.Errorf("took %s on a refused connection, want about one connect", took)
+	}
+}
+
+// The wait is said out loud once it is noticeable, before the TUI takes the screen.
+func TestWaitForLocalSessionAPI_SaysWhyItIsWaiting(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"sessions":[]}`))
+	})}
+	defer srv.Close()
+	time.AfterFunc(time.Second, func() { _ = srv.Serve(ln) })
+	endpoint := "http://" + ln.Addr().String()
+
+	var out strings.Builder
+	if !waitForLocalSessionAPI(endpoint, &out) {
+		t.Fatal("reported down")
+	}
+	if !strings.Contains(out.String(), endpoint) || !strings.Contains(out.String(), "starting") {
+		t.Errorf("no waiting notice naming %s: %q", endpoint, out.String())
+	}
+
+	out.Reset()
+	if !waitForLocalSessionAPI(endpoint, &out) {
+		t.Fatal("reported down once serving")
+	}
+	if out.Len() != 0 {
+		t.Errorf("a prompt answer still printed %q", out.String())
 	}
 }

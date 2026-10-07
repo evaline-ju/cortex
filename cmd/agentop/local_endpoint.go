@@ -22,6 +22,16 @@ import (
 // short enough not to feel like a hang.
 const localProbeTimeout = 400 * time.Millisecond
 
+// localStartupWait bounds the session API's answer once a connection to it has been
+// made — the one case the probe waits on. A proxy binds every port before it replays
+// its session archive and serves only once that is done, up to cmd/cortex's
+// usageReplayBudget (5s) later; meanwhile the kernel accepts connections to the bound
+// socket. So connected-but-silent is a Cortex that is starting, and answering 400ms
+// of it with the cluster picker is what agentop did on every launch that met a
+// restart. Nothing listening is still refused at the connect, inside
+// localProbeTimeout. A var so a test of a socket that never answers need not wait it out.
+var localStartupWait = 6 * time.Second
+
 // localSessionEndpoint returns the session API URL of the Cortex installed on
 // this machine, or "" if there isn't one.
 //
@@ -159,7 +169,13 @@ func localSessionAPIUp(endpoint string) bool {
 	if endpoint == "" {
 		return false
 	}
-	c := &http.Client{Timeout: localProbeTimeout}
+	// Two bounds, one per question: the dial says whether anything is there, and the
+	// client timeout how long something that is there may take to answer. See
+	// localStartupWait.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{Timeout: localProbeTimeout}).DialContext
+	defer tr.CloseIdleConnections()
+	c := &http.Client{Timeout: localStartupWait, Transport: tr}
 	resp, err := c.Get(endpoint + "/v1/sessions") //nolint:noctx // bounded by Timeout
 	if err != nil {
 		return false
@@ -170,6 +186,23 @@ func localSessionAPIUp(endpoint string) bool {
 	// not ours, and selecting it would send agentop somewhere useless instead of to
 	// the cluster picker.
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// waitForLocalSessionAPI is localSessionAPIUp with a word to w once the answer is slow
+// enough to notice — which is a Cortex still starting, since nothing listening is
+// answered at the connect. Written before the TUI takes the screen, so it is seen.
+func waitForLocalSessionAPI(endpoint string, w io.Writer) bool {
+	done := make(chan bool, 1)
+	go func() { done <- localSessionAPIUp(endpoint) }()
+	select {
+	case up := <-done:
+		return up
+	// Past the dial's own bound, so a probe still waiting is a connected one: a dial
+	// that was going to fail has failed by then, and must not be called "starting".
+	case <-time.After(localProbeTimeout + 100*time.Millisecond):
+		fmt.Fprintf(w, "agentop: the Cortex at %s is starting; waiting for it…\n", endpoint)
+		return <-done
+	}
 }
 
 // dialable is a cheap pre-check used only to keep the error message useful when

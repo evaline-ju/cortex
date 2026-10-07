@@ -15,10 +15,11 @@ import (
 // TestWaitBootedOut_RealLaunchd drives real launchctl against a throwaway label,
 // reproducing the failure a real upgrade hit: `launchctl bootout` returns while
 // teardown is still in progress, and bootstrapping into that window fails with
-// "Bootstrap failed: 5: Input/output error". Our own teardown is slow — the supervisor
-// forwards SIGTERM and waits out the proxy's graceful shutdown — so the window is wide
-// enough to lose. A trivial job dies fast enough to hide it, which is why every test
-// starting from nothing, or running uninstall first, passed.
+// "Bootstrap failed: 5: Input/output error". Our own teardown is not instant — the
+// supervisor forwards SIGTERM and waits for the proxy to exit, and a previous release's
+// waited out a 15s drain — so the window is wide enough to lose. A trivial job dies fast
+// enough to hide it, which is why every test starting from nothing, or running uninstall
+// first, passed.
 // TestBootoutWaitIsWiredIn pins the CALL SITE, not just the helper.
 //
 // Verified by mutation: deleting the waitBootedOut call from loadService left this

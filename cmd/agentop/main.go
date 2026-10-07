@@ -476,8 +476,11 @@ func runObserve(args []string) int {
 	// `--endpoint http://localhost:47601`. Under --kubernetes it is offered on [l]
 	// instead, which is how someone who also works against a cluster gets past a
 	// probe that would otherwise win every time.
+	//
+	// One that is still starting — bound, not serving yet — is waited for rather than
+	// read as down; see localStartupWait.
 	local := localSessionEndpoint()
-	localUp := localSessionAPIUp(local)
+	localUp := waitForLocalSessionAPI(local, os.Stderr)
 	*endpoint = chooseEndpoint(*endpoint, local, localUp, *kubernetes)
 
 	// Friendly check: if picker mode and no kubectl, fail fast with a
