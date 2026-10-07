@@ -446,14 +446,18 @@ func (a *Archive) take(o op) {
 }
 
 // begin marks where a new store entry for id began numbering: its events start a segment of
-// their own, and the summary of what came before is kept, so a rename can part the two.
+// their own.
 func (a *Archive) begin(id string, after uint64) {
 	s := a.sessions[id]
 	if s == nil {
 		return
 	}
 	a.closeWriter(s)
-	s.startAfter, s.before = after, s.meta.Summary.Clone()
+	if s.meta.lastSeq() > after {
+		s.startAfter, s.before = 0, nil
+	} else {
+		s.startAfter, s.before = after, s.meta.Summary.Clone()
+	}
 	// Published at once rather than with the event's write: a paused or failing write publishes
 	// nothing, and the store's list asks for before from the moment its entry exists.
 	a.publish(s)

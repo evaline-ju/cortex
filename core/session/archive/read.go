@@ -134,9 +134,8 @@ func (a *Archive) Summaries() []session.SessionSummary {
 // numbering after `after` began. ok only when the writer has marked that entry's start, because
 // exactly then is before the history up to `after` and nothing of the entry's: begin runs in queue
 // order, after every earlier event and before any of the entry's. Until the writer takes the
-// entry's first event, and wherever it could mark none (begin found no state for the id: after a
-// clear, a prune, a whole-directory rename), the answer is false, and the store shows the entry's
-// own figures — an undercount, never a double count.
+// entry's first event, and wherever it could mark none, the answer is false, and the store shows
+// the entry's own figures — an undercount, never a double count.
 //
 // A memory lookup under idxMu, safe under the store's read lock because idxMu is a LEAF lock: it
 // may be taken while the store's read lock is held, as here, but nothing is ever acquired while

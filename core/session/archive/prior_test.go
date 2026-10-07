@@ -1,6 +1,9 @@
 package archive
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/rossoctl/cortex/core/pipeline"
@@ -130,5 +133,99 @@ func TestPrior_AFoldHandedOutNeverChanges(t *testing.T) {
 	settle(a)
 	if got := p.Fold.Summary("X").EventCount; got != held {
 		t.Fatalf("a handed-out fold moved from %d to %d events", held, got)
+	}
+}
+
+// A rename the archive does not carry out leaves the renamed entry's events under the old id. A
+// later entry there must not list them a second time: together, the resident rows hold at most
+// what was appended. Each case renames X's entry to Y that way after a restart over 3 events;
+// X then gets a new entry, which is renamed in turn.
+func TestPrior_ARenameLeftUnderTheOldIdIsNotCountedTwice(t *testing.T) {
+	earlier, first, second := synthSession(81, 1, 256), synthSession(82, 1, 256), synthSession(83, 1, 256)
+	ref := session.New(0, 0, 0)
+	defer ref.Close()
+	for _, evs := range [][]pipeline.SessionEvent{earlier, first, second} {
+		for _, e := range evs {
+			ref.Append("all", e)
+		}
+	}
+	all := listed(t, ref, "all")
+
+	cases := []struct {
+		name string
+		// rename moves X's entry to Y in the store and leaves its events under X in the archive.
+		rename func(t *testing.T, a *Archive, st *session.Store)
+	}{
+		{"the target's directory exists", func(t *testing.T, a *Archive, st *session.Store) {
+			if err := os.MkdirAll(filepath.Join(a.data, dirName("Y")), dirMode); err != nil {
+				t.Fatal(err)
+			}
+			st.Rekey("X", "Y")
+		}},
+		{"the rename is lost to a full queue", func(t *testing.T, a *Archive, st *session.Store) {
+			a.gate = make(chan struct{})
+			a.Rekeyed("filler", "filler2") // the writer takes it and waits at the gate
+			for len(a.ops) > 0 {
+				runtime.Gosched()
+			}
+			for len(a.ops) < cap(a.ops) {
+				a.Rekeyed("filler", "filler2")
+			}
+			st.Rekey("X", "Y")
+			close(a.gate)
+			if got := a.Stats().DroppedRenames; got != 1 {
+				t.Fatalf("dropped %d renames, want 1", got)
+			}
+		}},
+		{"the target's session.json cannot be written", func(t *testing.T, a *Archive, st *session.Store) {
+			if os.Geteuid() == 0 {
+				t.Skip("root writes through a read-only directory")
+			}
+			if err := os.Chmod(a.data, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Chmod(a.data, dirMode)
+			st.Rekey("X", "Y")
+			settle(a)
+			if got := a.Stats().WriteErrors; got != 1 {
+				t.Fatalf("%d write errors, want the rename's 1", got)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, st := restarted(t, t.TempDir(), newClock(), "X", earlier)
+			defer a.Close()
+			defer st.Close()
+			atMost := func(when string) {
+				t.Helper()
+				var events, tokens int
+				for _, s := range st.ListSessions() {
+					events, tokens = events+s.EventCount, tokens+s.TotalTokens
+				}
+				if events > all.EventCount || tokens > all.TotalTokens {
+					t.Fatalf("%s, the rows hold %d events and %d tokens; %d and %d were appended",
+						when, events, tokens, all.EventCount, all.TotalTokens)
+				}
+				if events < len(first)+len(second) {
+					t.Fatalf("%s, the rows hold %d events, fewer than the two entries' own %d",
+						when, events, len(first)+len(second))
+				}
+			}
+			for _, e := range first {
+				st.Append("X", e)
+			}
+			settle(a)
+			c.rename(t, a, st)
+			settle(a)
+			for _, e := range second {
+				st.Append("X", e)
+			}
+			settle(a)
+			atMost("with a new entry under X")
+			st.Rekey("X", "Z")
+			settle(a)
+			atMost("with that entry renamed in turn")
+		})
 	}
 }
