@@ -23,16 +23,26 @@ One binary, no Kubernetes. macOS or Linux, amd64 or arm64.
      Change both, or they drift — the --ref wording already did once. -->
 
 ```sh
-# 1. Install. Setup lists every change it will make, and asks once.
 curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/scripts/install.sh | sh
+```
 
-# 2. In a new terminal, connect your agent, once. The table below has each command.
+Setup lists every change it will make, and asks once.
+
+Then connect your agent — once, in a new terminal. The table below has each command.
+
+```sh
 agentop configure claude-code enable    # or opencode, bob, bobshell
+```
 
-# 3. Run your agent the way you always do. No flags, no environment variables.
+Run your agent the way you always do. No flags, no environment variables.
+
+```sh
 claude                                  # or opencode, bob
+```
 
-# 4. In another terminal, watch its traffic live.
+In another terminal, watch its traffic live.
+
+```sh
 agentop observe
 ```
 
