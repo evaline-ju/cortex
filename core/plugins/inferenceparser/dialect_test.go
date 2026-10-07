@@ -29,12 +29,15 @@ func TestDialectFor(t *testing.T) {
 		{"/openai/v1/chat/completions", dialectOpenAI},
 		{"/openai/deployments/gpt-4o/chat/completions", dialectOpenAI},
 		{"/v1beta/openai/chat/completions", dialectOpenAI},
+		// OpenAI Responses API: the public endpoint, and Codex's chatgpt.com-hosted
+		// gateway — sharing no prefix, only the "/responses" ending.
+		{"/v1/responses", dialectResponses},
+		{"/backend-api/codex/responses", dialectResponses},
 		// Endpoints beside an inference one, sharing its prefix but not its ending.
 		{"/v1/messages/count_tokens", dialectNone},
 		{"/v1/messages/batches", dialectNone},
 		{"/v1/embeddings", dialectNone},
 		{"/v1/rerank", dialectNone},
-		{"/v1/responses", dialectNone},
 		{"/inference/v1/model/info", dialectNone},
 		{"/v1/autocompletions", dialectNone},
 		{"/foov1/messages", dialectNone},                 // the segment boundary, for the suffix checked first

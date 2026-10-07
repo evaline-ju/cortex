@@ -577,7 +577,15 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, tl *tunne
 		// declares WritesRequestBody (mutating a body we've already started
 		// forwarding is incompatible with streaming) — fall back to
 		// buffered with a warning log instead.
-		if isEventStream(resp.Header.Get("Content-Type")) && resp.Body != nil {
+		// mislabeled is gated on 2xx: an error from this endpoint (we've seen 401, 405, 429
+		// in practice) still carries a plain JSON body like {"detail":"..."}. Routing that
+		// into the SSE path finds no "data:" lines, so sseframe.Reader emits nothing and the
+		// caller gets an empty body — losing the error detail Codex itself surfaces to the
+		// user. Confirmed on live traffic: before this gate, a 405 that used to arrive as
+		// `{"detail":"Method Not Allowed"}` arrived as the literal string "Unknown error"
+		// once isKnownMislabeledSSE started matching every status, not just success.
+		mislabeled := resp.StatusCode/100 == 2 && isKnownMislabeledSSE(r.Host, r.URL.Path)
+		if (isEventStream(resp.Header.Get("Content-Type")) || mislabeled) && resp.Body != nil {
 			if s.OutboundPipeline.WritesResponseBody() {
 				// A response mutator needs the whole response to rewrite it, so
 				// it can't stream — fall back to the buffered path with a warning.
@@ -1221,6 +1229,27 @@ func isEventStream(contentType string) bool {
 		contentType = contentType[:idx]
 	}
 	return strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream")
+}
+
+// isKnownMislabeledSSE reports whether host+path is a known endpoint that sends real SSE
+// wire bytes (event:/data: lines) under the wrong Content-Type.
+//
+// Confirmed on live traffic: Codex's chatgpt.com-hosted Responses API gateway sends
+// event-stream content labeled Content-Type: application/json. Content-Type is otherwise
+// the single signal this function's caller trusts to decide streaming vs. buffered — see
+// isEventStream — and with the wrong header, this response would never reach
+// handleStreamingResponse at all, forcing the buffered path (and losing live delivery to
+// the client) regardless of what any plugin declares. inference-parser's own dispatch has
+// a second, independent content-sniff fallback (carriesSSEFraming) for the case where the
+// buffered path is still what runs — this is the other half, letting the response stream
+// live in the first place when the one plugin that cares (inference-parser) supports it.
+//
+// Deliberately a narrow, named-endpoint allowlist rather than sniffing every response's
+// body to detect SSE by content: that would mean reading ahead on EVERY response regardless
+// of provider, to work around one provider's one wrong header. Add a line here if another
+// endpoint turns out to have the same defect.
+func isKnownMislabeledSSE(host, path string) bool {
+	return host == "chatgpt.com" && path == "/backend-api/codex/responses"
 }
 
 // handleStreamingResponse forwards a text/event-stream response to the
