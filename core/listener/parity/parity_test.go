@@ -340,6 +340,201 @@ func TestParity_RequiresLaterOrderingRejected(t *testing.T) {
 	}
 }
 
+// --- multi-plugin pipelines ---------------------------------------------
+//
+// Every fixture above this point runs ONE plugin, and a one-plugin
+// pipeline cannot exercise the three framework contracts that only exist
+// between plugins: invocation order, event merging across keys, and
+// error-policy composition. Production pipelines are never one plugin —
+// jwt-validation then a parser then a cost plugin is the shape the
+// operator actually runs — so each of these was asserted only in
+// per-listener unit tests, never across listeners.
+
+// TestParity_MultiPluginInvocationOrder is #948's fixture: two plugins on
+// one request, one observing and one denying, with the invocation list
+// pinned exactly and in order on every listener.
+//
+// B runs first and observes; A then denies, which stops the pipeline. The
+// recorded order must therefore be [B observe, A deny] — the order the
+// plugins ran, not the order they are named and not alphabetical. Both
+// spies also emit their own Extensions.Custom event, so the fixture pins
+// a two-key SessionEvent.Plugins map: with a single plugin the map has one
+// key, and a listener that overwrote the map instead of merging into it
+// would look identical.
+func TestParity_MultiPluginInvocationOrder(t *testing.T) {
+	f := fixture{
+		name:      "multi-plugin-invocation-order",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{
+			spyEntry(spyPluginB, spyConfig{
+				EmitOnRequest:     true,
+				RequestEvent:      &spyEvent{Marker: "observed", Count: 1},
+				RequestInvocation: &invocationRecord{Action: "observe", Reason: "spy.observed"},
+			}),
+			spyEntry(spyPluginA, spyConfig{
+				DenyOnRequest: true,
+				DenyStatus:    403,
+				DenyReason:    "spy.denied",
+				DenyDetails:   map[string]string{"cutoff_reason": "policy"},
+				Subject:       "alice@example.org",
+				ClientID:      "weather-agent",
+				EmitOnRequest: true,
+				RequestEvent:  &spyEvent{Marker: "denied", Count: 2},
+			}),
+		},
+		method: "GET",
+		path:   "/parity/multi",
+		expectedInvocations: []invocationSummary{
+			{Plugin: spyPluginB, Action: "observe", Reason: "spy.observed"},
+			{Plugin: spyPluginA, Action: "deny", Reason: "spy.denied", Details: map[string]string{"cutoff_reason": "policy"}},
+		},
+		expectedPluginEvents: map[string]string{
+			spyPluginB: jsonOf(spyEvent{Marker: "observed", Count: 1}),
+			spyPluginA: jsonOf(spyEvent{Marker: "denied", Count: 2}),
+		},
+		expectedIdentity: &identitySummary{
+			Subject:  "alice@example.org",
+			ClientID: "weather-agent",
+		},
+		expectDuration: true,
+	}
+	assertParity(t, f, pipeline.SessionDenied, inboundListeners)
+}
+
+// TestParity_OutboundMultiPluginInvocationOrder mirrors the above on the
+// egress side. Not redundant: forwardproxy is a separate recorder from
+// reverseproxy — #936's dropped fields were on the proxies and had to be
+// found twice — and the outbound bucket is a different slice
+// (Invocations.Outbound), filled by the same append but snapshotted by
+// different code.
+func TestParity_OutboundMultiPluginInvocationOrder(t *testing.T) {
+	f := fixture{
+		name:      "outbound-multi-plugin-invocation-order",
+		direction: pipeline.Outbound,
+		entries: []config.PluginEntry{
+			spyEntry(spyPluginB, spyConfig{
+				EmitOnRequest:     true,
+				RequestEvent:      &spyEvent{Marker: "observed", Count: 1},
+				RequestInvocation: &invocationRecord{Action: "observe", Reason: "spy.observed"},
+			}),
+			spyEntry(spyPluginA, spyConfig{
+				DenyOnRequest: true,
+				DenyStatus:    403,
+				DenyReason:    "spy.blocked",
+				DenyDetails:   map[string]string{"cutoff_reason": "egress-policy"},
+				Subject:       "alice@example.org",
+				ClientID:      "weather-agent",
+				EmitOnRequest: true,
+				RequestEvent:  &spyEvent{Marker: "blocked", Count: 2},
+			}),
+		},
+		method: "GET",
+		path:   "/parity/multi-egress",
+		expectedInvocations: []invocationSummary{
+			{Plugin: spyPluginB, Action: "observe", Reason: "spy.observed"},
+			{Plugin: spyPluginA, Action: "deny", Reason: "spy.blocked", Details: map[string]string{"cutoff_reason": "egress-policy"}},
+		},
+		expectedPluginEvents: map[string]string{
+			spyPluginB: jsonOf(spyEvent{Marker: "observed", Count: 1}),
+			spyPluginA: jsonOf(spyEvent{Marker: "blocked", Count: 2}),
+		},
+		expectedIdentity: &identitySummary{
+			Subject:  "alice@example.org",
+			ClientID: "weather-agent",
+		},
+		expectDuration: true,
+	}
+	assertParity(t, f, pipeline.SessionDenied, outboundListeners)
+}
+
+// TestParity_MultiPluginRequiresLaterRuntimeOrder pins the RUNTIME half of
+// the dependency contract. TestParity_RequiresLaterOrderingRejected proves
+// construction rejects a wrong-order pipeline; it says nothing about what
+// a well-ordered one then does, because it never runs one. That gap
+// matters because the whole point of RequiresLater is that the dependent
+// plugin observes state the earlier one left behind — a pipeline that
+// validated the declaration at build time and then dispatched in some
+// other order would satisfy the existing test completely.
+//
+// Neither spy denies, so this is the success path: the request reaches the
+// upstream and both invocations land on the request event, in declaration
+// order [A, B].
+func TestParity_MultiPluginRequiresLaterRuntimeOrder(t *testing.T) {
+	f := fixture{
+		name:      "multi-plugin-requires-later-runtime-order",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{
+			spyEntry(spyPluginA, spyConfig{
+				RequiresLater:     []string{spyPluginB},
+				RequestInvocation: &invocationRecord{Action: "allow", Reason: "spy.a.ran"},
+			}),
+			spyEntry(spyPluginB, spyConfig{
+				RequestInvocation: &invocationRecord{Action: "allow", Reason: "spy.b.ran"},
+			}),
+		},
+		method:         "GET",
+		path:           "/parity/ordered",
+		upstreamStatus: 200,
+		upstreamBody:   []byte(`{"reply":"ok"}`),
+		expectedInvocations: []invocationSummary{
+			{Plugin: spyPluginA, Action: "allow", Reason: "spy.a.ran"},
+			{Plugin: spyPluginB, Action: "allow", Reason: "spy.b.ran"},
+		},
+	}
+	// SessionRequest, not SessionResponse: both spies record at OnRequest,
+	// and Invocation.Phase makes the listener put request-phase entries on
+	// the request event only. Asserting on the response event would
+	// compare two empty slices and pass whatever the order was.
+	assertParity(t, f, pipeline.SessionRequest, inboundListeners)
+}
+
+// TestParity_MultiPluginShadowComposition covers the fourth contract: a
+// plugin under on_error: observe sitting in front of an enforcing one.
+//
+// B's Reject is downgraded — Pipeline.Run flips its deny record's Shadow
+// flag and continues — and A then denies for real. So one request produces
+// two deny records that differ ONLY in Shadow, and the request is refused
+// with A's status, not B's. Both facts must survive identically on both
+// listeners: a listener that dropped Shadow would report a shadow-mode
+// rollout as an outage, and one that let B's downgraded Reject terminate
+// the pipeline would never reach A at all.
+func TestParity_MultiPluginShadowComposition(t *testing.T) {
+	f := fixture{
+		name:      "multi-plugin-shadow-composition",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{
+			spyEntryShadow(spyPluginB, spyConfig{
+				DenyOnRequest: true,
+				DenyStatus:    429,
+				DenyReason:    "spy.would.deny",
+				DenyDetails:   map[string]string{"cutoff_reason": "rollout"},
+				EmitOnRequest: true,
+				RequestEvent:  &spyEvent{Marker: "shadow", Count: 1},
+			}),
+			spyEntry(spyPluginA, spyConfig{
+				DenyOnRequest: true,
+				DenyStatus:    403,
+				DenyReason:    "spy.denied",
+				EmitOnRequest: true,
+				RequestEvent:  &spyEvent{Marker: "enforced", Count: 2},
+			}),
+		},
+		method:             "GET",
+		path:               "/parity/shadow",
+		expectedWireStatus: 403, // A's status — proof B's shadow deny did not terminate the request
+		expectedInvocations: []invocationSummary{
+			{Plugin: spyPluginB, Action: "deny", Reason: "spy.would.deny", Details: map[string]string{"cutoff_reason": "rollout"}, Shadow: true},
+			{Plugin: spyPluginA, Action: "deny", Reason: "spy.denied"},
+		},
+		expectedPluginEvents: map[string]string{
+			spyPluginB: jsonOf(spyEvent{Marker: "shadow", Count: 1}),
+			spyPluginA: jsonOf(spyEvent{Marker: "enforced", Count: 2}),
+		},
+		expectDuration: true,
+	}
+	assertParity(t, f, pipeline.SessionDenied, inboundListeners)
+}
+
 // assertParity runs the fixture through every listener and fails on
 // any observation mismatch. Partial presence (one listener records, the
 // others don't) is itself drift and reported at the parent-test level.
@@ -435,6 +630,9 @@ func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, list
 		if f.expectDuration && !g.observed.HasDuration {
 			t.Errorf("fixture %q listener %s: event carried no Duration; the request completed, so it has one", f.name, g.listener)
 		}
+		if f.expectedInvocations != nil && !reflect.DeepEqual(g.observed.Invocations, f.expectedInvocations) {
+			t.Errorf("fixture %q listener %s: Invocations (exact, ordered)\n  got:  %s\n  want: %s", f.name, g.listener, jsonPretty(g.observed.Invocations), jsonPretty(f.expectedInvocations))
+		}
 	}
 
 	// Pairwise compare against the first listener. All observations must
@@ -515,28 +713,23 @@ func observationDiff(a, b *observation) string {
 	return ""
 }
 
-// invocationsEqual compares two slices as sets so multi-plugin
-// fixtures tolerate independent-gate ordering.
+// invocationsEqual compares two slices IN ORDER.
+//
+// It used to sort both sides first, on the stated grounds that
+// "multi-plugin fixtures tolerate independent-gate ordering". There were
+// no multi-plugin runtime fixtures when that was written, and now that
+// there are, the tolerance has nothing to justify it: every listener runs
+// the same Pipeline over the same plugin slice, and both the request pass
+// (declaration order) and the response pass (reverse) are deterministic,
+// so two legs of one fixture have no licence to disagree about order.
+// Sorting first meant [B, A] compared equal to [A, B] — the exact
+// divergence #948 asked this suite to catch, discarded before the
+// comparison.
+//
+// Length is still checked separately so the message distinguishes a
+// listener that dropped a record from one that reordered them.
 func invocationsEqual(a, b []invocationSummary) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	byKey := func(s []invocationSummary) {
-		sort.Slice(s, func(i, j int) bool {
-			if s[i].Plugin != s[j].Plugin {
-				return s[i].Plugin < s[j].Plugin
-			}
-			if s[i].Action != s[j].Action {
-				return s[i].Action < s[j].Action
-			}
-			return s[i].Reason < s[j].Reason
-		})
-	}
-	as := append([]invocationSummary(nil), a...)
-	bs := append([]invocationSummary(nil), b...)
-	byKey(as)
-	byKey(bs)
-	return reflect.DeepEqual(as, bs)
+	return len(a) == len(b) && reflect.DeepEqual(a, b)
 }
 
 func jsonPretty(v any) string {
