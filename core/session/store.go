@@ -1,6 +1,8 @@
 // Package session provides an in-memory session store for correlating
 // inbound user intents with outbound tool calls across request boundaries.
-// The store is per-pod (AuthBridge sidecar) and does not persist across restarts.
+// The store is per-pod (AuthBridge sidecar) and does not persist across restarts;
+// where a session archive runs, ListSessions continues each session from it (see
+// PriorKeeper).
 package session
 
 import (
@@ -51,6 +53,10 @@ type entry struct {
 	// rather than Seq for exactly this reason — see agentop's applyOlderPage. See also
 	// pipeline.SessionEvent.Seq.
 	nextSeq uint64
+	// after is the seq this entry numbers its events after: the highest a SeqSeeder held for the id
+	// when the entry was created, 0 when none held any. Unlike nextSeq it never moves. Above 0 the
+	// id had history before this entry, and ListSessions asks a PriorKeeper for it.
+	after uint64
 
 	// cost and avoided are RUNNING TOTALS over Events, maintained by Append and read by
 	// ListSessions. Micros, in the units usage.Counts uses.
@@ -73,7 +79,8 @@ type entry struct {
 	// subtracted, so these stay equal to sumCost(Events) — the invariant
 	// TestAppend_RunningTotalsMatchAFullRecomputation exists to hold. That is what keeps
 	// the COST column scoped exactly like the TOKENS column beside it, which is the claim
-	// SessionSummary.CostMicros makes.
+	// SessionSummary.CostMicros makes. ListSessions adds the history before this entry on top
+	// where a PriorKeeper has it (withPriorLocked); these running totals stay the entry's own.
 	cost    usage.CostSum
 	avoided usage.CostSum
 	// units counts the priced events behind cost by the unit they were priced in, "" for USD.
@@ -472,6 +479,7 @@ func (s *Store) appendLocked(sessionID string, b *Bucket, event pipeline.Session
 				CreatedAt: now,
 				// After whatever the archive already numbered under this id; see SeqSeeder.
 				nextSeq: seed,
+				after:   seed,
 				// NOT THE ZERO VALUE: rankRename is 0, so a zero-valued titleRank would claim this
 				// session had already been renamed and no candidate could ever beat it — the first
 				// prose message would be unnameable. rankNone is the "nothing has named it" rank.
@@ -867,7 +875,8 @@ type SessionSummary struct {
 	Adopted     []string `json:"adopted,omitempty"`
 	TotalTokens int      `json:"totalTokens,omitempty"` // sum of Inference.TotalTokens across response events
 	// CostMicros is what this session's events cost, in millionths of a dollar, summed from
-	// the records the session itself holds.
+	// the records the session itself holds — where a session archive runs, including those from
+	// before this entry.
 	//
 	// FROM THE EVENTS, not from the ledger, and that is the only honest source available: the
 	// ledger's row key is (endpoint, model, agent, provenance) with no session dimension by
@@ -875,10 +884,11 @@ type SessionSummary struct {
 	// only over its rolling window, which would put a partial figure beside the LIFETIME
 	// TotalTokens above and understate the row by whatever fell off the ring.
 	//
-	// SCOPED TO WHAT THE STORE STILL HOLDS, and it therefore RESETS ON RESTART while a ledger
-	// window does not. Both are correct: this is "the cost of the events in this session", the
-	// ledger is "the cost of the day". A client showing them together must not present one as
-	// a check on the other.
+	// SCOPED TO WHAT THE STORE STILL HOLDS, PLUS — WHERE A SESSION ARCHIVE RUNS — THE SESSION'S
+	// HISTORY FROM BEFORE THIS ENTRY (see PriorKeeper). So with an archive it continues across a
+	// restart, and without one it resets; a ledger window always continues. Both are correct:
+	// this is "the cost of the events in this session", the ledger is "the cost of the day". A
+	// client showing them together must not present one as a check on the other.
 	//
 	// Omitted when zero rather than sent as 0, on this codebase's standing rule that an
 	// unknown cost must never render as $0.00: a session whose traffic nothing could price is
@@ -938,7 +948,8 @@ type SessionSummary struct {
 	//
 	// RETENTION-INDEPENDENT ALL THE SAME — unlike TotalTokens and CostMicros above, and the
 	// asymmetry is deliberate rather than an inconsistency. Those are sums over the events the
-	// store still holds, so a trim sheds exactly what left the slice, which is why CostMicros can
+	// store still holds (plus, where a session archive runs, the session's history from before
+	// this entry), so a trim sheds exactly what left the slice, which is why CostMicros can
 	// honestly call itself the cost of the events in this session. This is an extremum under a
 	// total order: nothing about it is accumulated, so a trim has nothing to subtract from it and
 	// it outlives the events it was read from. Recomputing it over the survivors would not
@@ -951,9 +962,10 @@ type SessionSummary struct {
 	// one-shot completions has no conversation to measure and is indistinguishable here from one
 	// nobody observed; both must reach a client as an absent field so it can draw an em dash.
 	//
-	// RESETS ON PROXY RESTART, like CostMicros and unlike a cost-ledger window, because the store
-	// is in-memory per-pod. A client that has been watching longer than this proxy has been up may
-	// hold a larger figure legitimately — see pipeline.MergePromptContext, which is how the two combine.
+	// CONTINUES ACROSS A RESTART WHERE A SESSION ARCHIVE RUNS, like CostMicros, and resets where
+	// none does, because the store is in-memory per-pod. A client that has been watching longer
+	// than this proxy has been up may hold a larger figure legitimately — see
+	// pipeline.MergePromptContext, which is how the two combine.
 	PromptContext *pipeline.PromptContext `json:"promptContext,omitempty"`
 
 	// Resident is false on a row the session archive served because the store no longer holds
@@ -971,14 +983,21 @@ func (e *entry) agentLabel(name string) string {
 	return agentLabelIn(e.agents, name)
 }
 
-// agentOfLocked is SessionSummary.Agent: the label of the owner that claimed the session, else
-// of the first known agent in it.
-func (s *Store) agentOfLocked(id string, sess *entry) string {
+// agentOfLocked is SessionSummary.Agent: the label of the owner that claimed the session, else of
+// the first known agent in it. earlier is the agents of the history before this entry (see
+// PriorKeeper), nil when there is none; being earlier, it is searched first.
+func (s *Store) agentOfLocked(id string, sess *entry, earlier []sessionAgent) string {
 	if id == DefaultSessionID || strings.HasPrefix(id, PendingPrefix) {
 		return ""
 	}
 	if owner := s.owners[id]; owner != "" {
+		if l := agentLabelIn(earlier, owner); l != "" {
+			return l
+		}
 		return sess.agentLabel(owner)
+	}
+	if len(earlier) > 0 {
+		return earlier[0].label
 	}
 	if len(sess.agents) == 0 {
 		return ""
@@ -1014,7 +1033,7 @@ func (s *Store) ListSessions() []SessionSummary {
 		if s.isExpired(sess, now) {
 			continue
 		}
-		out = append(out, SessionSummary{
+		sum := SessionSummary{
 			ID:         id,
 			CreatedAt:  sess.CreatedAt,
 			UpdatedAt:  sess.UpdatedAt,
@@ -1030,7 +1049,7 @@ func (s *Store) ListSessions() []SessionSummary {
 			// reappearing here — they would diverge immediately if one did. This obeys the rule
 			// PromptContext states below, which rejects an O(events) walk under the read lock.
 			Title:   sess.Title,
-			Agent:   s.agentOfLocked(id, sess),
+			Agent:   s.agentOfLocked(id, sess, nil),
 			Adopted: adoptedBy[id],
 			// Still a walk, and deliberately left as one: it is a pointer deref per event
 			// with no allocation, where the money figures below needed a JSON unmarshal.
@@ -1049,7 +1068,9 @@ func (s *Store) ListSessions() []SessionSummary {
 			// under the read lock, on agentop's two-second poll, in front of a lock whose writer side
 			// is Append on the proxy's request path, with maxEvents unset by default.
 			PromptContext: sess.context.Publish(),
-		})
+		}
+		s.withPriorLocked(&sum, id, sess)
+		out = append(out, sum)
 	}
 	// Most recently updated first.
 	sort.Slice(out, func(i, j int) bool {

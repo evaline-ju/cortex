@@ -25,8 +25,9 @@ func benchContextEvents(n int) []pipeline.SessionEvent {
 }
 
 // THE SHAPE THAT MATTERS: one event arrives, and the sessions row loop asks every session for its
-// gauge. rebuildSessionsTable runs on every streamed event and retention is unbounded, so a rescan
-// here is O(events) per session per event — on the pane agentop opens on.
+// gauge. rebuildSessionsTable runs on the 1s tick after streamed events and on every 2s poll,
+// rather than per event, and retention is unbounded, so a rescan here is O(events) per session per
+// rebuild — on the pane agentop opens on.
 //
 // This benchmark exists because that regression shipped once. The first version of the rule
 // made two full passes and allocated a map per call; measured at 100k events it cost 6.10ms and

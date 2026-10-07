@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rossoctl/cortex/core/observe/claude"
+	"github.com/rossoctl/cortex/core/session"
 )
 
 // SessionMetadata is what a coding agent knows about one of its own sessions that Cortex
@@ -217,6 +218,13 @@ func harvestCmd(h HarvestFunc) tea.Cmd {
 	}
 }
 
+// awaitsHarvest reports whether s is a row the title harvest could still be waiting on: one the
+// proxy holds in memory. A row only the session archive holds is history — its title came from
+// the metadata cache while it was live, or there is none to find — and with thirty days of such
+// rows listed, counting them would hold the gate open on rows nothing can name. A session that
+// resumes is resident again, and counts again.
+func awaitsHarvest(s session.SessionSummary) bool { return s.Resident == nil || *s.Resident }
+
 // untitledSettled reports whether some session on screen has no title yet and has been
 // quiet long enough that its transcript is probably complete on disk.
 //
@@ -250,18 +258,21 @@ func harvestCmd(h HarvestFunc) tea.Cmd {
 //
 // IT IS NOT FREE, THOUGH, and an earlier version of this comment claimed "one map lookup per row
 // per tick", which undersells it: sessionHasTitle goes through sessionTitle, which calls
-// sanitizeLabel, which builds a new string. So the steady state allocates once per row per 2s
-// tick and always walks the whole list — the all-titled case is the one that cannot exit early,
-// because the loop is looking for a row that is not there.
+// sanitizeLabel, which builds a new string. So the steady state allocates once per resident row
+// per 2s tick and always walks the whole list — the all-titled case is the one that cannot exit
+// early, because the loop is looking for a row that is not there.
 //
-// Left as a linear walk deliberately. The rows here are one pod's live sessions, a handful in
-// practice against the ~180 in the metadata file, and the alternative — a cached "any untitled"
-// flag — is a second piece of state to invalidate on every sessionsLoadedMsg and every harvest
-// merge, which is how the events map grew the bugs its own comments now document. The honest
-// figure is in the comment; the optimisation waits for a profile that asks for it.
+// Left as a linear walk deliberately. The rows that cost anything here are one pod's live
+// sessions, a handful in practice against the ~180 in the metadata file: with a session archive
+// the list also holds every session the archive keeps — ~2,000 over thirty days — but
+// awaitsHarvest skips those archive-only rows before the allocating sessionHasTitle call, so each
+// of them costs a pointer check. And the alternative — a cached "any untitled" flag — is a second
+// piece of state to invalidate on every sessionsLoadedMsg and every harvest merge, which is how
+// the events map grew the bugs its own comments now document. The honest figure is in the
+// comment; the optimisation waits for a profile that asks for it.
 func (m *model) untitledSettled(now time.Time) bool {
 	for _, s := range m.sessions {
-		if m.sessionHasTitle(s.ID) {
+		if !awaitsHarvest(s) || m.sessionHasTitle(s.ID) {
 			continue
 		}
 		// A ZERO UpdatedAt IS NOT "QUIET SINCE THE EPOCH". The field is whatever /v1/sessions
@@ -325,7 +336,7 @@ func (m *model) untitledSettled(now time.Time) bool {
 // ordering the scoring's `fresh` arm exists to avoid.
 func (m *model) untitledFresh() bool {
 	for _, sess := range m.sessions {
-		if m.sessionHasTitle(sess.ID) {
+		if !awaitsHarvest(sess) || m.sessionHasTitle(sess.ID) {
 			continue
 		}
 		if !m.untitledCounted[sess.ID] {
@@ -346,7 +357,7 @@ func (m *model) untitledFresh() bool {
 func (m *model) countUntitled() (counted map[string]bool, fresh bool) {
 	counted = make(map[string]bool, len(m.sessions))
 	for _, sess := range m.sessions {
-		if m.sessionHasTitle(sess.ID) {
+		if !awaitsHarvest(sess) || m.sessionHasTitle(sess.ID) {
 			continue
 		}
 		counted[sess.ID] = true
@@ -452,7 +463,7 @@ func blankSanitized(sanitized string) bool {
 // arriving for a session nobody is looking at is not why the backoff exists.
 func (m *model) harvestNamedSomething(meta map[string]SessionMetadata) bool {
 	for _, sess := range m.sessions {
-		if m.sessionHasTitle(sess.ID) {
+		if !awaitsHarvest(sess) || m.sessionHasTitle(sess.ID) {
 			continue
 		}
 		if !titleIsBlank(meta[sess.ID].Title) {

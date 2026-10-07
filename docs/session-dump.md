@@ -3,7 +3,7 @@
 > **On a laptop the proxy now keeps sessions itself.** A local install writes every
 > session to `~/.cortex/sessions` ([#901](https://github.com/rossoctl/cortex/issues/901);
 > see [the laptop guide](laptop-service.md#session-history-is-kept-in-cortexsessions)),
-> so a restart no longer loses them and agentop's `H` lists them. What this script is
+> so a restart no longer loses them and agentop keeps listing them. What this script is
 > still for is getting sessions *out* as files — and it is the only way to keep anything
 > from a cluster sidecar, which has no archive. A whole dump covers the sessions in
 > memory; `--session <id>` also reaches one only the archive holds, because the

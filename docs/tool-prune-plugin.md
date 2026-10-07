@@ -191,8 +191,9 @@ aggregate:
 
 Independent of `agentop`'s per-run stats pane, which resets when the plugin's counters do.
 The ledger does not: a window survives a proxy restart, while the per-session total is
-scoped to the events the store still holds and resets with it. Both are correct, and they
-answer different questions — do not read one as a check on the other.
+scoped to the events the store still holds, continues across a restart where a session
+archive runs, and resets where none does. Both are correct, and they answer different
+questions — do not read one as a check on the other.
 
 ### Costing it
 

@@ -300,9 +300,13 @@ Two other knobs, same restart rule:
 
 **A local install keeps every session on disk, on by default.** Each event the session store
 records is also written to `~/.cortex/sessions`, so a session outlives a restart and the store's
-own eviction (`session.max_sessions`, a `session.ttl`). In `agentop`, `H` on the sessions pane
-lists the sessions only the archive still holds, marked `archived`, and Enter opens one like any
-other.
+own eviction (`session.max_sessions`, a `session.ttl`). `agentop` lists every session the archive
+holds beside the ones in memory, and Enter opens one like any other. Each session keeps its
+figures across a restart too — events, tokens, cost, title: the proxy adds what the archive holds
+from before the restart to what it has seen since. LAST 1H and the usage pane's hour windows
+survive a restart as well: at startup, before it serves anything, the proxy replays the archive's
+last six hours into them. If that would take longer than 5 seconds it gives up, and they start
+empty as they used to.
 
 **Unlike the cost ledger, this is the content.** Prompts, completions, tool arguments and
 tool results — everything the session API serves — sit in

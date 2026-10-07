@@ -125,7 +125,6 @@ func (m *model) resetAfterClear() {
 	m.usage.reqSeq++
 	m.untitledMisses = 0
 	m.untitledCounted = nil
-	m.archiveUsage = nil
 	m.detailEvent = nil
 	m.detailPlugin = nil
 	m.selectedSess = ""

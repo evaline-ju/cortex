@@ -677,6 +677,10 @@ func main() {
 		// The session archive is the store's third Recorder: it persists every event so
 		// sessions survive a restart and the store's eviction. See core/session/archive.
 		sessArchive = openSessionArchive(cfg, *configPath, sessions)
+		if sessArchive != nil {
+			// Before any listener starts: see replayUsage for why that is the whole design.
+			replayUsageAtStartup(sessArchive, usageAgg)
+		}
 
 		// Through lim.LogAttrs, not a hand-rolled attribute list. #999 gave the session
 		// store's limits one home, and the local "ttl=0s would read like a

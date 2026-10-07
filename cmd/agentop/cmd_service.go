@@ -1006,8 +1006,8 @@ func reportHistoryCleared(wasServing, archived bool, stdout io.Writer) {
 		return
 	}
 	if archived {
-		fmt.Fprintln(stdout, "  The proxy's memory is cleared, but its session archive is not: H in")
-		fmt.Fprintln(stdout, "  agentop lists the sessions it holds.")
+		fmt.Fprintln(stdout, "  The proxy's memory is cleared, but its session archive is not: agentop")
+		fmt.Fprintln(stdout, "  still lists every session it holds.")
 		return
 	}
 	fmt.Fprintln(stdout, "  Captured session history is cleared: the store is in memory, so any")

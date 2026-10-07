@@ -115,9 +115,9 @@ func TestClearConfirm_SwallowsOtherKeys(t *testing.T) {
 		if cmd := m.handleKey(k); cmd != nil {
 			t.Errorf("%q returned a command", k.String())
 		}
-		if m.clearConfirm == nil || m.pane != paneSessions || m.helpVisible || m.filtering || m.showHistory {
-			t.Fatalf("%q got past the confirmation: confirm=%v pane=%v help=%v filtering=%v history=%v",
-				k.String(), m.clearConfirm != nil, m.pane, m.helpVisible, m.filtering, m.showHistory)
+		if m.clearConfirm == nil || m.pane != paneSessions || m.helpVisible || m.filtering {
+			t.Fatalf("%q got past the confirmation: confirm=%v pane=%v help=%v filtering=%v",
+				k.String(), m.clearConfirm != nil, m.pane, m.helpVisible, m.filtering)
 		}
 	}
 	if len(store.ListSessions()) != 2 {

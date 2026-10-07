@@ -65,9 +65,10 @@ func sessionsColumns() []table.Column {
 		// Both come from the server's own sum over the session's events
 		// (session.SessionSummary.CostMicros / .AvoidedMicros), not from the strip's ring
 		// window: the durable ledger's row key carries no session dimension by design, and
-		// the ring covers only its rolling span. So these RESET when the proxy restarts
-		// while the strip's "today" figure does not — both are correct, and neither is a
-		// check on the other.
+		// the ring covers only its rolling span. So these continue across a proxy restart
+		// where it keeps a session archive and reset where it does not, while the strip's
+		// "today" figure always continues — both are correct, and neither is a check on the
+		// other.
 		{Title: "COST", Width: 10},
 		{Title: "SAVED", Width: 10},
 		// CTX(1M) replaces an ACTIVE column that carried a ● for a flag nobody acted on.
@@ -296,12 +297,8 @@ func (m *model) rebuildSessionsTable() {
 		if agentW > 0 {
 			row = append(row, sessionAgentCell(s, agentW))
 		}
-		updated := relTime(now, s.UpdatedAt)
-		if s.Resident != nil && !*s.Resident {
-			updated = archivedMarker
-		}
 		row = append(row,
-			updated,
+			relTime(now, s.UpdatedAt),
 			// The server's count, and only ever the server's: it is the complete one.
 			// agentop's own cache holds what it snapshotted plus what it has streamed
 			// since attaching, which for a session older than the connection is a
@@ -324,8 +321,10 @@ func (m *model) rebuildSessionsTable() {
 	}
 	// Sessions whose events agentop still holds but the server no longer lists.
 	// Retaining the events (#870) is only half a fix if there is no row to
-	// select them from: after a proxy restart the server lists nothing, so
-	// without this the picker is empty and the retained history is unreachable.
+	// select them from: a proxy without a session archive lists nothing after a
+	// restart, so without this the picker is empty and the retained history is
+	// unreachable. One with an archive lists everything it holds, and these rows
+	// are then mostly absent.
 	adopted := m.adoptedSessionIDs()
 	for _, id := range m.cachedOnlySessionIDs() {
 		// A scope lists only sessions the server names an agent for, and an adopted pending bucket

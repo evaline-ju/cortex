@@ -158,7 +158,8 @@ type sessionState struct {
 	lastWrite time.Time
 	metaDirty bool
 	// startAfter is where the store's current entry began numbering, once its first event
-	// arrived, and before is the summary of what the session held then.
+	// arrived, and before is the summary of what the session held then. before is never folded
+	// into: the reader index shares it (see indexEntry).
 	startAfter uint64
 	before     *session.SummaryFold
 }
@@ -445,14 +446,21 @@ func (a *Archive) take(o op) {
 }
 
 // begin marks where a new store entry for id began numbering: its events start a segment of
-// their own, and the summary of what came before is kept, so a rename can part the two.
+// their own.
 func (a *Archive) begin(id string, after uint64) {
 	s := a.sessions[id]
 	if s == nil {
 		return
 	}
 	a.closeWriter(s)
-	s.startAfter, s.before = after, s.meta.Summary.Clone()
+	if s.meta.lastSeq() > after {
+		s.startAfter, s.before = 0, nil
+	} else {
+		s.startAfter, s.before = after, s.meta.Summary.Clone()
+	}
+	// Published at once rather than with the event's write: a paused or failing write publishes
+	// nothing, and the store's list asks for before from the moment its entry exists.
+	a.publish(s)
 }
 
 // write appends one event to its session's open segment, opening one if needed.
@@ -663,7 +671,8 @@ func (a *Archive) renameEntry(s *sessionState, oldID, newID, newDir string, afte
 		}
 		ns.meta.Segments = append(ns.meta.Segments, seg)
 	}
-	s.meta.Segments, s.meta.Summary, s.meta.UpdatedAt = keep, before, latestWrite(keep)
+	// A CLONE: before was published, and the old id's live fold is Added to from here on.
+	s.meta.Segments, s.meta.Summary, s.meta.UpdatedAt = keep, before.Clone(), latestWrite(keep)
 	a.writeMeta(s)
 	if ns.metaDirty {
 		a.writeMeta(ns)
@@ -856,6 +865,13 @@ type indexEntry struct {
 	segments []SegmentInfo
 	open     bool
 	summary  session.SessionSummary
+	// startAfter and before are the writer's sessionState fields of the same names: where the
+	// store's current entry for this id began numbering, and the fold of what the session held
+	// then. before is SHARED with the writer rather than copied, because it is immutable: begin
+	// makes it as a fresh clone, nothing folds into it, and renameEntry clones it before reusing it
+	// as a live fold.
+	startAfter uint64
+	before     *session.SummaryFold
 }
 
 // publish replaces s's entry in the reader index. Writer goroutine only.
@@ -867,6 +883,7 @@ func (a *Archive) publish(s *sessionState) {
 	}
 	e.summary = s.meta.Summary.Summary(s.meta.ID)
 	e.summary.CreatedAt, e.summary.UpdatedAt = s.meta.CreatedAt, s.meta.UpdatedAt
+	e.startAfter, e.before = s.startAfter, s.before
 	a.idxMu.Lock()
 	a.index[s.meta.ID] = e
 	a.idxMu.Unlock()
