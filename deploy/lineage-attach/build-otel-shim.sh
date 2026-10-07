@@ -249,7 +249,9 @@ build_image() {
 
 # Attestation: the bake proves itself before anything is loaded. Gate off, not
 # one opentelemetry module may load; gate on, the hook ran, the exporter
-# selection is explicit, and the propagator injects a traceparent.
+# selection is explicit, and the propagator injects a traceparent. No `assert`
+# here: the interpreter runs under the image's own ENV, and PYTHONOPTIMIZE
+# strips asserts.
 verify_inert() {
   if ! "$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
 import sys
@@ -263,14 +265,14 @@ raise SystemExit("gate off, yet otel loaded: %s" % loaded if loaded else 0)'; th
 verify_propagates() {
   if ! "$CONTAINER_TOOL" run --rm --network=none -e LINEAGE_PROPAGATE=1 --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
 import os, sys
-assert "opentelemetry.instrumentation.auto_instrumentation" in sys.modules, "hook did not run"
-assert os.environ.get("OTEL_TRACES_EXPORTER") is not None, "exporter selection not pinned"
+"opentelemetry.instrumentation.auto_instrumentation" in sys.modules or sys.exit("hook did not run")
+os.environ.get("OTEL_TRACES_EXPORTER") is not None or sys.exit("exporter selection not pinned")
 from opentelemetry import trace
 from opentelemetry.propagate import inject
 with trace.get_tracer("attest").start_as_current_span("attest"):
     carrier = {}
     inject(carrier)
-assert "traceparent" in carrier, "propagator injects nothing: %r" % carrier'; then
+"traceparent" in carrier or sys.exit("propagator injects nothing: %r" % carrier)'; then
     echo "ATTESTATION FAILED for ${WRAPPER_TAG}: gate on, but the hook did not come up." >&2
     exit 4
   fi
