@@ -26,7 +26,7 @@ permissions:
 # Scoped by ref, because main-latest is the first FIXED, reused release target this
 # repo has had: every v* tag is unique, so two runs never contended for the same
 # assets before. Two merges inside one build window would otherwise have both runs
-# uploading 17 files with --clobber, interleaving into a mixed asset set plus a
+# uploading every asset with --clobber, interleaving into a mixed asset set plus a
 # checksums.txt from whichever finished last — which users meet as "checksum
 # verification failed", an alarming message for what is really a publish race.
 # Superseding is right for a rolling channel: only the newest tip matters.
@@ -130,11 +130,8 @@ jobs:
           # scripts/profile-tags; never enumerate tag combos here.
           profile_tags() { go -C scripts/profile-tags run . "$1"; }
           full_tags=$(profile_tags full)
-          lite_tags=$(profile_tags lite)
           declare -a proxy_variants=(
             ":${full_tags}"
-            "lite:${lite_tags}"
-            "sessionbudget:${full_tags},include_plugin_sessionbudget"
           )
 
           build_proxy() {
@@ -213,12 +210,6 @@ jobs:
           add '`cortex` was called `authbridge-proxy` (and `cortex-envoy`, `-cpex`, `-praxis` were'
           add '`authbridge-*`); image and container names are unchanged. Setup removes the old'
           add 'binary once the service no longer runs it. Stop a proxy you started by hand first.'
-          add ''
-          add '`cortex` ships in variants matching the container images:'
-          add 'unqualified (default plugin set, matches the `authbridge` image),'
-          add '`-lite` (trimmed plugin set, matches `authbridge-lite`), plus one variant per'
-          add 'opt-in plugin currently offered for try-out (today: `-sessionbudget`).'
-          add 'Variants track opt-in plugins one-for-one; arbitrary combinations are not published.'
           add ''
           add 'Verify downloads with `sha256sum -c checksums.txt`. On macOS, clear the'
           add 'Gatekeeper quarantine after extracting: `xattr -dr com.apple.quarantine ./agentop`.'

@@ -351,18 +351,13 @@ shipped artifact.
 `v*` tag pushes trigger `.github/workflows/release-binaries.yaml`, which
 cross-compiles `cortex` and `agentop` for linux/darwin ×
 amd64/arm64 and attaches tarballs to the GitHub Release. `cortex`
-ships in variants that mirror the container images:
-
-| Variant | Tarball name shape | Matches |
-|---|---|---|
-| unqualified (default plugins) | `cortex_<ver>_<os>_<arch>.tar.gz` | `authbridge` image |
-| `-lite` (sidecar-minimum plugin set — see `scripts/profile-tags`) | `cortex-lite_<ver>_<os>_<arch>.tar.gz` | `authbridge-lite` image |
-| `-sessionbudget` (default + opt-in session-budget) | `cortex-sessionbudget_<ver>_<os>_<arch>.tar.gz` | no image today |
-
-One variant per opt-in plugin currently offered for try-out (today:
-`-sessionbudget`) — never enumerate combos. To add one, append to the
-`proxy_variants` array in the workflow. `cortex-cpex` stays image-only
-(needs cgo); `context-guru` is opt-in but not yet offered as a variant.
+ships one tarball shape, `cortex_<ver>_<os>_<arch>.tar.gz`, built with the
+default plugin set (the `authbridge` image's). No other binary variant is
+published: the `lite` profile ships only as the `authbridge-lite` image, and
+opt-in plugins such as `sessionbudget` and `context-guru` are built from
+source. To publish a variant, append a `<suffix>:<build-tags>` entry to the
+`proxy_variants` array in the workflow — never enumerate combos.
+`cortex-cpex` stays image-only (needs cgo).
 
 **Go modules** (12 in total; `go.work` links 9 of them — the three
 self-contained `demos/*` modules are outside the workspace. `go-tidy-check` in
