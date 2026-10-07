@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sort"
+	"strings"
 	"testing"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -117,6 +118,29 @@ type fixture struct {
 	// a listener that reordered them would tell an operator a different
 	// story about which gate spoke first.
 	expectedInvocations []invocationSummary
+
+	// expectedUpstream, when non-nil, pins the request AS THE UPSTREAM
+	// RECEIVED IT on every listener — the bytes and the Content-Length that
+	// travelled, not what the plugin believed it set. It is the only field
+	// here that looks past the session event at the wire.
+	//
+	// This exists because a plugin-driven body rewrite reaches the upstream
+	// through completely unrelated code on each shape: the proxies replace
+	// Request.Body and re-stamp Content-Length in Go, while extproc emits
+	// Envoy's BodyMutation proto with a content-length SetHeaders entry
+	// beside it (BUFFERED + SEND leaves the length to the processor and
+	// Envoy rejects a mismatch). Nothing in the session event distinguishes
+	// a rewrite that landed on the wire from one that was computed, emitted
+	// as a modify Invocation, and then dropped — the pipeline reports
+	// success either way — so without this the suite could only have
+	// compared the two listeners' accounts of their own intent.
+	//
+	// Non-nil ALSO switches the capture on; left nil, a fixture makes no
+	// claim about upstream and the drivers record nothing. Deliberate: the
+	// extproc leg is DERIVED (see extprocUpstream) and is only faithful
+	// where the fixture controls the request shape, so fixtures opt in
+	// rather than inheriting a comparison they were not written for.
+	expectedUpstream *upstreamSummary
 }
 
 // contentType returns the fixture's response content-type or a sensible
@@ -197,6 +221,10 @@ type observation struct {
 	// would flake. What is comparable — and what was actually wrong — is
 	// whether a listener reports a duration at all.
 	HasDuration bool
+	// Upstream is the request as it left the listener, nil when the fixture
+	// did not ask (expectedUpstream) or when nothing reached the upstream at
+	// all — a denial, where nil on every leg is the correct answer.
+	Upstream *upstreamSummary
 	// Inference is the token report the event carried, nil when it carried none.
 	//
 	// IT IS NOT A RESTATEMENT OF THE COST RECORD, which travels separately in
@@ -224,6 +252,21 @@ type inferenceSummary struct {
 	OutputTokens     int
 	ReasoningTokens  int
 	PresentKinds     uint8
+}
+
+// upstreamSummary is the forwarded request reduced to the two things a body
+// rewrite has to get right together.
+//
+// ContentLength is the HEADER AS A STRING rather than a parsed length, because
+// the failure worth catching is a header that disagrees with the bytes — and
+// "absent" has to stay distinguishable from "0". Either listener can get one
+// half right and the other wrong: the proxies set the header and
+// Request.ContentLength from the same len() but the transport may re-derive it,
+// and extproc's two halves are separate fields of separate proto messages that
+// nothing cross-checks.
+type upstreamSummary struct {
+	Body          string
+	ContentLength string
 }
 
 // identitySummary mirrors pipeline.EventIdentity. Scopes compared as an
@@ -520,7 +563,77 @@ func runExtproc(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *obser
 		}
 	}
 
-	return finalizeObservation(t, f, observe(t, store, f.direction, wantPhase), extprocWireStatus(stream))
+	wireStatus := extprocWireStatus(stream)
+	obs := finalizeObservation(t, f, observe(t, store, f.direction, wantPhase), wireStatus)
+	if obs != nil && f.expectedUpstream != nil {
+		obs.Upstream = extprocUpstream(f, stream, wireStatus)
+	}
+	return obs
+}
+
+// extprocUpstream derives the request Envoy would forward from the protos this
+// listener actually emitted. There is no upstream on this leg to ask — Envoy
+// owns the connection and ext_proc only returns instructions about it — so this
+// applies those instructions the way Envoy would and reports the result, which
+// is what makes the answer comparable with the proxies' real httptest upstream.
+//
+// The starting point is the request as the driver sent it, because a reply that
+// carries no mutation means "forward what you buffered". A content-length
+// SetHeaders entry overrides the header, a BodyMutation overrides the bytes,
+// and the two are read INDEPENDENTLY on purpose: emitting one without the other
+// is precisely the drift this is here to catch, and Envoy would reject the
+// result in BUFFERED + SEND mode rather than quietly fix it up.
+//
+// nil when an ImmediateResponse was sent — the request never reached an
+// upstream, which is the same answer the proxy drivers give for a denial.
+func extprocUpstream(f fixture, stream *mockStream, wireStatus int) *upstreamSummary {
+	if wireStatus != 0 {
+		return nil
+	}
+	out := &upstreamSummary{
+		Body:          string(f.reqBody),
+		ContentLength: fmt.Sprintf("%d", len(f.reqBody)),
+	}
+	for _, r := range stream.responses {
+		br, ok := r.Response.(*extprocv3.ProcessingResponse_RequestBody)
+		if !ok {
+			continue
+		}
+		cr := br.RequestBody.GetResponse()
+		if m := cr.GetBodyMutation(); m != nil {
+			out.Body = string(m.GetBody())
+		}
+		for _, sh := range cr.GetHeaderMutation().GetSetHeaders() {
+			if strings.EqualFold(sh.GetHeader().GetKey(), "content-length") {
+				out.ContentLength = headerValueString(sh.GetHeader())
+			}
+		}
+	}
+	return out
+}
+
+// headerValueString reads a corev3.HeaderValue written either way round.
+// RawValue is what this repo's listeners emit and what Envoy prefers, but Value
+// is still legal and a reader that only checked one would silently see "".
+func headerValueString(h *corev3.HeaderValue) string {
+	if len(h.GetRawValue()) > 0 {
+		return string(h.GetRawValue())
+	}
+	return h.GetValue()
+}
+
+// captureUpstream records a forwarded request from inside an httptest upstream
+// handler. Shared by both proxy drivers so the two legs cannot disagree about
+// how they looked, and called BEFORE the handler writes anything so the
+// client's read of the response body orders the write against the test
+// goroutine's read — the same ordering upstreamHit already relies on.
+func captureUpstream(t *testing.T, listener string, r *http.Request) *upstreamSummary {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Errorf("%s: reading forwarded request body: %v", listener, err)
+	}
+	return &upstreamSummary{Body: string(body), ContentLength: r.Header.Get("Content-Length")}
 }
 
 // extprocWireStatus reads the HTTP status from an ImmediateResponse if
@@ -568,9 +681,15 @@ func runReverseProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 		t.Fatalf("reverseproxy handles Inbound only, got fixture %q direction=%v", f.name, f.direction)
 	}
 
-	var upstreamHit bool
+	var (
+		upstreamHit  bool
+		upstreamSeen *upstreamSummary
+	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHit = true
+		if f.expectedUpstream != nil {
+			upstreamSeen = captureUpstream(t, "reverseproxy", r)
+		}
 		if f.upstreamStatus == 0 {
 			t.Errorf("reverseproxy: upstream unexpectedly reached on deny fixture %q", f.name)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -625,7 +744,11 @@ func runReverseProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 		t.Errorf("reverseproxy: fixture %q asked for deny but upstream was reached", f.name)
 	}
 
-	return finalizeObservation(t, f, observe(t, store, pipeline.Inbound, wantPhase), resp.StatusCode)
+	obs := finalizeObservation(t, f, observe(t, store, pipeline.Inbound, wantPhase), resp.StatusCode)
+	if obs != nil {
+		obs.Upstream = upstreamSeen
+	}
+	return obs
 }
 
 // --- forwardproxy driver -------------------------------------------------
@@ -639,9 +762,15 @@ func runForwardProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 		t.Fatalf("forwardproxy handles Outbound only, got fixture %q direction=%v", f.name, f.direction)
 	}
 
-	var upstreamHit bool
+	var (
+		upstreamHit  bool
+		upstreamSeen *upstreamSummary
+	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHit = true
+		if f.expectedUpstream != nil {
+			upstreamSeen = captureUpstream(t, "forwardproxy", r)
+		}
 		if f.upstreamStatus == 0 {
 			t.Errorf("forwardproxy: upstream unexpectedly reached on deny fixture %q", f.name)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -701,7 +830,11 @@ func runForwardProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 		t.Errorf("forwardproxy: fixture %q asked for deny but upstream was reached", f.name)
 	}
 
-	return finalizeObservation(t, f, observe(t, store, pipeline.Outbound, wantPhase), resp.StatusCode)
+	obs := finalizeObservation(t, f, observe(t, store, pipeline.Outbound, wantPhase), resp.StatusCode)
+	if obs != nil {
+		obs.Upstream = upstreamSeen
+	}
+	return obs
 }
 
 // --- construction-only helpers -------------------------------------------
