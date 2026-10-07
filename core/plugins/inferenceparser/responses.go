@@ -335,19 +335,18 @@ func (u responsesUsage) toNeutral() parsercommon.TokenUsage {
 // streamed shape below, this one wasn't exercised by the live traffic this
 // file was built from (Codex always sends stream:true).
 type responsesNonStreaming struct {
-	Status string         `json:"status"`
-	Usage  responsesUsage `json:"usage"`
-	Output []struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"output"`
+	Status string                `json:"status"`
+	Usage  responsesUsage        `json:"usage"`
+	Output []responsesOutputItem `json:"output"`
 }
 
 // parseResponsesJSON parses a non-streaming (stream:false) Responses API
-// response: output items' text parts -> completion, usage -> token counts,
-// status -> a best-effort finish reason (see foldResponsesFrame for why
-// this API has no direct finish_reason/stop_reason equivalent).
+// response: output items' text parts -> completion, tool-call items ->
+// ToolCalls (same two shapes as foldResponsesFrame's response.output_item.done
+// case — there's no streaming here to tell "added" from "done", the item
+// just arrives complete), usage -> token counts, status -> a best-effort
+// finish reason (see foldResponsesFrame for why this API has no direct
+// finish_reason/stop_reason equivalent).
 func parseResponsesJSON(body []byte, ext *pipeline.InferenceExtension) {
 	var resp responsesNonStreaming
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -355,6 +354,7 @@ func parseResponsesJSON(body []byte, ext *pipeline.InferenceExtension) {
 		return
 	}
 	var b strings.Builder
+	var calls []pipeline.InferenceToolCall
 	for _, item := range resp.Output {
 		for _, part := range item.Content {
 			if part.Text == "" {
@@ -365,8 +365,15 @@ func parseResponsesJSON(body []byte, ext *pipeline.InferenceExtension) {
 			}
 			b.WriteString(part.Text)
 		}
+		switch item.Type {
+		case "custom_tool_call":
+			calls = append(calls, pipeline.InferenceToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Input})
+		case "function_call":
+			calls = append(calls, pipeline.InferenceToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
+		}
 	}
 	ext.Completion = b.String()
+	ext.ToolCalls = calls
 	if resp.Status != "" {
 		ext.FinishReason = resp.Status
 	}
@@ -383,10 +390,15 @@ func parseResponsesJSON(body []byte, ext *pipeline.InferenceExtension) {
 // response.output_item.added, response.content_part.added,
 // response.output_text.delta (repeated), response.output_text.done,
 // response.content_part.done, response.output_item.done, response.completed
-// — the full sequence confirmed on live Codex traffic. Only the two event
-// types that carry something this parser extracts are modeled: the
-// repeated text delta, and the terminal event's full response snapshot
-// (status + usage).
+// — the full sequence confirmed on live Codex traffic. A tool call adds two
+// more, confirmed on a live Codex turn that ran its `exec` tool:
+// response.custom_tool_call_input.delta (repeated, mirrors output_text.delta
+// for the tool's input text) and response.custom_tool_call_input.done — but
+// neither needs modeling here, because the SAME information arrives complete
+// on response.output_item.done's own item field once the call finishes; see
+// Item below. The event types this parser extracts something from are:
+// the repeated text delta, a completed tool-call item, and the terminal
+// event's full response snapshot (status + usage).
 type responsesStreamEvent struct {
 	Type     string  `json:"type"`
 	Delta    *string `json:"delta"` // response.output_text.delta's text fragment
@@ -394,13 +406,52 @@ type responsesStreamEvent struct {
 		Status string         `json:"status"`
 		Usage  responsesUsage `json:"usage"`
 	} `json:"response"` // the full snapshot on response.completed/incomplete/failed
+	Item *responsesOutputItem `json:"item"` // response.output_item.done's completed item
+}
+
+// responsesOutputItem is one item of a response's output — the completed
+// item on a streamed response.output_item.done event, or one entry of a
+// non-streaming response's top-level "output" array (responsesNonStreaming);
+// both wrap the same shape. Two item types carry a tool call, confirmed and
+// inferred respectively:
+//
+//   - "custom_tool_call" (confirmed on live Codex traffic: its own `exec`
+//     tool is this type) — a freeform-text tool, arguments carried in Input.
+//   - "function_call" (NOT confirmed on live traffic — Codex's own tool
+//     manifest declares both "custom" and "function" type tools, but the one
+//     real tool call this file was built from happened to use a custom one.
+//     Modeled from the publicly documented function_call item shape:
+//     JSON-schema arguments carried in Arguments, as a string, same as
+//     OpenAI Chat Completions' tool_calls[].function.arguments) — a
+//     JSON-schema tool, arguments carried in Arguments.
+//
+// A "message" item carries Content instead — its text parts. On the
+// streaming path this struct's Content is never populated: output_text.delta
+// events accumulate that text instead, and parsing the same text twice would
+// double it. Content exists on this struct only for the non-streaming path
+// (parseResponsesJSON), which has no deltas to accumulate from and reads the
+// item whole.
+type responsesOutputItem struct {
+	Type      string `json:"type"`
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Input     string `json:"input"`     // custom_tool_call's freeform argument text
+	Arguments string `json:"arguments"` // function_call's JSON-schema arguments
+	Content   []struct {
+		Text string `json:"text"`
+	} `json:"content"` // "message" item's text parts — non-streaming path only
 }
 
 // foldResponsesFrame folds one Responses API SSE event into the running
 // stream state. The completion accumulates from response.output_text.delta
-// events; usage and a best-effort finish reason arrive together on whichever
-// terminal event ends the stream — response.completed on the one live sample
-// this file was built from, plus the two other terminal events the published
+// events; a completed tool call arrives whole on response.output_item.done
+// (no incremental assembly needed — unlike Anthropic's tool_use blocks,
+// which split call id/name and arguments across separate events, this API's
+// output_item.done restates the full call_id, name, and input/arguments in
+// one event, confirmed on a live Codex turn that ran its `exec` tool); usage
+// and a best-effort finish reason arrive together on whichever terminal
+// event ends the stream — response.completed on the one live sample this
+// file was built from, plus the two other terminal events the published
 // schema documents: response.incomplete (hit a limit, was cancelled) and
 // response.failed (an upstream error). All three carry the same response
 // snapshot shape, so one case handles them identically; OpenAI's own
@@ -423,6 +474,24 @@ func foldResponsesFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 	case "response.output_text.delta":
 		if ev.Delta != nil {
 			state.completion.WriteString(*ev.Delta)
+		}
+	case "response.output_item.done":
+		if ev.Item == nil {
+			return
+		}
+		switch ev.Item.Type {
+		case "custom_tool_call":
+			state.responsesToolCalls = append(state.responsesToolCalls, pipeline.InferenceToolCall{
+				ID:        ev.Item.CallID,
+				Name:      ev.Item.Name,
+				Arguments: ev.Item.Input,
+			})
+		case "function_call":
+			state.responsesToolCalls = append(state.responsesToolCalls, pipeline.InferenceToolCall{
+				ID:        ev.Item.CallID,
+				Name:      ev.Item.Name,
+				Arguments: ev.Item.Arguments,
+			})
 		}
 	case "response.completed", "response.incomplete", "response.failed":
 		if ev.Response == nil {

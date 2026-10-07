@@ -243,6 +243,12 @@ func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) 
 // interleaved blocks (a text block and two tool calls) are only
 // distinguishable by the block index the provider stamps on each frame.
 // openTool is the fallback for a provider that omits the index.
+//
+// responsesToolCalls holds the Responses API's tool calls instead — a
+// different shape with the same destination. foldResponsesFrame reads a
+// completed call whole off a single response.output_item.done event (see
+// responses.go), so there is nothing to assemble: no index map, no
+// in-progress fallback, just a plain append-as-they-complete list.
 type inferenceStreamState struct {
 	completion strings.Builder
 	usage      parsercommon.TokenUsage
@@ -251,6 +257,8 @@ type inferenceStreamState struct {
 	toolCalls    []*anthropicToolCallState
 	toolsByIndex map[int]*anthropicToolCallState
 	openTool     *anthropicToolCallState
+
+	responsesToolCalls []pipeline.InferenceToolCall
 }
 
 // finalize copies the accumulated stream state onto the public extension
@@ -262,16 +270,17 @@ func (s *inferenceStreamState) finalize(ext *pipeline.InferenceExtension) {
 	if s.hasUsage {
 		s.usage.Fill(ext)
 	}
-	if len(s.toolCalls) == 0 {
-		return
-	}
-	calls := make([]pipeline.InferenceToolCall, 0, len(s.toolCalls))
+	calls := make([]pipeline.InferenceToolCall, 0, len(s.toolCalls)+len(s.responsesToolCalls))
 	for _, tc := range s.toolCalls {
 		calls = append(calls, pipeline.InferenceToolCall{
 			ID:        tc.id,
 			Name:      tc.name,
 			Arguments: tc.args.String(),
 		})
+	}
+	calls = append(calls, s.responsesToolCalls...)
+	if len(calls) == 0 {
+		return
 	}
 	ext.ToolCalls = calls
 }
