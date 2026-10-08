@@ -27,6 +27,7 @@ AuthBridge pipeline YAML, not whether it is compiled into the binary
 | [`cpex`](#cpex) | APL DSL + named [CPEX](https://github.com/contextforge-org/cpex) plugins (Cedar, PII, audit, …) over a single chain step. | Opt-in | Outbound | No |
 | [`ibac`](#ibac) | LLM-judge intent-based access control for outbound tool calls. | Alpha | Outbound | No |
 | [`inference-parser`](#inference-parser) | Parses LLM completions into `pctx.Extensions.Inference`. | Alpha | Outbound | No |
+| [`inference-router`](#inference-router) | Sends each coding agent's new sessions to the inference server chosen for it; a session stays on the server it started on. | Alpha | Outbound | No |
 | [`jwt-validation`](#jwt-validation) | Inbound JWT validation (signature, issuer, audience) against JWKS. | Ready | Inbound | YES |
 | [`lineage-telemetry`](#lineage-telemetry) | Emits two facts-only OTel lineage spans per HTTP exchange, parented across pods through one `tracestate` member. | Alpha | Both | No |
 | [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` (with `-original` fallback) and enforces a daily budget limit. Place on whichever chain carries LLM traffic — inbound when fronting the LLM endpoint, outbound when hosting an agent via `authbridge exec`. | Alpha | Both | No |
@@ -144,6 +145,64 @@ is published as a cost record keyed `cost` on the session event (see
 No configuration — no config struct, does not implement `Configurable`. Rates arrive by
 injection from the top-level [`pricing:`](pricing.md#overriding-in-config) section; with none configured the parser
 still parses and reports the traffic as unpriced.
+
+## `inference-router`
+
+Sends a coding agent's new sessions to the inference server chosen for it — a
+LiteLLM gateway, say, with its own URL and key — and keeps every session on the
+server it started on. Routing is opt-in per agent: an agent not listed under
+`agents` is not routed, and its requests, keys included, pass untouched. Manage it
+with [`agentop server`](../cmd/agentop/README.md#choosing-an-inference-server-agentop-server);
+the config stays hand-editable. Built for the laptop: it needs a listener that
+honors a redirect, so `cortex-envoy` and a config with an `mtls:` block refuse it
+at startup, and in-cluster use has not been examined.
+
+- `servers` (map, required) — inference servers by name: lowercase letters, digits, `.`, `_` and `-`. Each has:
+  - `url` (string, required) — `scheme://host[:port]`, `http` or `https`, no path, query or fragment. A port must be 1–65535; the scheme's default is dropped, so `https://x:443` is `x`. No two servers may share a host, compared without port or case: a session's server is named from the host its requests went to. A plain-`http` server on another machine logs a WARN at load, since routed requests would cross the network decrypted.
+  - `key` (string, required) — the API key sent to this server in place of the client's, in the header the client used: `X-Api-Key` when it sent one, `Authorization: Bearer` otherwise, both when it sent both. Printable ASCII, no spaces. `/config` and `/v1/pipeline` redact it.
+  - `opus`, `sonnet`, `haiku` — reserved for mapping Claude Code's model families to a server's own models, and refused until that lands.
+- `agents` (map) — agent name, as agentop shows it (`claude-code`, `opencode`), to a server name. Each value must name a listed server. `unknown`, the name for requests with no User-Agent, cannot be routed.
+
+```yaml
+      - name: inference-router
+        config:
+          servers:
+            ete:
+              url: https://ete-litellm.example.com
+              key: sk-…
+            glm:
+              url: https://glm-litellm.example.com
+              key: sk-…
+          agents:
+            claude-code: glm     # only agents listed here are routed
+```
+
+**What it does to a request.** Only a request the forward proxy re-sends — a plain
+proxied one, or one decrypted by the TLS bridge — can be routed; a `CONNECT` is
+`skip/not_redirectable`. A request to a host no server has is
+`skip/not_an_inference_server`. On a server's host every path is handled,
+`/v1/models` and `count_tokens` included, and the session decides:
+
+- A session's first request pins it, in the process store, to its agent's server at
+  that moment, or to "not routed". Every request renews the pin, which lapses 30
+  days after the last. Changing `agents` therefore moves only new sessions; the
+  pins survive a hot reload but not a restart. A request with no session follows
+  its agent's current server, unpinned.
+- Not routed: `skip/not_routed`, and the request is left as the client sent it.
+- Pinned to a server since removed by hand: `deny/pinned_server_removed`, a 503
+  asking for a new session. The conversation is never moved to another server.
+- Otherwise the request goes to the server — redirected when it is not already
+  there, which the framework records as `modify/redirected` — the key is replaced,
+  and the router records `modify/routed` with `server` and `pin` (`new`,
+  `existing` or `none`).
+- Under `on_error: observe` nothing moves, the client's key stays, and the record
+  is `observe/would_route`.
+
+**Put it last in the outbound chain**, where `agentop server add` puts it. A
+redirect moves `pctx.Host`, so the plugins before the router decide on the host
+the client asked for, and a plugin after it would see the server's instead; put
+nothing after it that keys on the host. Session events, usage and cost follow the
+server's host, and each event's `requestedHost` keeps the one asked for.
 
 ## `jwt-validation`
 

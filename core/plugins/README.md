@@ -16,6 +16,7 @@ Built-in plugins and the open plugin registry. Plugin authoring docs live under
 | `a2a-parser` | Parse Agent-to-Agent JSON-RPC traffic into `Extensions.A2A` |
 | `mcp-parser` | Parse Model Context Protocol traffic into `Extensions.MCP` |
 | `inference-parser` | Parse OpenAI-style / Ollama inference traffic into `Extensions.Inference` |
+| [`inference-router`](../../docs/plugin-catalog.md#inference-router) | Send each coding agent's new sessions to the inference server chosen for it; a session stays on the server it started on |
 | [`ibac`](../../docs/ibac-plugin.md) | Outbound Intent-Based Access Control: LLM judge denies outbound HTTP that doesn't align with the user's most recent intent. Catches prompt-injection / data-exfiltration attempts |
 | `opa` | OPA policy evaluation on inbound and outbound requests via bundle download |
 
@@ -50,7 +51,7 @@ named profiles in `scripts/profile-tags`:
 | Profile | Carries |
 |---------|---------|
 | `local` | the three parsers + `tool-prune` |
-| `full` | all thirteen non-optional plugins |
+| `full` | all fourteen non-optional plugins |
 | `lite` | jwt-validation, token-exchange, litellm-budget-track, static-inject |
 | `envoy`, `cpex` | the sets those binaries shipped historically |
 
