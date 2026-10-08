@@ -278,7 +278,9 @@ chosen one, whatever provider was picked in OpenCode, so it works only between
 servers that serve the model names OpenCode asks for. The reason to do it is to
 keep keys out of `opencode.json`: on a routed request the router puts the
 configured server's key in the `X-Api-Key` or `Authorization` header OpenCode
-sent, and when OpenCode sent neither, it adds `Authorization: Bearer <key>`.
+sent, and when OpenCode sent neither, it adds `Authorization: Bearer <key>`. No
+other header is replaced, so a credential OpenCode sends in any other header
+reaches the server unchanged.
 
 ## Verified depth
 

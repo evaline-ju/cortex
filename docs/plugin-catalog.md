@@ -159,7 +159,7 @@ at startup, and in-cluster use has not been examined.
 
 - `servers` (map, required) — inference servers by name: lowercase letters, digits, `.`, `_` and `-`. Each has:
   - `url` (string, required) — `scheme://host[:port]`, `http` or `https`, no path, query or fragment. A port must be 1–65535; the scheme's default is dropped, so `https://x:443` is `x`. No two servers may share a host, compared without port or case: a session's server is named from the host its requests went to. A plain-`http` server on another machine logs a WARN at load, since routed requests would cross the network decrypted.
-  - `key` (string, required) — the API key sent to this server in place of the client's, in the header the client used: `X-Api-Key` when it sent one, `Authorization: Bearer` otherwise, both when it sent both. Printable ASCII, no spaces. `/config` and `/v1/pipeline` redact it.
+  - `key` (string, required) — the API key sent to this server in place of the client's, in the header the client used: `X-Api-Key` when it sent one, `Authorization: Bearer` otherwise, both when it sent both. Those two are the only headers replaced: a credential the client sends in any other header, such as one Claude Code's `ANTHROPIC_CUSTOM_HEADERS` sets, reaches the server unchanged. Printable ASCII, no spaces. `/config` and `/v1/pipeline` redact it.
   - `opus`, `sonnet`, `haiku` — reserved for mapping Claude Code's model families to a server's own models, and refused until that lands.
 - `agents` (map) — agent name, as agentop shows it (`claude-code`, `opencode`), to a server name. Each value must name a listed server. `unknown`, the name for requests with no User-Agent, cannot be routed.
 
@@ -184,17 +184,33 @@ transparently redirected connection is dialed where the client chose, and is
 `skip/not_an_inference_server`. On a server's host every path is handled,
 `/v1/models` and `count_tokens` included, and the session decides:
 
-- A session's first request pins it, in the process store, to where that request
-  went: its agent's server when the redirect took effect, or "not routed" when the
-  request stayed where the client sent it — because the agent is not routed, or
-  because the router runs under `on_error: observe`, even for an agent with a
-  server. A session started under observe therefore stays unrouted after a switch
-  to enforce. A first request whose redirect failed pins nothing, and the next one
-  decides again. Every request renews the pin, which lapses 30 days after the last.
-  Changing `agents` therefore moves only new sessions; the pins survive a hot
-  reload but not a restart. A request with no session follows its agent's current
-  server, unpinned, and so does one filed under a synthetic session — the `default`
-  bucket or a `pending:<agent>` id — since each holds many conversations, not one.
+- The first request the router sees from a session pins it, in the process store,
+  to where that request went: a server when the redirect took effect, or "not
+  routed" when the request stayed where the client sent it — because the agent is
+  not routed, or because the router runs under `on_error: observe`, even for an
+  agent with a server. A session started under observe therefore stays unrouted
+  after a switch to enforce. A first request whose redirect failed pins nothing,
+  and the next one decides again. Every request renews the pin, which lapses 30
+  days after the last.
+- Where that request goes is decided by the session's history, for a routed
+  agent: a session already running when routing was first configured, quiet while
+  it was, has no pin but is not new. The latest earlier inference request that
+  agent sent in the session, as the session store holds it, decides: one that went
+  to a server's host keeps the session on that server, from then with that server's
+  key; one that went to any other host leaves it not routed; and only a session with
+  no such request is new and goes to its agent's current server.
+- A pin is its agent's. A request from another agent filed under the same session
+  id — the active-session fallback with client affinity off, or a header id two
+  clients share — is decided as if the session were unpinned, from that agent's own
+  history and server, and leaves the pin alone.
+- Changing `agents` therefore moves only new sessions while the proxy runs: the
+  pins and the history survive a hot reload. A restart loses both — the router reads
+  the store's history in memory, not the session archive on disk — so a running
+  session's next request after a restart is treated as a new session's, and moves
+  if its agent's server is another. A request with no session follows its agent's
+  current server, unpinned, and so does one filed under a synthetic session — the
+  `default` bucket or a `pending:<agent>` id — since each holds many conversations,
+  not one.
 - Not routed: `skip/not_routed`, and the request is left as the client sent it.
 - Pinned to a server since removed: `deny/pinned_server_removed`, a 503 asking for
   a new session. The conversation is never moved to another server.

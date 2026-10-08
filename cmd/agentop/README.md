@@ -657,8 +657,10 @@ verified, and its known issues.
 With several LiteLLM servers, each with its own URL and key, `agentop server`
 chooses which one an agent's **new** sessions use, through the
 [`inference-router`](../../docs/plugin-catalog.md#inference-router) plugin. A
-session stays on the server it started on. Routing is opt-in per agent: until an
-agent is given a server, its traffic goes where the agent sends it.
+session stays on the server it started on, including one already running when its
+agent is first routed, until the proxy restarts: a restarted proxy treats every
+session it sees as a new one. Routing is opt-in per agent: until an agent is given
+a server, its traffic goes where the agent sends it.
 
 ```sh
 agentop server add ete https://ete-litellm.example.com   # asks for the key; it does not echo
@@ -680,7 +682,8 @@ With Claude Code's `ANTHROPIC_BASE_URL` at `ete`, the listing after `use` reads:
 ```
 
 - **`add <name> <url>`** reads the key at a prompt that does not echo, or from
-  stdin with `--key-stdin`. It is never an argument, so it never reaches shell
+  stdin with `--key-stdin`, which is refused when stdin is a terminal, where the key
+  would echo as typed. It is never an argument, so it never reaches shell
   history. A name that exists is replaced only after a yes (`--yes` skips the
   question), which is how a key is rotated; with no terminal to ask on, nothing is
   written. A server on a host another server already has, on any port, is
@@ -689,7 +692,8 @@ With Claude Code's `ANTHROPIC_BASE_URL` at `ete`, the listing after `use` reads:
   environment variable.
 - **`use <name> --agent <agent>`** routes the agent's new sessions to the server,
   including an agent that has not run yet. **`reset --agent <agent>`** stops
-  routing it.
+  routing it. Either way a session already running stays where it is if it has sent
+  a request since the proxy started, which is how the router knows where it is.
 - **`remove <name>`** refuses while an agent is routed to the server, and names
   the command that takes the agent off it; it also refuses the last server. A
   session that started on a removed server gets a 503 asking for a new session
@@ -702,7 +706,10 @@ With Claude Code's `ANTHROPIC_BASE_URL` at `ete`, the listing after `use` reads:
   model variable names a model other than Claude's (see
   [Switching inference servers](../../docs/agents/claude-code.md#switching-inference-servers)).
   It reads that one file, so it cannot see a project's settings, a file passed
-  with `claude --settings`, or a variable set in the shell.
+  with `claude --settings`, or a variable set in the shell. When the router's entry
+  has `on_error: observe`, which records what it would route and routes nothing, or
+  `on_error: off`, which stops it running, the listing says so first, and `use` and
+  `add` say so too.
 
 Two things the router needs that `agentop server` does not check. It routes only
 requests it can read: a plain `http` request sent through the proxy, or an `https`
@@ -715,13 +722,18 @@ requests go. And a server is `scheme://host[:port]` only: a routed request keeps
 its own path, so an agent whose base URL has a path needs that same path on every
 server.
 
-Every change is written to `~/.cortex/config.yaml`, keeping its comments, and
-returns once the proxy has reloaded it; nothing restarts. If the proxy refuses the
-reload, the command puts the file back as it was, prints the proxy's error and exits
-1, and the proxy keeps the configuration it had. If the proxy reports neither a
-reload nor a refusal within 30 seconds, the command exits 1 and leaves the file as
-written. With no proxy running the file is still written, and the change applies at
-the next start. Nothing is written unless the result loads as a Cortex config and
+Every change is written to `~/.cortex/config.yaml`, keeping its comments except
+those on the lines the change replaces or removes, every line of a removed block
+among them, and returns once the proxy has reloaded it; nothing restarts. If the
+proxy refuses the reload, the command puts the file back as it was, prints the
+proxy's error and exits 1, and the proxy keeps the configuration it had. If the
+proxy stops answering before it reports the reload, the command puts the file back
+the same way, says the proxy stopped answering, and exits 1. A file someone edited
+while the proxy was reloading is not put back but left as found, with an error
+saying so. If the proxy reports neither a reload nor a refusal within 30 seconds,
+the command exits 1 and leaves the file as written. With no proxy running the file is still written, and the change applies at
+the next start, to every session from then: a proxy that starts knows where no
+session is. Nothing is written unless the result loads as a Cortex config and
 passes the router's own rules; what only the running proxy can check, such as
 whether its build includes the router, is what a refused reload reports. A change
 that changes nothing writes nothing. `--config PATH` points every form at another

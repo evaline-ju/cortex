@@ -160,20 +160,28 @@ That one configuration is:
 a LiteLLM gateway in front of Claude does; mapping them to another server's models
 is not built yet.
 
-The key is the server's: on a routed request the router replaces whatever key
-Claude Code sends with the configured server's, in the header Claude Code used, so
-`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` can stay as it is.
+The key is the server's: on a routed request the router puts the configured
+server's key in the header Claude Code sent its own in, `X-Api-Key` for
+`ANTHROPIC_API_KEY` and `Authorization` for `ANTHROPIC_AUTH_TOKEN`, so either can
+stay as it is. Those two headers are all it replaces: a credential in any other
+header, such as one set through `ANTHROPIC_CUSTOM_HEADERS`, reaches the server
+unchanged.
 
 Claude Code keeps naming the model it asked for, so agentop is where the server
 shows: the events table's host is where each request went, and the detail pane's
 `redirected:` line names the host Claude Code asked for when it was another.
 
-A session is pinned on its first request, so switch **before** `/clear` or a new
-`claude`, not after. A proxy restart forgets the pins: a running conversation then
-follows its agent's current server from its next request. A conversation carried to
-a new session id is pinned as new, to its agent's current server, which happens in
-three ways: Claude Code's continued-in hand-off copies a live conversation to a new
-id; `claude daemon` starts background jobs with
+A session is pinned on the first request the router sees from it, so switch
+**before** `/clear` or a new `claude`, not after. A conversation already running
+when you first route Claude Code keeps the server its requests were going to, even
+if it sent nothing while you ran `agentop server`: Cortex reads where its last
+request went from the session's history, and from then on sends it there with that
+server's key. A proxy restart forgets the pins and that history, so a running
+conversation's next request after a restart is taken for a new session's and goes
+to Claude Code's current server; see [Known issues](#known-issues). A conversation
+carried to a new session id is pinned as new, to its agent's current server, which
+happens in three ways: Claude Code's continued-in hand-off copies a live
+conversation to a new id; `claude daemon` starts background jobs with
 `--session-id <new> --fork-session --resume <parent>`; and `/clear` with background
 subagents running moves their traffic to the new id.
 
@@ -222,6 +230,14 @@ against a fake stats server.
 - **`disable` discards hand-edits.** If you change one of the seven keys by hand after
   `enable`, `disable` still puts back the value from before `enable`, without a warning
   ([#1289](https://github.com/rossoctl/cortex/issues/1289)).
+- **A proxy restart can move a running conversation to another server.** Cortex
+  keeps a conversation on its server by a pin and by the session's history, and
+  both live in the proxy's memory; the session archive on disk is not read for it.
+  After a restart, a conversation's next request looks like a new session's and
+  goes to the server Claude Code is routed to now, so one started on a different
+  server moves, mid-conversation. To keep it where it was, route Claude Code back
+  to that server with `agentop server use <name> --agent claude-code` before
+  continuing it, and switch again once it has sent a request, which pins it there.
 - **A continued conversation can show twice.** Claude Code sometimes moves a live
   conversation to a new session id. agentop then shows two rows with the same title, and
   the older row keeps the copied title. Cortex does not yet read Claude Code's record of
