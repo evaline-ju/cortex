@@ -275,7 +275,9 @@ model inside a session. Cortex's `inference-router` therefore leaves OpenCode
 alone unless `agentop server use <name> --agent opencode` lists it. Listing it
 sends OpenCode's new sessions that address one of the configured servers to the
 chosen one, whatever provider was picked in OpenCode, so it works only between
-servers that serve the model names OpenCode asks for. The reason to do it is to
+servers that serve the model names OpenCode asks for. A session that used another
+provider first is still new to the router when it addresses a server: only a
+request to a configured server says which server a session is on. The reason to do it is to
 keep keys out of `opencode.json`: on a routed request the router puts the
 configured server's key in the `X-Api-Key` or `Authorization` header OpenCode
 sent, and when OpenCode sent neither, it adds `Authorization: Bearer <key>`. No

@@ -174,11 +174,14 @@ shows: the events table's host is where each request went, and the detail pane's
 A session is pinned on the first request the router sees from it, so switch
 **before** `/clear` or a new `claude`, not after. A conversation already running
 when you first route Claude Code keeps the server its requests were going to, even
-if it sent nothing while you ran `agentop server`: Cortex reads where its last
-request went from the session's history, and from then on sends it there with that
-server's key. A proxy restart forgets the pins and that history, so a running
-conversation's next request after a restart is taken for a new session's and goes
-to Claude Code's current server; see [Known issues](#known-issues). A conversation
+if it sent nothing while you ran `agentop server`: Cortex reads which server its
+last request reached from the session's history, and from then on sends it there
+with that server's key. That history is in the proxy's memory, which keeps the most
+recently used sessions (100 by default), so a conversation quiet long enough to be
+dropped before you route Claude Code is taken for a new session. A proxy restart
+forgets the pins and that history, so a running conversation's next request after a
+restart is taken for a new session's and goes to Claude Code's current server; see
+[Known issues](#known-issues). A conversation
 carried to a new session id is pinned as new, to its agent's current server, which
 happens in three ways: Claude Code's continued-in hand-off copies a live
 conversation to a new id; `claude daemon` starts background jobs with

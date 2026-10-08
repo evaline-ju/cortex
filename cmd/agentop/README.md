@@ -693,7 +693,9 @@ With Claude Code's `ANTHROPIC_BASE_URL` at `ete`, the listing after `use` reads:
 - **`use <name> --agent <agent>`** routes the agent's new sessions to the server,
   including an agent that has not run yet. **`reset --agent <agent>`** stops
   routing it. Either way a session already running stays where it is if it has sent
-  a request since the proxy started, which is how the router knows where it is.
+  a request to one of the servers since the proxy started, which is how the router
+  knows where it is — unless the proxy has since dropped it from memory, which keeps
+  the most recently used sessions (100 by default), before the router pinned it.
 - **`remove <name>`** refuses while an agent is routed to the server, and names
   the command that takes the agent off it; it also refuses the last server. A
   session that started on a removed server gets a 503 asking for a new session

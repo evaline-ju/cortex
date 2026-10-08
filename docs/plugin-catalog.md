@@ -195,19 +195,28 @@ transparently redirected connection is dialed where the client chose, and is
 - Where that request goes is decided by the session's history, for a routed
   agent: a session already running when routing was first configured, quiet while
   it was, has no pin but is not new. The latest earlier inference request that
-  agent sent in the session, as the session store holds it, decides: one that went
-  to a server's host keeps the session on that server, from then with that server's
-  key; one that went to any other host leaves it not routed; and only a session with
-  no such request is new and goes to its agent's current server.
+  agent sent in the session to a server's host, as the session store holds it,
+  keeps the session on that server, from then with that server's key. A session
+  with no such request is new and goes to its agent's current server. A request to
+  any other host is no evidence, since the router never routes one: an OpenCode
+  session that used another provider first is new when it addresses a server.
+  The history is read from the `inference` record `inference-parser` puts on each
+  request, so the rule needs `inference-parser` in the outbound chain; without it, a
+  session the router has not pinned is always treated as new.
 - A pin is its agent's. A request from another agent filed under the same session
-  id — the active-session fallback with client affinity off, or a header id two
-  clients share — is decided as if the session were unpinned, from that agent's own
-  history and server, and leaves the pin alone.
+  id — by process attribution, which files a command an agent runs under that
+  agent's session and is on by default on a laptop; by the active-session fallback
+  with client affinity off; or by a header id two clients share — is decided as if
+  the session were unpinned, from that agent's own history and server, and leaves
+  the pin alone.
 - Changing `agents` therefore moves only new sessions while the proxy runs: the
   pins and the history survive a hot reload. A restart loses both — the router reads
   the store's history in memory, not the session archive on disk — so a running
   session's next request after a restart is treated as a new session's, and moves
-  if its agent's server is another. A request with no session follows its agent's
+  if its agent's server is another. The store also drops quiet sessions while the
+  proxy runs — `session.max_sessions` (100 by default) evicts the least recently
+  used, and a configured `session.ttl` expires them — and a session dropped before
+  the router pinned it is treated as new too; a pin outlives that. A request with no session follows its agent's
   current server, unpinned, and so does one filed under a synthetic session — the
   `default` bucket or a `pending:<agent>` id — since each holds many conversations,
   not one.
