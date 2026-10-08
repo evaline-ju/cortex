@@ -45,6 +45,81 @@ type Server struct {
 	Haiku  string `json:"haiku" description:"This server's model for Claude Code's haiku requests (PR 4)."`
 }
 
+// Families are the Claude model families a server maps to models of its own, in
+// the order they are shown.
+var Families = []string{"opus", "sonnet", "haiku"}
+
+// Mapped reports whether s names its own models. A server that does not serves
+// Claude Code's own names, and the router passes every name through to it.
+func (s Server) Mapped() bool { return s.Opus != "" || s.Sonnet != "" || s.Haiku != "" }
+
+// ModelFor is s's model for family, one of Families, and "" for any other.
+func (s Server) ModelFor(family string) string {
+	switch family {
+	case "opus":
+		return s.Opus
+	case "sonnet":
+		return s.Sonnet
+	case "haiku":
+		return s.Haiku
+	}
+	return ""
+}
+
+// CheckModels reports whether s names its models the way the router maps them:
+// all three families, or none. name is the server's, for the message. A partial
+// set is refused rather than filled in, because nothing may fall back silently: a
+// family with no model would otherwise reach the server under Claude Code's name.
+func CheckModels(name string, s Server) error {
+	var given, missing []string
+	for _, f := range Families {
+		if s.ModelFor(f) != "" {
+			given = append(given, f)
+		} else {
+			missing = append(missing, f)
+		}
+	}
+	if len(given) == 0 || len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s names a model for %s but not for %s; give all three, or none if it serves Claude Code's own names",
+		name, joinWords(given, "and"), joinWords(missing, "or"))
+}
+
+// joinWords is "a", "a and b" or "a, b and c", with conj in place of "and".
+func joinWords(words []string, conj string) string {
+	if len(words) == 1 {
+		return words[0]
+	}
+	return strings.Join(words[:len(words)-1], ", ") + " " + conj + " " + words[len(words)-1]
+}
+
+// Family is the Claude model family a requested model name belongs to: "opus",
+// "sonnet" or "haiku" when exactly one of them is a word of the name — split at
+// anything that is not a letter or a digit, case ignored — and "" otherwise.
+//
+// Read off the name rather than a list of ids, so the mapping survives Claude Code
+// moving to a newer version, and a dated id such as claude-haiku-4-5-20251001 or a
+// provider's prefixed one still maps. A name with no family, such as
+// claude-fable-5-1, has none, and nor does one naming two: the router refuses
+// those rather than guess.
+func Family(model string) string {
+	found := ""
+	words := strings.FieldsFunc(strings.ToLower(model), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	for _, w := range words {
+		if !slices.Contains(Families, w) || w == found {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = w
+	}
+	return found
+}
+
 // Decode reads raw, the entry's config: block as JSON, refusing unknown fields, and
 // validates it. Unknown fields are refused because the likeliest one is a guess at
 // a feature this design leaves out on purpose — a `default:` server — and a

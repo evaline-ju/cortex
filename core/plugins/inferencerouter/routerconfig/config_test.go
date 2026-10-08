@@ -2,6 +2,7 @@ package routerconfig
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -201,6 +202,63 @@ func TestParseURL_QuotesNoPartOfTheURL(t *testing.T) {
 		}
 		if !strings.Contains(msg, tc.want) {
 			t.Errorf("ParseURL(%q) error = %q, want %q", tc.url, msg, tc.want)
+		}
+	}
+}
+
+// The family is a word of the requested name, so the mapping survives a new
+// version, a dated id, a provider prefix and a context suffix, and a name with no
+// family — or two — has none.
+func TestFamily(t *testing.T) {
+	for model, want := range map[string]string{
+		"claude-opus-5-5":                   "opus",
+		"claude-sonnet-5":                   "sonnet",
+		"claude-haiku-4-5-20251001":         "haiku",
+		"claude-3-5-sonnet-20241022":        "sonnet",
+		"us.anthropic.claude-opus-4-1-v1:0": "opus",
+		"anthropic/claude-haiku-4-5":        "haiku",
+		"claude-opus-4-1@20250805":          "opus",
+		"Claude-Opus-5-5[1m]":               "opus",
+		"opus":                              "opus",
+		"claude-fable-5-1":                  "",
+		"glm-5.3":                           "",
+		"opusplan":                          "",
+		"magnum-opus-sonnet":                "",
+		"":                                  "",
+	} {
+		if got := Family(model); got != want {
+			t.Errorf("Family(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+func TestCheckModels_AllThreeOrNone(t *testing.T) {
+	const tail = "; give all three, or none if it serves Claude Code's own names"
+	for _, tc := range []struct {
+		s    Server
+		want string
+	}{
+		{Server{}, ""},
+		{Server{Opus: "a", Sonnet: "b", Haiku: "c"}, ""},
+		{Server{Opus: "a"}, "glm names a model for opus but not for sonnet or haiku" + tail},
+		{Server{Opus: "a", Sonnet: "b"}, "glm names a model for opus and sonnet but not for haiku" + tail},
+		{Server{Haiku: "c"}, "glm names a model for haiku but not for opus or sonnet" + tail},
+	} {
+		err := CheckModels("glm", tc.s)
+		if got := fmt.Sprint(err); (tc.want == "" && err != nil) || (tc.want != "" && got != tc.want) {
+			t.Errorf("CheckModels(%+v) = %v, want %q", tc.s, err, tc.want)
+		}
+	}
+}
+
+func TestServer_ModelFor(t *testing.T) {
+	s := Server{Opus: "glm-big", Sonnet: "glm-mid", Haiku: "glm-small"}
+	if !s.Mapped() || (Server{}).Mapped() {
+		t.Errorf("Mapped() = %v for %+v and %v for none; want true and false", s.Mapped(), s, (Server{}).Mapped())
+	}
+	for family, want := range map[string]string{"opus": "glm-big", "sonnet": "glm-mid", "haiku": "glm-small", "fable": "", "": ""} {
+		if got := s.ModelFor(family); got != want {
+			t.Errorf("ModelFor(%q) = %q, want %q", family, got, want)
 		}
 	}
 }
