@@ -188,6 +188,20 @@ func assertOwnModelUntouched(t *testing.T, pctx *pipeline.Context, model string)
 	}
 }
 
+// count_tokens names the model it counts for, so it is mapped like the request it
+// stands for: the server counts for its own model.
+func TestRouter_MapsCountTokens(t *testing.T) {
+	p := build(t, mappedConfig(`"claude-code": "glm"`))
+	pctx := withModel(request(newStore(t), eteHost, claudeUA, "s1"), "claude-sonnet-5")
+	pctx.Path = "/v1/messages/count_tokens"
+	run(t, p, pctx)
+
+	assertRouted(t, pctx, glmHost, "glm-key")
+	if got := string(pctx.Body); got != messagesBody("glm-mid") {
+		t.Errorf("body = %s, want %s", got, messagesBody("glm-mid"))
+	}
+}
+
 // A refusal leaves a session's pin alone: the session is still on its server, and
 // it is the request, not the conversation, that was refused.
 func TestRouter_ARefusalKeepsAnExistingPin(t *testing.T) {
