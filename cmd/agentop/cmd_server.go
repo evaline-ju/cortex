@@ -61,6 +61,14 @@ func runServer(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "help":
 		fmt.Fprint(stdout, serverUsage)
 		return 0
+	case "add":
+		return serverAdd(args, stdin, stdout, stderr)
+	case "remove":
+		return serverRemove(args, stdout, stderr)
+	case "use":
+		return serverUse(args, stdout, stderr)
+	case "reset":
+		return serverReset(args, stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "agentop server: unknown action %q\n\n", action)
 	fmt.Fprint(stderr, serverUsage)
