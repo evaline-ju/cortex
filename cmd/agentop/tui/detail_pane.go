@@ -55,6 +55,9 @@ func (m *model) showDetail(r eventRow, resetScroll bool) {
 	if r.tunnel != nil {
 		content = tunnelHeader(r.tunnel) + "\n\n" + content
 	}
+	if header := redirectHeader(e); header != "" {
+		content = header + "\n\n" + content
+	}
 	if header := tlsHeader(e.TLS); header != "" {
 		content = header + "\n\n" + content
 	}
@@ -89,6 +92,19 @@ func tunnelHeader(tunnel *pipeline.SessionEvent) string {
 		}
 	}
 	return b.String()
+}
+
+// redirectHeader names both hosts of a request a plugin sent elsewhere. The events
+// table's host column already shows where it went; this line says where the client
+// asked for, which is the other half of the story. Empty when nothing redirected it,
+// so the caller can prepend unconditionally.
+//
+//	redirected:  ete-litellm.example.com → glm-litellm.example.com
+func redirectHeader(e *pipeline.SessionEvent) string {
+	if e.RequestedHost == "" {
+		return ""
+	}
+	return fmt.Sprintf("redirected:  %s → %s", e.RequestedHost, e.Host)
 }
 
 // tlsHeader builds a one-block summary of the TLS connection state.

@@ -219,6 +219,7 @@ type PluginCapabilities struct {
     ReadsBody   bool
     WritesRequestBody  bool
     WritesResponseBody bool
+    WritesDestination  bool   // plugin may call pctx.Redirect
 
     Requires    []string   // ALL must be present + earlier (hard)
     RequiresAny []string   // AT LEAST ONE must be present + run after it (hard)
@@ -813,6 +814,79 @@ event won't appear in the session stream. Always use `SetBody`.
 session store is unauthenticated. Plugin-private debug logs may
 include body bytes at DEBUG level, but never publish them to the
 session stream or Custom map.
+
+## Redirecting a request
+
+A plugin that decides where a request goes — a router, a failover — declares
+`WritesDestination: true` and calls `pctx.Redirect` from `OnRequest`:
+
+```go
+if pctx.Redirectable() {
+    if err := pctx.Redirect(&url.URL{Scheme: "https", Host: "glm-litellm.example.com"}); err != nil {
+        return pctx.DenyAndRecord("redirect_failed", "router.redirect", err.Error())
+    }
+    // Only when the request really goes there: under on_error: observe, Redirect
+    // returns nil and moves nothing, but this header write would still apply.
+    if pctx.Redirected() {
+        pctx.Headers.Set("Authorization", "Bearer "+glmKey)
+    }
+}
+```
+
+| Call | Effect |
+|---|---|
+| `pctx.Redirect(target)` | Sends the request to `target`'s scheme and host. `target` carries nothing else — no user info, no path beyond `/`, no query, no fragment. |
+| `pctx.Redirectable()` | Whether the listener will honor a redirect on this request. False on a `CONNECT` and on a transparently redirected connection, which are dialed where the client chose. True on the TLS-bridged requests decrypted from either, which the forward proxy re-originates — that is how HTTPS inference traffic arrives. |
+| `pctx.Redirected()` | Whether a redirect took effect. False under `on_error: observe` and after a refusal. |
+| `pctx.RedirectTarget()` | The scheme and host the last accepted redirect validated, and whether there was one. Listeners apply this. |
+| `pctx.RequestedHost()` | The host the client named, or `""` unless the request now goes elsewhere. |
+
+**`pctx.Host` follows the redirect.** The session events, usage, the cost ledger
+and modelled pricing all key on it, so they describe where the bytes went. A
+plugin that runs after the redirect and keys on the host sees the new one. Each
+session event records the requested host beside it as `requestedHost`. Writing
+`pctx.Host` does not move a request: the listener applies `RedirectTarget`, the
+copy `Redirect` validated, and resets `pctx.Host` to match before recording.
+
+The framework records every redirect as `modify/redirected` with `from` and `to`
+in `Details`. Under `on_error: observe` nothing moves and the record is a shadow.
+
+**What a redirect does not do.**
+
+- **It does not touch the headers.** The client's headers — credentials
+  included — go to the new host unchanged. A plugin that must not forward them
+  removes or replaces them itself.
+- **It does not gate your header writes.** Under `on_error: observe` nothing
+  moves while header writes still apply, so a plugin that attaches credentials
+  meant for the target must do so only when the request actually goes there:
+  check `pctx.Redirected()` after the call, as above — it stays false under
+  observe and on a refusal. Redirected is the only safe gate. pctx.Host names
+  what the client asked for, and on a TLS-bridged request is the client's own
+  Host header, which need not match the address the proxy dials. A plugin that
+  attaches credentials meant for a server should always Redirect to that server,
+  even when pctx.Host already names it, so the request is dialed there. Otherwise
+  the target's key goes to the host the client named.
+- **It does not re-run earlier plugins.** Plugins before the redirecting one in
+  the chain made their decisions on the requested host.
+
+`Redirect` is refused, with nothing changed, from a plugin that did not declare
+the capability, outside `OnRequest`, for a malformed target, and on a context the
+listener did not mark redirectable.
+
+**Build-time rules.** At most one `WritesDestination` plugin per pipeline. And
+`plugins.BuildWithDeps` refuses one for a listener that cannot honor it — on
+startup and on reload — using the `pipeline.ListenerSupport` each listener
+package supplies:
+
+| Listener | Honors a redirect |
+|---|---|
+| forward proxy — the outbound chain in `cortex` and `cortex-cpex` | yes, unless `mtls:` is configured |
+| reverse proxy — the inbound chain in `cortex` and `cortex-cpex` | no |
+| ext_proc — both chains in `cortex-envoy` | no |
+
+A capability some listener cannot honor is added the same way: a field on
+`pipeline.ListenerSupport`, a case in its `Unsupported`, and each listener's
+`Support` saying whether it can.
 
 ## Finishing requests (stateful plugins)
 

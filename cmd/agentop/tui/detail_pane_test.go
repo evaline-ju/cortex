@@ -147,3 +147,20 @@ func TestFilterForDetail_KeepsALoneLegacyRecord(t *testing.T) {
 		t.Errorf("a lone legacy record was dropped, so an older proxy shows no cost: %v", pl)
 	}
 }
+
+func TestRedirectHeader_EmptyWithoutARedirect(t *testing.T) {
+	if got := redirectHeader(&pipeline.SessionEvent{Host: "ete-litellm.example.com"}); got != "" {
+		t.Errorf("redirectHeader = %q for an event nothing redirected, want empty", got)
+	}
+}
+
+func TestRedirectHeader_NamesBothHosts(t *testing.T) {
+	got := redirectHeader(&pipeline.SessionEvent{
+		Host:          "glm-litellm.example.com",
+		RequestedHost: "ete-litellm.example.com",
+	})
+	want := "redirected:  ete-litellm.example.com → glm-litellm.example.com"
+	if got != want {
+		t.Errorf("redirectHeader = %q, want %q", got, want)
+	}
+}

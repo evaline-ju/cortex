@@ -164,3 +164,62 @@ func TestPricingConsumerPlugins_TracksTheCostOwner(t *testing.T) {
 		t.Errorf("litellm-budget-track is reported as a pricing consumer; it bills a settled figure and computes nothing: %v", consumers)
 	}
 }
+
+// destinationPlugin declares WritesDestination and does nothing else.
+type destinationPlugin struct{ name string }
+
+func (p *destinationPlugin) Name() string { return p.name }
+func (p *destinationPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{WritesDestination: true, Description: "test"}
+}
+func (p *destinationPlugin) OnRequest(context.Context, *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *destinationPlugin) OnResponse(context.Context, *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+func registerDestination(t *testing.T, name string) []config.PluginEntry {
+	t.Helper()
+	RegisterPlugin(name, func() pipeline.Plugin { return &destinationPlugin{name: name} })
+	t.Cleanup(func() { UnregisterPlugin(name) })
+	return []config.PluginEntry{{Name: name}}
+}
+
+func TestBuildWithDeps_RefusesADestinationWriterTheListenerCannotHonor(t *testing.T) {
+	entries := registerDestination(t, "test-dest-refused")
+	_, err := BuildWithDeps(entries, Deps{Listener: pipeline.ListenerSupport{Listener: "reverse proxy"}})
+	if err == nil {
+		t.Fatal("BuildWithDeps admitted a WritesDestination plugin for a listener that cannot redirect")
+	}
+	for _, want := range []string{`"test-dest-refused"`, "WritesDestination", "reverse proxy"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+}
+
+func TestBuildWithDeps_ZeroDepsRefusesADestinationWriter(t *testing.T) {
+	entries := registerDestination(t, "test-dest-zero")
+	if _, err := BuildWithDeps(entries, Deps{}); err == nil {
+		t.Fatal("a build that names no listener admitted a WritesDestination plugin")
+	}
+}
+
+func TestBuildWithDeps_AdmitsADestinationWriterWhereHonored(t *testing.T) {
+	entries := registerDestination(t, "test-dest-ok")
+	deps := Deps{Listener: pipeline.ListenerSupport{Listener: "forward proxy", Destination: true}}
+	if _, err := BuildWithDeps(entries, deps); err != nil {
+		t.Fatalf("BuildWithDeps refused a WritesDestination plugin the listener honors: %v", err)
+	}
+}
+
+// An entry under on_error: off is dropped before it is built, so a plugin the
+// listener cannot honor is no obstacle while it is switched off.
+func TestBuildWithDeps_DoesNotCheckAnEntryThatIsOff(t *testing.T) {
+	entries := registerDestination(t, "test-dest-off")
+	entries[0].OnError = pipeline.ErrorPolicyOff
+	if _, err := BuildWithDeps(entries, Deps{}); err != nil {
+		t.Fatalf("BuildWithDeps checked an entry that is off: %v", err)
+	}
+}

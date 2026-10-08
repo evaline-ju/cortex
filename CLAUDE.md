@@ -576,6 +576,7 @@ Every event on `/v1/sessions/{id}` and `/v1/events` carries:
   open and a close saying 200. An opaque CONNECT that could not be dialed
   reports the same situation one layer down as `tunnelReason: "dial-failed"` with
   `error.kind: "dial_failed"`.
+- `requestedHost` — present only when a plugin redirected the request (`pctx.Redirect`): the host the client asked for. `host` is where the request actually went, and usage, the cost ledger and pricing all follow `host`. agentop's detail pane shows both on a `redirected:` line.
 - `tunnel`, `tunnelReason`, `bytesUp`, `bytesDown` — an opaque CONNECT (or transparent-redirect) tunnel records two rows sharing a `requestId`: the open (`phase: "request"`, `tunnelReason` saying why the bytes stayed opaque) and, when the tunnel ends, the close (`phase: "response"`). The close carries the CONNECT's own `statusCode` — 200, or 502 with the dial error in `error` when the destination could not be reached (`tunnelReason: "dial-failed"`) — plus `durationMs` for how long the tunnel stayed open and the bytes it carried each way (up = client to destination). It is not the destination's status: that travels inside the client's end-to-end TLS. A bridged tunnel's open is recorded with its first decrypted request — in that request's session, directly before it, stamped with its time — and records no close, because the request carries its own response; a bridged tunnel that recorded no request gets its open and a close when it ends. Tunnel rows are kept out of `/v1/usage`: a tunnel's lifetime is not a request latency.
 - `httpMethod`, `httpPath` — the HTTP verb and path, so a request no parser recognized is still identifiable rather than showing only a host. Distinct from the `method` inside `a2a` / `mcp`, which is a protocol method name. On an opaque tunnel `httpMethod` is `CONNECT` and `httpPath` is absent — opaque bytes carry no request line. The path is query-stripped and percent-decoded, so query-borne credentials never reach the timeline, but a secret in a path *segment* (a bot token, a webhook path) does survive on this unauthenticated surface — worth knowing before exporting events off-box.
 
@@ -611,7 +612,7 @@ The authbridge binary watches its config file (`/etc/authbridge/config.yaml`) vi
 
 **What reloads:** any plugin list change (add/remove/reorder) and any plugin `config:` subtree edit.
 
-**What doesn't reload (pod restart required):** `mode`, any `listener.*` address, and the session store parameters (`session.ttl`, `session.max_events`, `session.max_sessions`, and the `session.archive` block).
+**What doesn't reload (pod restart required):** `mode`, any `listener.*` address, the top-level `mtls` block, and the session store parameters (`session.ttl`, `session.max_events`, `session.max_sessions`, and the `session.archive` block).
 
 **Bad YAML stays safe:** if Load/Validate/Build/Start fails, the active pipeline keeps serving and the error is exposed on `/reload/status` with `reloads_failed` incremented. The pod never goes unhealthy from a bad edit.
 
@@ -678,9 +679,21 @@ can talk to this authbridge. Per-caller policy / SPIFFE allowlists are
 out of scope; the trust bundle IS the policy. Plugins that want
 per-caller decisions read `pctx.PeerCert` and check the URI SAN.
 
-**Hot-reload boundary:** mTLS config (`mtls.mode`, cert paths) requires a
-pod restart to apply, matching the existing rule for `listener.*`
-addresses. Plugin-pipeline config keeps its own hot-reload behavior.
+**Hot-reload boundary:** mTLS config requires a pod restart to apply,
+matching the existing rule for `listener.*` addresses. A reload that adds the
+`mtls` block, removes it, or changes `mtls.mode` — the only field the block
+carries — is refused rather than half-applied: the active pipeline keeps
+serving, `reloads_failed` increments, and `/reload/status` names `mtls.*`
+among the fields that need a restart. Legacy `cert_file` / `key_file` /
+`bundle_file` keys are dropped at load, so editing them is neither applied nor
+refused. The inbound TLS listener and, under `strict`, the forward proxy's
+mTLS dialer are built once at boot, so no reload can reach them. The outbound
+chain's redirect check (`forwardproxy.Support`) refuses a `WritesDestination`
+plugin whenever an `mtls:` block is configured: under `strict` the dialer
+would nest TLS inside TLS; under `permissive` there is no dialer, so the
+refusal is broader than strictly needed and fails closed. Refusing the reload
+keeps that check matched to the mtls config the listeners were built from.
+Plugin-pipeline config keeps its own hot-reload behavior.
 
 ### envoy-sidecar mTLS
 

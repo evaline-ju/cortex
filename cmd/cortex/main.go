@@ -506,12 +506,17 @@ func main() {
 		// live traffic priced from a config that was refused. Plugins only store the
 		// resolver during Configure and never resolve through it, so building against
 		// the old table is safe.
-		deps := plugins.Deps{SPIFFE: provider, Pricing: pricingRegistry}
-		in, err := plugins.BuildWithDeps(c.Pipeline.Inbound.Plugins, deps)
+		// Each chain is built for the listener that runs it, so a plugin the listener
+		// cannot honor fails here — on startup and on every reload — instead of
+		// running to no effect. The reverse proxy honors no redirect, which is what
+		// keeps a WritesDestination plugin off the inbound chain.
+		inDeps := plugins.Deps{SPIFFE: provider, Pricing: pricingRegistry, Listener: reverseproxy.Support()}
+		outDeps := plugins.Deps{SPIFFE: provider, Pricing: pricingRegistry, Listener: forwardproxy.Support(c.MTLS != nil)}
+		in, err := plugins.BuildWithDeps(c.Pipeline.Inbound.Plugins, inDeps)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("inbound: %w", err)
 		}
-		out, err := plugins.BuildWithDeps(c.Pipeline.Outbound.Plugins, deps)
+		out, err := plugins.BuildWithDeps(c.Pipeline.Outbound.Plugins, outDeps)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("outbound: %w", err)
 		}

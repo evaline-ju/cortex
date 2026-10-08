@@ -52,6 +52,16 @@ type PluginCapabilities struct {
 	// direction, for the same ordering reason as the request side.
 	WritesResponseBody bool
 
+	// WritesDestination: the plugin may call pctx.Redirect to send the request to a
+	// different host than the one the client named.
+	//
+	// Only a listener that builds the upstream request itself can honor that, so
+	// plugins.BuildWithDeps refuses a plugin declaring it for a listener whose
+	// ListenerSupport says otherwise — on startup and on reload — rather than let
+	// it run, record a redirect, and change nothing. Pipeline.New admits at most
+	// one per pipeline: with two, the destination would be whichever ran last.
+	WritesDestination bool
+
 	// Requires names plugins that MUST be present in the same chain
 	// AND appear earlier (lower index). Matches are case-sensitive
 	// plugin Name() strings. A missing or misordered name causes

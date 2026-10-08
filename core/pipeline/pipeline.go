@@ -26,6 +26,9 @@ type Pipeline struct {
 	plugins       []Plugin
 	policies      []ErrorPolicy
 	finishTimeout time.Duration
+	// redirects[i] is plugins[i]'s WritesDestination, read once at New so Run does
+	// not ask every plugin for its capabilities on every request.
+	redirects []bool
 }
 
 // Option configures pipeline construction.
@@ -78,7 +81,11 @@ func New(plugins []Plugin, opts ...Option) (*Pipeline, error) {
 	if finishTimeout <= 0 {
 		finishTimeout = DefaultFinishTimeout
 	}
-	return &Pipeline{plugins: plugins, policies: policies, finishTimeout: finishTimeout}, nil
+	redirects := make([]bool, len(plugins))
+	for i, plugin := range plugins {
+		redirects[i] = plugin.Capabilities().WritesDestination
+	}
+	return &Pipeline{plugins: plugins, policies: policies, finishTimeout: finishTimeout, redirects: redirects}, nil
 }
 
 // Run executes the request phase of the pipeline sequentially.
@@ -112,6 +119,7 @@ func (p *Pipeline) Run(ctx context.Context, pctx *Context) Action {
 			return Deny("pipeline.cancelled", "request cancelled")
 		}
 		pctx.setCurrent(plugin.Name(), InvocationPhaseRequest, policy)
+		pctx.currentMayRedirect = p.redirectsAt(i)
 		pctx.dispatched = append(pctx.dispatched, i)
 		action := plugin.OnRequest(ctx, pctx)
 		pctx.clearCurrent()
@@ -246,6 +254,12 @@ func (p *Pipeline) policyAt(i int) ErrorPolicy {
 		return p.policies[i].Resolved()
 	}
 	return ErrorPolicyEnforce
+}
+
+// redirectsAt reports whether plugins[i] declares WritesDestination. Bounds-safe,
+// like policyAt, so a Pipeline not built by New never panics.
+func (p *Pipeline) redirectsAt(i int) bool {
+	return i < len(p.redirects) && p.redirects[i]
 }
 
 // markShadowAndLog records the would-have-denied Invocation as
@@ -598,20 +612,28 @@ func (p *Pipeline) dispatchFinish(parent context.Context, name string, f Finishe
 	f.OnFinish(ctx, pctx)
 }
 
-// validateCapabilities enforces body-mutation ordering rules:
+// validateCapabilities enforces body-mutation ordering rules and the destination rule:
 //   - At most one WritesRequestBody plugin per pipeline — mutation ordering would
 //     otherwise be ambiguous; downstream readers can't tell which version
 //     they're seeing.
 //   - A body reader (ReadsBody) must not follow a body mutator (WritesRequestBody) —
 //     the reader would silently see mutated bytes instead of the originals.
+//   - At most one WritesDestination plugin per pipeline — a request goes to one
+//     place, and a second redirect would silently override the first.
 func validateCapabilities(plugins []Plugin) error {
 	// Each direction admits at most one mutator. The rules are per-direction
 	// because ordering is only ambiguous between two plugins rewriting the
 	// same bytes; a request mutator and a response mutator never collide.
-	var requestMutator, responseMutator string
+	var requestMutator, responseMutator, destinationWriter string
 	var firstMutator, readerAfterMutator string
 	for _, plugin := range plugins {
 		caps := plugin.Capabilities().Normalize()
+		if caps.WritesDestination {
+			if destinationWriter != "" {
+				return fmt.Errorf("pipeline: two plugins declare WritesDestination: %q and %q — a request goes to one place; at most one destination writer per pipeline is allowed", destinationWriter, plugin.Name())
+			}
+			destinationWriter = plugin.Name()
+		}
 		if caps.WritesRequestBody {
 			if requestMutator != "" {
 				return fmt.Errorf("pipeline: two plugins declare WritesRequestBody: %q and %q — mutation ordering would be ambiguous; at most one request-body mutator per pipeline is allowed", requestMutator, plugin.Name())
