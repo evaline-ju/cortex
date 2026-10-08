@@ -169,7 +169,8 @@ func TestServer_FlagsAModelVariableThatNamesAnotherModel(t *testing.T) {
 	})
 	_, out, _ := runServerCmd(t, "", "--config", path)
 	got := flat(out)
-	if want := "✗ Claude Code asks for glm-5.3 instead of Claude's models (ANTHROPIC_MODEL in ~/.claude/settings.json). Cortex can't map that back: remove the line"; !strings.Contains(got, want) {
+	if want := "✗ Claude Code asks for glm-5.3 instead of Claude's models (ANTHROPIC_MODEL in ~/.claude/settings.json). " +
+		"Cortex can't map that back: remove the line, and give the server its models with agentop server add --opus, --sonnet and --haiku instead."; !strings.Contains(got, want) {
 		t.Errorf("want %q in:\n%s", want, out)
 	}
 	if strings.Count(got, "✗") != 1 {

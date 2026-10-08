@@ -156,9 +156,14 @@ That one configuration is:
   every family leaves nothing to tell them apart, and Claude Code shapes its
   requests for the model it believes it is using.
 
-`agentop server` checks both. For now a server must serve Claude's model names, as
-a LiteLLM gateway in front of Claude does; mapping them to another server's models
-is not built yet.
+`agentop server` checks both. A server that serves other names — GLM behind
+LiteLLM, say — is given its own model for each family:
+`agentop server add glm <url> --opus glm-5.3 --sonnet glm-5.3 --haiku glm-5.3`.
+Claude Code still asks for Claude's names, and each request is sent for the
+server's model of its family, so the conversation, auto mode's classifier and the
+background calls can each have one of their own. A model of another family —
+`claude-fable-5-1` picked with `/model`, say — is refused with a 400 naming it,
+rather than sent to a model nobody chose.
 
 The key is the server's: on a routed request the router puts the configured
 server's key in the header Claude Code sent its own in, `X-Api-Key` for
@@ -168,8 +173,9 @@ header, such as one set through `ANTHROPIC_CUSTOM_HEADERS`, reaches the server
 unchanged.
 
 Claude Code keeps naming the model it asked for, so agentop is where the server
-shows: the events table's host is where each request went, and the detail pane's
-`redirected:` line names the host Claude Code asked for when it was another.
+shows: the events table shows where each request went and, under METHOD, the
+model it was sent for, and the detail pane's `redirected:` and `model:` lines
+name the host and the model Claude Code asked for when they were others.
 
 A session is pinned on the first request the router sees from it, so switch
 **before** `/clear` or a new `claude`, not after. A conversation already running
@@ -195,7 +201,9 @@ server, and start a new session there.
 **`/model` may list a server's own names.** If Claude Code asks the gateway for its
 model list, that request is routed like the rest, so the picker can show, say,
 `glm-5.3`. Routing is unaffected, since Claude Code keeps sending its own names,
-but choosing such a name there breaks the rule above. If Claude Code saves that
+but choosing such a name there breaks the rule above. A name that is one of the
+server's three models goes to it as it is; any other belongs to no family, and a
+server with models of its own refuses it with a 400. If Claude Code saves that
 choice as `model` in `~/.claude/settings.json`, `agentop server` reports it.
 
 ## Verified depth

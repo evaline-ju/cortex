@@ -146,7 +146,7 @@ func TestServerAdd_AnUnchangedServerIsNotRewritten(t *testing.T) {
 	stubConfirm(t, true)
 	path := serverEnv(t, newFakeStats(t, 0).addr(), routerBlock)
 	code, out, _ := runServerCmd(t, "sk-ete", "add", "ete", "https://ete.example.com:443", "--key-stdin", "--yes", "--config", path)
-	if code != 0 || !strings.Contains(out, "ete already has that URL and key; nothing to change.") {
+	if code != 0 || !strings.Contains(out, "ete already has that URL, key and models; nothing to change.") {
 		t.Errorf("exit %d, stdout:\n%s", code, out)
 	}
 }
@@ -197,13 +197,68 @@ func TestServerAdd_WarnsOnPlainHTTPToAnotherMachine(t *testing.T) {
 	}
 }
 
-// The model flags arrive with model mapping; until then an unknown flag is the
-// honest answer.
-func TestServerAdd_DoesNotOfferModelFlagsYet(t *testing.T) {
+func TestServerAdd_WritesAllThreeModels(t *testing.T) {
 	path := serverEnv(t, newFakeStats(t, 0).addr(), "")
-	code, _, errOut := runServerCmd(t, "sk", "add", "glm", "https://glm.example.com", "--opus", "glm-5.3", "--key-stdin", "--config", path)
-	if code != 2 || !strings.Contains(errOut, "flag provided but not defined: -opus") {
+	code, out, errOut := runServerCmd(t, "sk-glm", "add", "glm", "https://glm.example.com",
+		"--opus", "glm-5.3", "--sonnet", "glm-5.3", "--haiku", "glm-5.3-air", "--key-stdin", "--config", path)
+	if code != 0 || !strings.Contains(out, "Added glm.") {
+		t.Fatalf("exit %d, stdout:\n%s%s", code, out, errOut)
+	}
+	want := `      - name: inference-router
+        config:
+          servers:
+            glm:
+              url: https://glm.example.com
+              key: sk-glm
+              opus: glm-5.3
+              sonnet: glm-5.3
+              haiku: glm-5.3-air
+`
+	if got := readConfig(t, path); !strings.HasSuffix(got, want) {
+		t.Errorf("config does not end with the new entry:\n%s", got)
+	}
+}
+
+// All three or none, refused before the key is asked for: nothing ever falls back
+// silently, and a typo should not cost the user a pasted key.
+func TestServerAdd_RefusesAPartialSetOfModelsBeforeAskingForAKey(t *testing.T) {
+	asked := stubKeyPrompt(t, "sk")
+	path := serverEnv(t, newFakeStats(t, 0).addr(), "")
+	before := readConfig(t, path)
+	code, _, errOut := runServerCmd(t, "", "add", "glm", "https://glm.example.com", "--opus", "glm-5.3", "--config", path)
+	want := "glm names a model for opus but not for sonnet or haiku; give all three, or none if it serves Claude Code's own names"
+	if code != 2 || !strings.Contains(errOut, want) {
+		t.Errorf("exit %d, stderr:\n%s\nwant %q", code, errOut, want)
+	}
+	if *asked != "" || readConfig(t, path) != before {
+		t.Error("a partial set of models asked for a key or wrote the file")
+	}
+}
+
+// config.Load expands $NAME across the whole file, so a $ in a model would reach
+// the server as something else.
+func TestServerAdd_RefusesAModelTheConfigLoaderWouldExpand(t *testing.T) {
+	path := serverEnv(t, newFakeStats(t, 0).addr(), "")
+	code, _, errOut := runServerCmd(t, "sk", "add", "glm", "https://glm.example.com",
+		"--opus", "glm-$V", "--sonnet", "glm", "--haiku", "glm", "--key-stdin", "--config", path)
+	if code != 2 || !strings.Contains(errOut, "--opus contains $") {
 		t.Errorf("exit %d, stderr:\n%s", code, errOut)
+	}
+}
+
+// Replacing a server replaces its models too, and the question says what the
+// server will map to, so dropping the flags is not a silent loss of the mapping.
+func TestServerAdd_ReplacingSaysWhatTheServerWillMapTo(t *testing.T) {
+	mapped := strings.Replace(routerBlock, "              key: sk-glm\n",
+		"              key: sk-glm\n              opus: glm-5.3\n              sonnet: glm-5.3\n              haiku: glm-5.3\n", 1)
+	path := serverEnv(t, newFakeStats(t, 0).addr(), mapped)
+	stubConfirm(t, true)
+	code, out, errOut := runServerCmd(t, "sk-glm", "add", "glm", "https://glm.example.com:8443", "--key-stdin", "--config", path)
+	if code != 0 || !strings.Contains(out, "Replacing it gives it this URL, key and model mapping (uses Claude Code's names)") {
+		t.Fatalf("exit %d, stdout:\n%s%s", code, out, errOut)
+	}
+	if got := readConfig(t, path); strings.Contains(got, "opus:") {
+		t.Errorf("the replaced server kept its models:\n%s", got)
 	}
 }
 

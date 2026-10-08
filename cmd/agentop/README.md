@@ -664,7 +664,8 @@ a server, its traffic goes where the agent sends it.
 
 ```sh
 agentop server add ete https://ete-litellm.example.com   # asks for the key; it does not echo
-agentop server add glm https://glm-litellm.example.com
+agentop server add glm https://glm-litellm.example.com \
+    --opus glm-5.3 --sonnet glm-5.3 --haiku glm-5.3       # its own model for each of Claude Code's families
 agentop server use glm --agent claude-code                # new claude-code sessions → glm
 agentop server                                            # the servers, and two checks
 agentop server reset --agent claude-code                  # stop routing claude-code
@@ -675,7 +676,7 @@ With Claude Code's `ANTHROPIC_BASE_URL` at `ete`, the listing after `use` reads:
 
 ```
   ete   ete-litellm.example.com   uses Claude Code's names
-  glm   glm-litellm.example.com   uses Claude Code's names   claude-code
+  glm   glm-litellm.example.com   all → glm-5.3              claude-code
 
   ✓ Claude Code points at ete (~/.claude/settings.json)
   ✓ Claude Code asks for Claude's own model names (~/.claude/settings.json)
@@ -688,8 +689,14 @@ With Claude Code's `ANTHROPIC_BASE_URL` at `ete`, the listing after `use` reads:
   question), which is how a key is rotated; with no terminal to ask on, nothing is
   written. A server on a host another server already has, on any port, is
   refused. The first `add` creates the plugin's entry, last in the outbound
-  pipeline. A key containing `$` is refused: the config loader would read it as an
-  environment variable.
+  pipeline. A key or a model containing `$` is refused: the config loader would
+  read it as an environment variable.
+  For a server that does not serve Claude Code's model names, `--opus`,
+  `--sonnet` and `--haiku` name its model for each of Claude Code's families —
+  all three, or none; a partial set is refused before the key is asked for.
+  Replacing a server replaces its models too: re-adding it without the flags, to
+  rotate its key say, leaves it serving Claude Code's names, and the question
+  before replacing it says which mapping it will have.
 - **`use <name> --agent <agent>`** routes the agent's new sessions to the server,
   including an agent that has not run yet. **`reset --agent <agent>`** stops
   routing it. Either way a session already running stays where it is if it has sent
