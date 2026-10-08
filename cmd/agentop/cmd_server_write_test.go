@@ -288,9 +288,11 @@ func TestServerUse_RoutesTheAgentsNewSessions(t *testing.T) {
 	path := serverEnv(t, newFakeStats(t, 0).addr(), routerBlock)
 	code, out, errOut := runServerCmd(t, "", "use", "ete", "--agent", "opencode", "--config", path)
 	// A running session stays because the proxy holds its pin or the request its
-	// history records, both of which it has only for sessions seen since it started.
+	// history records: it has neither for a session it has not seen since it
+	// started, and no history for a quiet one its store has since evicted.
 	if code != 0 || out != "New opencode sessions → ete.\nSessions already running stay where they are, except one that has "+
-		"sent nothing since the proxy last started, which is treated as a new one.\n" {
+		"sent nothing since the proxy last started, or that the proxy has dropped from memory (it keeps the most recently "+
+		"used, 100 by default), which can be treated as a new one.\n" {
 		t.Fatalf("exit %d, stdout:\n%s%s", code, out, errOut)
 	}
 	if !strings.Contains(readConfig(t, path), "            claude-code: glm\n            opencode: ete\n") {

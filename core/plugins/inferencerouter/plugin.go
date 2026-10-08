@@ -37,22 +37,28 @@
 // already running when routing is first configured, quiet while it was, has no pin,
 // and neither has one whose pin lapsed. The session store's history tells such a
 // session from a new one: on a pin miss for a routed agent, the latest earlier
-// inference request that agent sent in the session decides. One that went to a
-// server's host keeps the session on that server; one that went to any other host
-// leaves it not routed; only a session with no such request is new and goes to its
-// agent's current server. Without this, the documented first setup — add the
-// servers, then route Claude Code — would move every conversation that sent nothing
-// between the router's arrival and the route to the new server on its next turn.
-// Only a non-empty history is evidence: a view is empty for a session the store has
-// recorded nothing of yet. After a restart the store holds nothing from before it,
-// and the pins, which live in memory, are gone too, so a running session's next
-// request then looks new and can move.
+// inference request that agent sent in the session to a server's host keeps the
+// session on that server, and only a session with no such request is new and goes
+// to its agent's current server. Without this, the documented first setup — add
+// the servers, then route Claude Code — would move every conversation that sent
+// nothing between the router's arrival and the route to the new server on its next
+// turn. A request to any other host is no evidence: the router never routes one, so
+// it says nothing about which server the session is on. Reading it as "not routed"
+// would leave an agent that switches providers inside a session, as OpenCode does,
+// unrouted for good once its first request went elsewhere, still sending its own
+// key to the server it then addresses. Only a non-empty history is evidence: a
+// view is empty for a session the store has recorded nothing of yet. After a
+// restart the store holds nothing from before it, and the pins, which live in
+// memory, are gone too, so a running session's next request then looks new and can
+// move; so can a quiet one the store has evicted before the router pinned it.
 //
 // A pin is its agent's. The session id is the listener's answer, and another
-// agent's request can be filed under it — the ActiveSession fallback with client
-// affinity off, or a header id two clients share. Such a request is decided as if
-// the session were unpinned, from its own agent's history and choice, and leaves the
-// pin alone. Honouring the pin for it would hand it the session's server and key.
+// agent's request can be filed under it — by process attribution, which files a
+// command an agent runs under that agent's session and is on by default on a
+// laptop; by the ActiveSession fallback with client affinity off; or by a header id
+// two clients share. Such a request is decided as if the session were unpinned, from
+// its own agent's history and choice, and leaves the pin alone. Honouring the pin for
+// it would hand it the session's server and key.
 //
 // The listener's synthetic sessions are never pinned: the default bucket, and the
 // pending:<agent> buckets an agent's calls collect in before its session is known.
@@ -319,8 +325,9 @@ func (p *Router) serverFor(pctx *pipeline.Context) (string, pinning) {
 }
 
 // unpinned is the server for a request in a session its agent holds no pin on: the
-// one the session's history shows it already uses, or for a new session the agent's
-// current choice. An agent that is not routed is left alone, whatever its history.
+// server the session's history shows it already uses, or for a new session — no
+// earlier request to any server — the agent's current choice. An agent that is not
+// routed is left alone, whatever its history.
 func (p *Router) unpinned(s *pipeline.SessionView, agent, choice string) string {
 	if choice == "" {
 		return ""
@@ -332,16 +339,18 @@ func (p *Router) unpinned(s *pipeline.SessionView, agent, choice string) string 
 }
 
 // wentTo is the server the latest earlier inference request agent sent in events
-// went to, "" when it went to a host no server has; ok is false when there is no
-// such request, which is what makes a session new.
+// to a server's host went to; ok is false when there is no such request, which is
+// what makes a session new.
 //
-// Only an outbound request row a parser read as inference counts. A tunnel row, a
-// count_tokens or a /v1/models request no parser claimed, and a denied request,
-// which went nowhere, say nothing about where the conversation is. Another agent's
-// row says nothing about this agent's conversation, and following it would hand this
-// request that agent's server and key. A row's Host is where the bytes went, the
-// server's host for a routed request, because the listener records it after the
-// redirect.
+// Only an outbound request row a parser read as inference counts, and only one that
+// reached a server. A tunnel row, a count_tokens or a /v1/models request no parser
+// claimed, and a denied request, which went nowhere, say nothing about where the
+// conversation is; nor does a request to any other host, which the router never
+// routes (see the package doc). Another agent's row says nothing about this agent's
+// conversation, and following it would hand this request that agent's server and
+// key. A row's Host is where the bytes went, the server's host for a routed request,
+// because the listener records it after the redirect; RequestedHost, where the
+// client asked to go, is not where the session is.
 func (p *Router) wentTo(events []pipeline.SessionEvent, agent string) (server string, ok bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		e := &events[i]
@@ -349,7 +358,9 @@ func (p *Router) wentTo(events []pipeline.SessionEvent, agent string) (server st
 			pipeline.AgentName(e.Client.Label()) != agent {
 			continue
 		}
-		return p.byHost[routerconfig.Hostname(e.Host)], true
+		if server, ok := p.byHost[routerconfig.Hostname(e.Host)]; ok {
+			return server, true
+		}
 	}
 	return "", false
 }

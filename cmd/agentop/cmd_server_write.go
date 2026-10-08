@@ -321,11 +321,14 @@ func serverReset(args []string, stdout, stderr io.Writer) int {
 }
 
 // runningSessionsStay is what use and reset mean for sessions already running,
-// said once the running proxy has the change. It holds a session it has seen a
-// request from since it started, by its pin or by the request its history records;
-// one that has sent nothing since looks new to it.
+// said once the running proxy has the change. It holds a session by its pin or by
+// the request to a server its history records. One that has sent nothing since the
+// proxy started has neither, and a quiet one the store has evicted (session.max_sessions,
+// least recently used first, or a configured session.ttl) has no history, so either
+// looks new unless the router pinned it; hence "can be".
 const runningSessionsStay = "Sessions already running stay where they are, except one that has sent nothing " +
-	"since the proxy last started, which is treated as a new one."
+	"since the proxy last started, or that the proxy has dropped from memory (it keeps the most recently used, " +
+	"100 by default), which can be treated as a new one."
 
 // verifyRouter is the check every `agentop server` write makes of its result: the
 // router entry must pass the plugin's own validation, so agentop never writes a

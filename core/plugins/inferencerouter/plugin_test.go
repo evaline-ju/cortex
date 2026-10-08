@@ -594,45 +594,71 @@ func TestRouter_ARunningSessionTheRouterHasNotSeenStaysWhereItWent(t *testing.T)
 	assertRecord(t, next, pipeline.ActionModify, "routed", map[string]string{"server": "ete", "pin": pinExisting})
 }
 
-// A running session whose requests went to a host no server has is pinned as not
-// routed: it was not on any server, and moving it to one now is still a switch.
-func TestRouter_ARunningSessionThatWentToNoServerIsNotRouted(t *testing.T) {
-	store := newStore(t)
-	p := build(t, routerConfig(`"claude-code": "glm"`))
-	pctx := withHistory(request(store, eteHost, claudeUA, "running"), sent("api.anthropic.com", claudeUA))
-	run(t, p, pctx)
+// Only a request to a server's host says which server a session is on: the router
+// never routes a request to any other host, so one there says nothing about where
+// the session lives. OpenCode switches providers inside a session, so its first
+// requests can go to Zen or another provider before it addresses a server; that
+// session is new to the router and goes to its agent's server, with the server's
+// key. Treating it as not routed kept the client's own key on the server for the
+// session's whole life, a 401 on every request.
+func TestRouter_AnEarlierRequestToAHostNoServerHasIsNoEvidence(t *testing.T) {
+	for _, tc := range []struct{ name, ua, host string }{
+		{"opencode after another provider", opencodeUA, "opencode.ai"},
+		{"claude-code after api.anthropic.com", claudeUA, "api.anthropic.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newStore(t)
+			p := build(t, routerConfig(`"claude-code": "glm", "opencode": "glm"`))
+			pctx := withHistory(request(store, eteHost, tc.ua, "running"), sent(tc.host, tc.ua))
+			run(t, p, pctx)
 
-	assertUntouched(t, pctx, eteHost)
-	assertRecord(t, pctx, pipeline.ActionSkip, "not_routed", map[string]string{"pin": pinNew})
-
-	next := request(store, eteHost, claudeUA, "running")
-	run(t, p, next)
-	assertUntouched(t, next, eteHost)
-	assertRecord(t, next, pipeline.ActionSkip, "not_routed", map[string]string{"pin": pinExisting})
+			assertRouted(t, pctx, glmHost, "glm-key")
+			assertRecord(t, pctx, pipeline.ActionModify, "routed", map[string]string{"server": "glm", "pin": pinNew})
+			if pin, _ := pinOf(t, store, "running"); pin != "glm" {
+				t.Errorf("pin = %q, want glm", pin)
+			}
+		})
+	}
 }
 
-// Only the latest earlier inference request decides, so a session is held to
-// where it went last.
-func TestRouter_TheLatestEarlierInferenceRequestDecides(t *testing.T) {
+// Only the latest earlier request to a server's host decides, so a session is held
+// to the server it went to last; a request to any other host in between is passed
+// over.
+func TestRouter_TheLatestEarlierRequestToAServerDecides(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		history []pipeline.SessionEvent
-		want    string // the server's host, or "" for not routed
+		want    string // the server's host
 	}{
 		{"elsewhere, then ete", []pipeline.SessionEvent{sent("api.anthropic.com", claudeUA), sent(eteHost, claudeUA)}, eteHost},
-		{"ete, then elsewhere", []pipeline.SessionEvent{sent(eteHost, claudeUA), sent("api.anthropic.com", claudeUA)}, ""},
+		{"ete, then elsewhere", []pipeline.SessionEvent{sent(eteHost, claudeUA), sent("api.anthropic.com", claudeUA)}, eteHost},
+		{"glm, then ete with case and its default port", []pipeline.SessionEvent{sent(glmHost, claudeUA), sent("ETE.example.com:443", claudeUA)}, eteHost},
 		{"ete, then glm with its port", []pipeline.SessionEvent{sent(eteHost, claudeUA), sent("GLM.example.com:8443", claudeUA)}, glmHost},
+		{"only elsewhere: new, the current server", []pipeline.SessionEvent{sent("api.anthropic.com", claudeUA)}, glmHost},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := build(t, routerConfig(`"claude-code": "ete"`))
+			p := build(t, routerConfig(`"claude-code": "glm"`))
 			pctx := withHistory(request(newStore(t), eteHost, claudeUA, "running"), tc.history...)
 			run(t, p, pctx)
-			if tc.want == "" {
-				assertUntouched(t, pctx, eteHost)
-				return
-			}
 			assertRedirectedTo(t, pctx, "https", tc.want)
 		})
+	}
+}
+
+// A row's Host is where the request went, which for a routed request is the
+// server it was redirected to; RequestedHost is where the client asked to go. The
+// session is on the server the bytes reached, so Host decides.
+func TestRouter_TheServerARequestWentToDecidesNotTheOneItAskedFor(t *testing.T) {
+	store := newStore(t)
+	p := build(t, routerConfig(`"claude-code": "ete"`))
+	routed := sent(glmHost, claudeUA)
+	routed.RequestedHost = eteHost
+	pctx := withHistory(request(store, eteHost, claudeUA, "running"), routed)
+	run(t, p, pctx)
+
+	assertRouted(t, pctx, glmHost, "glm-key")
+	if pin, _ := pinOf(t, store, "running"); pin != "glm" {
+		t.Errorf("pin = %q, want glm, the server the earlier request reached", pin)
 	}
 }
 
@@ -684,7 +710,8 @@ func TestRouter_AnUnlistedAgentsHistoryRoutesNothing(t *testing.T) {
 }
 
 // A session id is the listener's answer, and another agent's request can be filed
-// under one: the ActiveSession fallback with client affinity off, or a header id
+// under one: by process attribution (a command an agent runs is filed under its
+// session), the ActiveSession fallback with client affinity off, or a header id
 // two clients share. A pin is that agent's and holds for it alone. Another agent's
 // request is decided as if the session were unpinned — by its own choice, or left
 // alone when it is not listed — and never takes the session's server or key, nor
