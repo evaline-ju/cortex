@@ -264,8 +264,12 @@ transparently redirected connection is dialed where the client chose, and is
   not a string, or `model` named twice or only in another letter case — is
   `deny/model_rewrite_failed`, a 400 too, since the fix is the client's. A refused
   request carries no server key, and a session whose first request is refused pins
-  nothing. A request whose body names no model — `GET /v1/models`, a body that is
-  not JSON, or JSON with no `model` key — is routed as it is.
+  nothing. Its denied row names the server's host, with `requestedHost` the one the
+  client asked for, because the listener applies the redirect before it answers the
+  refusal: `/v1/usage` counts the denial under the server, and agentop's detail
+  pane shows a `redirected:` line for it. A request whose body names no model —
+  `GET /v1/models`, a body that is not JSON, or JSON with no `model` key — is
+  routed as it is.
 - A redirect the listener refuses: `deny/redirect_failed`, a 503.
 - Under `on_error: observe` nothing moves, the client's key stays and no model is
   mapped or refused. The timeline shows two rows: the framework's shadow

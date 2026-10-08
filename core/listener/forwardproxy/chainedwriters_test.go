@@ -15,6 +15,7 @@ import (
 	"github.com/rossoctl/cortex/core/config"
 	"github.com/rossoctl/cortex/core/cost/event"
 	"github.com/rossoctl/cortex/core/cost/pricing"
+	"github.com/rossoctl/cortex/core/cost/usage"
 	"github.com/rossoctl/cortex/core/memstore"
 	"github.com/rossoctl/cortex/core/pipeline"
 	"github.com/rossoctl/cortex/core/plugins"
@@ -252,5 +253,90 @@ func TestForwardProxy_ToolPruneAndTheRouterChain(t *testing.T) {
 	if wantUSD := float64(wantTokens) * glmRate; s.Tier != pricing.TierInput.String() || math.Abs(s.USD-wantUSD) > 1e-9 {
 		t.Errorf("saving priced at $%g in tier %q, want $%g in input: glm-big's rate, not claude-opus-5-5's ($%g)",
 			s.USD, s.Tier, wantUSD, float64(wantTokens)*claudeRate)
+	}
+}
+
+// A request the router refuses for its model was redirected first, and the listener
+// applies the redirect before it answers the refusal. So the denied row names the
+// server's host, with requestedHost the one the client asked for, and /v1/usage
+// counts the denial under the server — where an operator looking for the 400 will
+// look — while agentop's detail pane shows a redirected: line for it.
+func TestForwardProxy_ARouterRefusalIsRecordedUnderTheServer(t *testing.T) {
+	ete, eteSaw := newBodyOrigin(t, `{"input_tokens":1,"output_tokens":1}`)
+	glm, glmSaw := newBodyOrigin(t, `{"input_tokens":1,"output_tokens":1}`)
+	glmURL := strings.Replace(glm.URL, "127.0.0.1", "localhost", 1)
+	p, err := plugins.BuildWithDeps([]config.PluginEntry{
+		{Name: "inference-parser"},
+		{Name: "inference-router", Config: json.RawMessage(`{
+			"servers": {
+				"ete": {"url": "` + ete.URL + `", "key": "ete-key"},
+				"glm": {"url": "` + glmURL + `", "key": "glm-key", "opus": "glm-big", "sonnet": "glm-mid", "haiku": "glm-small"}
+			},
+			"agents": {"claude-code": "glm"}
+		}`)},
+	}, plugins.Deps{Listener: pipeline.ListenerSupport{Listener: "forward proxy", Destination: true}})
+	if err != nil {
+		t.Fatalf("BuildWithDeps: %v", err)
+	}
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	shared := memstore.New()
+	defer shared.Close()
+	srv := &Server{
+		OutboundPipeline: pipeline.NewHolder(p),
+		Sessions:         store,
+		Shared:           shared,
+		SessionIDHeaders: []string{session.ClaudeCodeSessionHeader},
+		Client:           http.DefaultClient,
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ete.URL+"/v1/messages",
+		strings.NewReader(`{"model":"claude-fable-5-1","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "claude-cli/2.1.286 (external, cli)")
+	req.Header.Set("Authorization", "Bearer client-key")
+	req.Header.Set(session.ClaudeCodeSessionHeader, "s1")
+	resp, err := proxyClient(proxy, nil).Do(req)
+	if err != nil {
+		t.Fatalf("request through the proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "glm has no model for claude-fable-5-1") {
+		t.Fatalf("response = %d %s, want the router's 400", resp.StatusCode, body)
+	}
+	for name, o := range map[string]*bodyOrigin{"ete": eteSaw, "glm": glmSaw} {
+		if bodies, _ := o.seen(); len(bodies) != 0 {
+			t.Errorf("%s received %d requests, want none: the request was refused", name, len(bodies))
+		}
+	}
+
+	var denied *pipeline.SessionEvent
+	for _, e := range store.View("s1").Events {
+		if e.Phase == pipeline.SessionDenied {
+			denied = &e
+		}
+	}
+	glmHost := strings.TrimPrefix(glmURL, "http://")
+	eteHost := strings.TrimPrefix(ete.URL, "http://")
+	if denied == nil || denied.Host != glmHost || denied.RequestedHost != eteHost {
+		t.Fatalf("denied row = %+v; want host %s and requestedHost %s", denied, glmHost, eteHost)
+	}
+
+	agg := usage.New()
+	agg.Record("s1", denied)
+	var series []string
+	for _, b := range agg.Snapshot(time.Minute, usage.BucketWidth, "", usage.GroupEndpoint).Buckets {
+		for k := range b.Series {
+			series = append(series, k)
+		}
+	}
+	if len(series) != 1 || !strings.Contains(series[0], "localhost") {
+		t.Errorf("/v1/usage endpoint series = %q, want the denial under glm's host (localhost)", series)
 	}
 }
