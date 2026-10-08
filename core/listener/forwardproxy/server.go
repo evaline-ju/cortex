@@ -333,6 +333,12 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, tl *tunne
 	// — and silent on the day one does, which is why it is pinned rather than watched.
 	pctx.ResolveClient()
 
+	// Every request that reaches here is re-originated from pctx below, plain or
+	// TLS-bridged, so a plugin may redirect it. The CONNECT and transparent-connection
+	// contexts are never marked: both dial the address the client chose, so a redirect
+	// there would be recorded and never happen.
+	pctx.MarkRedirectable()
+
 	// SkipHosts short-circuit: forward as a transparent proxy. No
 	// pipeline run, no body buffering, no session recording, no
 	// response-phase work. RunFinish is also skipped (no defer
@@ -423,6 +429,18 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, tl *tunne
 			// rejection for non-MCP traffic.
 			httpx.WriteRejectionForRequest(w, action, pctx)
 			return
+		}
+
+		// Send the request where the pipeline pointed it, before the request row is
+		// recorded, so the row names the host the bytes went to. r.URL.Host carries the
+		// dial target, SNI and certificate check, and r.Host the Host header: they move
+		// together, or the upstream sees one host while the transport dials another.
+		// The client choice below does not change — a bridged request still goes
+		// through the bridge's upstream client, which now verifies the new host.
+		if pctx.Redirected() {
+			r.URL.Scheme = pctx.Scheme
+			r.URL.Host = pctx.Host
+			r.Host = pctx.Host
 		}
 	}
 
@@ -923,19 +941,20 @@ func (s *Server) recordOutboundRequestEvent(tl *tunnelLog, pctx *pipeline.Contex
 	// struct (e.g. token counts assigned in OnResponse).
 	plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
 	ev := pipeline.SessionEvent{
-		At:          time.Now(),
-		Direction:   pipeline.Outbound,
-		Phase:       pipeline.SessionRequest,
-		RequestID:   pctx.RequestID(),
-		MCP:         pipeline.SnapshotMCP(pctx.Extensions.MCP),
-		Inference:   pipeline.SnapshotInference(pctx.Extensions.Inference),
-		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-		Plugins:     plugins,
-		Identity:    pipeline.SnapshotIdentity(pctx),
-		Host:        pctx.Host,
-		HTTPMethod:  pctx.Method,
-		HTTPPath:    pctx.Path,
-		Client:      pctx.ClientInfo(),
+		At:            time.Now(),
+		Direction:     pipeline.Outbound,
+		Phase:         pipeline.SessionRequest,
+		RequestID:     pctx.RequestID(),
+		MCP:           pipeline.SnapshotMCP(pctx.Extensions.MCP),
+		Inference:     pipeline.SnapshotInference(pctx.Extensions.Inference),
+		Invocations:   pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
+		Plugins:       plugins,
+		Identity:      pipeline.SnapshotIdentity(pctx),
+		Host:          pctx.Host,
+		RequestedHost: pctx.RequestedHost(),
+		HTTPMethod:    pctx.Method,
+		HTTPPath:      pctx.Path,
+		Client:        pctx.ClientInfo(),
 	}
 	s.appendOutbound(tl, sid, ev)
 }
@@ -1149,22 +1168,23 @@ func (s *Server) recordOutboundResponseEvent(pctx *pipeline.Context, statusCode 
 	}
 	plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
 	ev := pipeline.SessionEvent{
-		At:          time.Now(),
-		Direction:   pipeline.Outbound,
-		Phase:       pipeline.SessionResponse,
-		RequestID:   pctx.RequestID(),
-		MCP:         pipeline.SnapshotMCP(pctx.Extensions.MCP),
-		Inference:   pipeline.SnapshotInference(pctx.Extensions.Inference),
-		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
-		Plugins:     plugins,
-		Identity:    pipeline.SnapshotIdentity(pctx),
-		Host:        pctx.Host,
-		HTTPMethod:  pctx.Method,
-		HTTPPath:    pctx.Path,
-		StatusCode:  statusCode,
-		Error:       pipeline.EventErrorOr(pctx, fail),
-		Duration:    pipeline.DurationSince(pctx.StartedAt),
-		Client:      pctx.ClientInfo(),
+		At:            time.Now(),
+		Direction:     pipeline.Outbound,
+		Phase:         pipeline.SessionResponse,
+		RequestID:     pctx.RequestID(),
+		MCP:           pipeline.SnapshotMCP(pctx.Extensions.MCP),
+		Inference:     pipeline.SnapshotInference(pctx.Extensions.Inference),
+		Invocations:   pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
+		Plugins:       plugins,
+		Identity:      pipeline.SnapshotIdentity(pctx),
+		Host:          pctx.Host,
+		RequestedHost: pctx.RequestedHost(),
+		HTTPMethod:    pctx.Method,
+		HTTPPath:      pctx.Path,
+		StatusCode:    statusCode,
+		Error:         pipeline.EventErrorOr(pctx, fail),
+		Duration:      pipeline.DurationSince(pctx.StartedAt),
+		Client:        pctx.ClientInfo(),
 	}
 	// Always record — see the request-phase comment. This is what surfaces
 	// responses no plugin acted on (e.g. a generic 404), carrying StatusCode
