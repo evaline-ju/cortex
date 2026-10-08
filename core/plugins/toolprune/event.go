@@ -31,9 +31,9 @@ type pruneEvent struct {
 	// overstate the saving.
 	//
 	// It is the bytes sent only when no later writer changes them. Request
-	// writers chain, so cost/settle calibrates on the framework's record of the
-	// body sent (pctx.RewrittenBodyLen) and falls back to this when nothing
-	// was rewritten.
+	// writers chain, so cost/settle calibrates on the body sent —
+	// len(pctx.Body) once pctx.BodyMutated() — and falls back to this when
+	// nothing was rewritten.
 	BodyBytesAfter int `json:"bodyBytesAfter"`
 	// Projected marks a saving that was measured but NOT applied — observe mode.
 	// The bytes were not actually removed from the request, so a consumer must

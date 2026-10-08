@@ -766,25 +766,6 @@ func (c *Context) BodyMutated() bool { return c.bodyMutated }
 // answers for the response the same way.
 func (c *Context) ResponseBodyMutated() bool { return c.responseBodyMutated }
 
-// RewrittenBodyLen is the length of the request body as the writes that took
-// effect left it — the bytes the listener sends upstream — from the
-// framework's record of them. ok is false when no write took effect, so the
-// request goes upstream as the client sent it; a shadow write under
-// on_error: observe never counts.
-//
-// For a consumer that calibrates on what the request actually sent, as
-// settlement does in turning a byte saving into tokens. A writer's own figure
-// describes the body as that writer left it, and a later writer may have
-// changed it. Read here rather than off the published body-mutation event:
-// that event holds a shadow's would-be length while nothing has taken effect,
-// and a response write replaces it, since one key serves both directions.
-func (c *Context) RewrittenBodyLen() (n int, ok bool) {
-	if c.requestMutation == nil {
-		return 0, false
-	}
-	return c.requestMutation.LengthAfter, true
-}
-
 // ContentSources returns every protocol extension on this Context that
 // implements capabilities.ContentSource. Guardrail plugins call this to
 // iterate inspectable text across whatever protocol a request happens

@@ -66,11 +66,12 @@ func Avoided(pctx *pipeline.Context, rates pricing.Resolver) []event.Saving {
 	// CALIBRATED ON THE BODY THE REQUEST SENT, the one the prompt tokens were counted on.
 	// Request writers chain, so a component's own figure is the body as IT left it, and a
 	// later writer may have shrunk or grown it: dividing by that size mis-states
-	// tokens-per-byte, and every saving priced from it, by the ratio of the two. The
-	// framework's record of the writes that took effect knows the size sent whoever wrote
-	// last; with no such write the body went as the client sent it, and the component's
-	// figure is that size.
-	sent, rewritten := pctx.RewrittenBodyLen()
+	// tokens-per-byte, and every saving priced from it, by the ratio of the two. Once any
+	// write took effect, pctx.Body is the body the listener sent: each applied SetBody
+	// replaces it, a shadow write under on_error: observe leaves it alone, and no listener
+	// changes it after the request pass. With no applied write the body went as the
+	// client sent it, and the component's figure is that size.
+	rewritten := pctx.BodyMutated()
 
 	var out []event.Saving
 	for _, component := range savingComponents {
@@ -84,7 +85,7 @@ func Avoided(pctx *pipeline.Context, rates pricing.Resolver) []event.Saving {
 		}
 		bodyBytes := facts.BodyBytesAfter
 		if rewritten {
-			bodyBytes = sent
+			bodyBytes = len(pctx.Body)
 		}
 		tokens := pricing.EstimateTokensFromBytes(facts.BytesRemoved, prompt, bodyBytes)
 		if tokens <= 0 {

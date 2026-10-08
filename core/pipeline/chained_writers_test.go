@@ -335,10 +335,12 @@ func TestBodyMutation_TwoShadowWritesRecordTheLastOnesWouldBeRewrite(t *testing.
 	}
 }
 
-// RewrittenBodyLen is how long the writes that took effect left the request body:
-// the last one's length, however many wrote, and nothing for a shadow write — the
-// published record holds a shadow's would-be length while nothing has taken effect.
-func TestRewrittenBodyLen_IsTheLengthTheAppliedWritesLeft(t *testing.T) {
+// Settlement calibrates on (len(pctx.Body), pctx.BodyMutated()) as the body sent:
+// after the chain, Body is what the writes that took effect left — the last one's,
+// however many wrote — and BodyMutated is false when none did, a shadow write
+// counting for nothing. The published record cannot stand in for it: it holds a
+// shadow's would-be length while nothing has taken effect.
+func TestAppliedWrites_LeaveTheBodySent(t *testing.T) {
 	enforce, observe := ErrorPolicyEnforce, ErrorPolicyObserve
 	for name, tc := range map[string]struct {
 		policies []ErrorPolicy
@@ -358,17 +360,18 @@ func TestRewrittenBodyLen_IsTheLengthTheAppliedWritesLeft(t *testing.T) {
 			pctx := &Context{Direction: Outbound, Body: []byte("x")}
 			p.Run(context.Background(), pctx)
 
-			if n, ok := pctx.RewrittenBodyLen(); n != tc.wantLen || ok != tc.wantOK {
-				t.Errorf("RewrittenBodyLen = %d, %v; want %d, %v", n, ok, tc.wantLen, tc.wantOK)
+			if n, ok := len(pctx.Body), pctx.BodyMutated(); ok != tc.wantOK || (ok && n != tc.wantLen) {
+				t.Errorf("len(Body), BodyMutated = %d, %v; want %d, %v", n, ok, tc.wantLen, tc.wantOK)
 			}
 		})
 	}
 }
 
 // A response write publishes over the request's record in Extensions.Custom — one
-// key serves both directions — but leaves the request's length alone, which is why
-// a response-time reader asks RewrittenBodyLen rather than the published map.
-func TestRewrittenBodyLen_SurvivesAResponseWrite(t *testing.T) {
+// key serves both directions — but leaves the request body alone, which is why a
+// response-time reader such as settlement reads pctx.Body rather than the
+// published map.
+func TestTheBodySent_SurvivesAResponseWrite(t *testing.T) {
 	c := &Context{Direction: Outbound, Body: []byte("req")}
 	c.SetCurrentPlugin("pruner", InvocationPhaseRequest)
 	c.SetBody([]byte("req+a"))
@@ -376,7 +379,7 @@ func TestRewrittenBodyLen_SurvivesAResponseWrite(t *testing.T) {
 	c.SetCurrentPlugin("filter", InvocationPhaseResponse)
 	c.SetResponseBody([]byte("a much longer response"))
 
-	if n, ok := c.RewrittenBodyLen(); n != len("req+a") || !ok {
-		t.Errorf("RewrittenBodyLen = %d, %v after a response write; want %d, true", n, ok, len("req+a"))
+	if n, ok := len(c.Body), c.BodyMutated(); n != len("req+a") || !ok {
+		t.Errorf("len(Body), BodyMutated = %d, %v after a response write; want %d, true", n, ok, len("req+a"))
 	}
 }

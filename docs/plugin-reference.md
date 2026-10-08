@@ -826,7 +826,6 @@ nothing about how the response may be relayed.
 | `pctx.SetBody(newBytes)` | Replace request body; flip `BodyMutated()` flag. Returns whether **this** write took effect: `false` under `on_error: observe` (a shadow write, body unchanged) and in `OnFinish` |
 | `pctx.SetResponseBody(newBytes)` | Replace response body; flip `ResponseBodyMutated()` flag. Returns whether this write took effect, as `SetBody` does |
 | `pctx.BodyMutated()` / `ResponseBodyMutated()` | Read by the listener to decide whether to emit a wire mutation. Request-wide (response-wide): true once **any** writer's bytes took effect, so not a writer's own outcome. Plugins normally don't need these. |
-| `pctx.RewrittenBodyLen()` | The request body's length as the writes that took effect left it — what the listener sends — and whether any did. For a consumer that calibrates on the bytes sent, as settlement does; a shadow write never counts |
 
 Direct assignment (`pctx.Body = newBytes`) still compiles but the
 listener won't propagate it, no Invocation fires, and the mutation

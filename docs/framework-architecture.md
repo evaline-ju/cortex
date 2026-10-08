@@ -615,7 +615,7 @@ mutator now keeps incremental relay.
 - A `modify`-action Invocation with `Reason: "body_rewritten"`, framework-attributed to the mutating plugin.
 - A plugin-public event under `pctx.Extensions.Custom["body-mutation" + PluginEventSuffix]` with the phase (`request` / `response`), byte length and sha256 before and after, and the writers: `plugins` lists every plugin whose write took effect in that direction, in order — or, while none has, the observed writer whose would-be rewrite this describes (its invocation carries `shadow: true`) — and `plugin` is the last. With several request mutators the event describes the chain — before is the body the client sent, after the body sent upstream — and a write under `on_error: observe` never replaces the record of one that took effect. Never the raw body content — the session store is unauthenticated.
 
-`pctx.RewrittenBodyLen()` reads the length the applied request writes left — what the listener sends — off the framework's own record rather than the published event, which holds a shadow's would-be length while nothing has taken effect and is replaced by a response write. Settlement calibrates a byte saving on it.
+Once `pctx.BodyMutated()` is true, `pctx.Body` is the request body the listener sends: each applied `SetBody` replaces it and a shadow write leaves it alone. Settlement calibrates a byte saving on `len(pctx.Body)` then, not on the published event, which holds a shadow's would-be length while nothing has taken effect and is replaced by a response write.
 
 The flags (not byte-compare) are the source of truth. A rewrite that produces byte-identical output still records the Invocation because "redactor ran, nothing matched" is valid telemetry.
 
@@ -851,7 +851,7 @@ Breaking changes will be announced in `CHANGELOG.md` (TBD) before a 1.0 tag.
 - `plugin.go` — `Plugin` interface, `PluginCapabilities` (with `ReadsBody` / `WritesRequestBody` / `WritesResponseBody` + `Normalize()`; chain-scoped relationship fields `Requires` / `RequiresAny` / `After` / `Claims`), `Configurable`, `Initializer`, `Shutdowner`, `Readier`, `Finisher`.
 - `outcome.go` — `Outcome` struct + `OutcomeAction` (allow / deny / error) for `Finisher` consumers; `Context.Outcome()` getter.
 - `action.go` — `Action`, `ActionType`, `Violation`, helper constructors (`Deny`, `DenyStatus`, `DenyWithDetails`, `Challenge`, `RateLimited`), `StatusFromCode`.
-- `context.go` — `Context`, `Direction`, `AgentIdentity`, the `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers, and `pctx.SetBody` / `SetResponseBody` / `BodyMutated` / `ResponseBodyMutated` / `RewrittenBodyLen` for body mutation.
+- `context.go` — `Context`, `Direction`, `AgentIdentity`, the `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers, and `pctx.SetBody` / `SetResponseBody` / `BodyMutated` / `ResponseBodyMutated` for body mutation.
 - `extensions.go` — `Extensions` struct, `Invocation`, `Invocations`, `InvocationAction`, named protocol extensions, `GetState` / `SetState`.
 - `session.go` — `SessionEvent`, `SessionView`, `SessionPhase`, marshalers.
 - `core/reloader/` — `Reloader`, `Status`, `PipelineBuilder`, `WithDrainWindow` / `WithDebounce` / `WithStartTimeout`, `Handler()` (serves `/reload/status`).
