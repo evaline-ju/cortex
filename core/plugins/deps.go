@@ -18,7 +18,8 @@ import (
 // parameter list: BuildWithSPIFFE existed because SPIFFE needed injecting, and
 // adding pricing the same way would have meant a third near-identical builder.
 //
-// Every field is optional. A zero Deps builds exactly what Build always did.
+// Every field is optional. A zero Deps builds exactly what Build always did for every
+// plugin that declares no listener-dependent capability (see pipeline.ListenerSupport).
 type Deps struct {
 	// SPIFFE is injected into plugins implementing spiffe.ProviderConsumer.
 	SPIFFE *spiffe.Provider
@@ -27,6 +28,11 @@ type Deps struct {
 	// Long-lived: the reloader rebuilds pipelines but the resolver is swapped in
 	// place, so a plugin from any build sees current rates. See pricing.Registry.
 	Pricing *pricing.Registry
+
+	// Listener says which listener-dependent capabilities the listener this pipeline
+	// serves can honor; a plugin declaring one it cannot is refused. The zero value
+	// honors none of them, so a build that names no listener admits no such plugin.
+	Listener pipeline.ListenerSupport
 }
 
 // BuildWithDeps constructs a pipeline from an ordered list of plugin entries,
@@ -70,6 +76,12 @@ func BuildWithDeps(entries []config.PluginEntry, deps Deps, opts ...pipeline.Opt
 			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, pluginNames)
 		}
 		p := factory()
+
+		// Before anything is injected or configured: a plugin the listener cannot honor
+		// is refused before it can build state or start work.
+		if c := deps.Listener.Unsupported(p.Capabilities()); c != "" {
+			return nil, fmt.Errorf("plugin %q declares %s, which the %s does not honor", e.Name, c, deps.Listener.Name())
+		}
 
 		if c, ok := p.(spiffe.ProviderConsumer); ok && deps.SPIFFE != nil {
 			c.SetSPIFFEProvider(deps.SPIFFE)
