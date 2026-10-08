@@ -268,9 +268,12 @@ type Event struct {
 
 // Saving is one component's contribution to cost that was not incurred.
 type Saving struct {
-	// Component is what avoided the cost, e.g. "tool-prune". Attributed from the
-	// framework's own body-mutation record rather than self-reported, so a plugin
-	// cannot claim someone else's saving.
+	// Component is what avoided the cost, e.g. "tool-prune": a plugin on settle's
+	// fixed list of saving components, whose own published event reported the
+	// bytes it removed. The list is explicit, so a plugin cannot opt itself into
+	// the money record by naming a field. The tokens are calibrated on the body the
+	// request actually sent, after every request writer, not on the component's
+	// own figure.
 	Component string `json:"component"`
 	// TokensAvoided is the estimated prompt-token reduction.
 	TokensAvoided int `json:"tokensAvoided,omitempty"`
