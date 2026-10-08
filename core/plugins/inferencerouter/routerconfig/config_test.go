@@ -165,3 +165,28 @@ func TestPlaintextRemote(t *testing.T) {
 		}
 	}
 }
+
+// ParseURL must not expose credentials in its error messages, since errors
+// go to logs and the unauthenticated /reload/status endpoint.
+func TestParseURL_KeepsCredentialsOutOfErrors(t *testing.T) {
+	testCases := []struct {
+		name, url string
+	}{
+		{"bad port with userinfo", "https://user:pw@example.com:abc"},
+		{"bad percent-escape with userinfo", "https://user:pw%ZZ@example.com"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseURL(tc.url)
+			if err == nil {
+				t.Fatal("ParseURL accepted invalid URL")
+			}
+			if strings.Contains(err.Error(), "pw") {
+				t.Errorf("error exposes password: %v", err)
+			}
+			if strings.Contains(err.Error(), "user") {
+				t.Errorf("error exposes username: %v", err)
+			}
+		})
+	}
+}

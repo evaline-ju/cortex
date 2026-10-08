@@ -185,6 +185,12 @@ func (e Endpoint) PlaintextRemote() bool {
 func ParseURL(raw string) (Endpoint, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
+		// *url.Error quotes the raw URL, which can carry credentials.
+		// Extract and return only the inner error.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return Endpoint{}, fmt.Errorf("not a valid URL: %w", ue.Err)
+		}
 		return Endpoint{}, err
 	}
 	switch {
