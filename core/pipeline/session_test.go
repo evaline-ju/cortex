@@ -117,7 +117,7 @@ func TestSessionEvent_MarshalJSON_OmitsEmpty(t *testing.T) {
 		// The omitempty half of the version-skew contract: a new proxy that
 		// recorded none of these must not emit the keys at all, so a client
 		// predating them sees the same bytes it always did.
-		"tunnel", "tunnelReason", "httpMethod", "httpPath",
+		"tunnel", "tunnelReason", "httpMethod", "httpPath", "requestedHost",
 	} {
 		if strings.Contains(s, `"`+field+`":`) {
 			t.Errorf("expected %q omitted when zero: %s", field, s)
@@ -291,7 +291,7 @@ func TestSessionEventWire_HasEveryDomainField(t *testing.T) {
 func TestSessionEventWire_EveryFieldSerializes(t *testing.T) {
 	ev := SessionEvent{
 		SessionID: "s", At: time.Now(), Direction: Outbound, Phase: SessionRequest,
-		RequestID: "r", Host: "h:443", StatusCode: 200, Duration: time.Second,
+		RequestID: "r", Host: "h:443", RequestedHost: "a:443", StatusCode: 200, Duration: time.Second,
 		Tunnel: true, TunnelReason: TunnelClientRejectedCA,
 		HTTPMethod: "GET", HTTPPath: "/v1/models",
 	}
@@ -305,7 +305,7 @@ func TestSessionEventWire_EveryFieldSerializes(t *testing.T) {
 	}
 	for _, key := range []string{
 		"sessionId", "at", "direction", "phase", "requestId",
-		"host", "statusCode", "durationMs", "tunnel", "tunnelReason",
+		"host", "requestedHost", "statusCode", "durationMs", "tunnel", "tunnelReason",
 		"httpMethod", "httpPath",
 	} {
 		if _, ok := got[key]; !ok {
@@ -471,5 +471,26 @@ func TestSessionEvent_TunnelBytesRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(string(plain), "bytesUp") || strings.Contains(string(plain), "bytesDown") {
 		t.Errorf("an event with no byte counts emitted the keys: %s", plain)
+	}
+}
+
+func TestSessionEvent_RequestedHostRoundTrips(t *testing.T) {
+	in := SessionEvent{
+		At: time.Now().UTC().Truncate(time.Millisecond), Direction: Outbound, Phase: SessionRequest,
+		Host: "glm-litellm.example.com", RequestedHost: "ete-litellm.example.com",
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"requestedHost":"ete-litellm.example.com"`) {
+		t.Errorf("wire form %s lacks requestedHost", b)
+	}
+	var out SessionEvent
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.RequestedHost != in.RequestedHost || out.Host != in.Host {
+		t.Errorf("round trip = host %q requested %q, want %q and %q", out.Host, out.RequestedHost, in.Host, in.RequestedHost)
 	}
 }
