@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rossoctl/cortex/core/plugins/inferencerouter/routerconfig"
 )
@@ -42,7 +43,8 @@ func closedAddr(t *testing.T) string {
 
 // serverEnv gives a test a scratch HOME, so nothing reads or writes the real
 // ~/.claude or ~/.cortex, and a config in it whose stats address is statsAddr and
-// whose outbound chain ends with router (none when ""). It returns the config's path.
+// whose outbound chain ends with router (none when ""). It returns the config's
+// path, which sits directly in that HOME: filepath.Dir of it is the scratch home.
 func serverEnv(t *testing.T, statsAddr, router string) string {
 	t.Helper()
 	home := t.TempDir()
@@ -65,14 +67,23 @@ pipeline:
 	return path
 }
 
-// writeClaudeSettings puts env in the scratch HOME's ~/.claude/settings.json.
-func writeClaudeSettings(t *testing.T, env map[string]string) {
+// writeClaudeSettings puts env in home's .claude/settings.json. home is a
+// parameter, not $HOME, so a test that calls this before serverEnv writes into a
+// directory it named rather than over the developer's real settings.
+func writeClaudeSettings(t *testing.T, home string, env map[string]string) {
 	t.Helper()
-	path := filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")
+	writeClaudeSettingsDoc(t, home, map[string]any{"env": env})
+}
+
+// writeClaudeSettingsDoc puts doc, a whole settings document, in home's
+// .claude/settings.json.
+func writeClaudeSettingsDoc(t *testing.T, home string, doc map[string]any) {
+	t.Helper()
+	path := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(map[string]any{"env": env})
+	b, _ := json.Marshal(doc)
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +140,7 @@ func TestServer_ChecksWhereClaudeCodePoints(t *testing.T) {
 	}{
 		{"a server", "https://ete.example.com", "✓ Claude Code points at ete (~/.claude/settings.json)"},
 		{"a server, other port", "https://GLM.example.com:9999/", "✓ Claude Code points at glm (~/.claude/settings.json)"},
-		{"elsewhere", "https://api.anthropic.com", "✗ Claude Code points at https://api.anthropic.com, which is not one of these servers, so nothing is routed"},
+		{"elsewhere", "https://api.anthropic.com", "✗ Claude Code points at https://api.anthropic.com, which is not one of these servers, so nothing is routed (ANTHROPIC_BASE_URL in ~/.claude/settings.json). Point it at one of the servers above."},
 		{"nowhere", "", "✗ ~/.claude/settings.json sets no ANTHROPIC_BASE_URL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,7 +149,7 @@ func TestServer_ChecksWhereClaudeCodePoints(t *testing.T) {
 			if tc.baseURL != "" {
 				env["ANTHROPIC_BASE_URL"] = tc.baseURL
 			}
-			writeClaudeSettings(t, env)
+			writeClaudeSettings(t, filepath.Dir(path), env)
 			_, out, _ := runServerCmd(t, "", "--config", path)
 			if !strings.Contains(flat(out), tc.want) {
 				t.Errorf("want %q in:\n%s", tc.want, out)
@@ -149,7 +160,7 @@ func TestServer_ChecksWhereClaudeCodePoints(t *testing.T) {
 
 func TestServer_FlagsAModelVariableThatNamesAnotherModel(t *testing.T) {
 	path := serverEnv(t, closedAddr(t), routerBlock)
-	writeClaudeSettings(t, map[string]string{
+	writeClaudeSettings(t, filepath.Dir(path), map[string]string{
 		"ANTHROPIC_BASE_URL":           "https://ete.example.com",
 		"ANTHROPIC_MODEL":              "glm-5.3",
 		"ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5",
@@ -168,7 +179,7 @@ func TestServer_FlagsAModelVariableThatNamesAnotherModel(t *testing.T) {
 
 func TestServer_PassesSettingsThatNameOnlyClaudesModels(t *testing.T) {
 	path := serverEnv(t, closedAddr(t), routerBlock)
-	writeClaudeSettings(t, map[string]string{"ANTHROPIC_BASE_URL": "https://ete.example.com"})
+	writeClaudeSettings(t, filepath.Dir(path), map[string]string{"ANTHROPIC_BASE_URL": "https://ete.example.com"})
 	_, out, _ := runServerCmd(t, "", "--config", path)
 	if want := "✓ Claude Code asks for Claude's own model names (~/.claude/settings.json)"; !strings.Contains(flat(out), want) {
 		t.Errorf("want %q in:\n%s", want, out)
@@ -178,6 +189,7 @@ func TestServer_PassesSettingsThatNameOnlyClaudesModels(t *testing.T) {
 func TestIsClaudeModel(t *testing.T) {
 	for m, want := range map[string]bool{
 		"opus": true, "sonnet": true, "haiku": true, "opusplan": true, "default": true, "sonnet[1m]": true,
+		"best": true, "fable": true, "Fable[1m]": true,
 		"claude-opus-5-5": true, "us.anthropic.claude-sonnet-5": true, "Claude-Haiku-4-5": true,
 		"glm-5.3": false, "gpt-5": false, "premium-ide": false,
 	} {
@@ -216,5 +228,170 @@ func TestServer_AnActionAfterAFlagIsRefusedWithTheFix(t *testing.T) {
 	code, _, errOut := runServerCmd(t, "", "--config", path, "remove", "ete")
 	if code != 2 || !strings.Contains(errOut, "the action comes first") {
 		t.Errorf("exit %d, stderr:\n%s", code, errOut)
+	}
+}
+
+// The router maps Claude's names, so every place Claude Code takes a model from is
+// checked: the top-level "model" key /model writes, and each model variable,
+// ANTHROPIC_DEFAULT_FABLE_MODEL among them. Claude's aliases pass wherever they sit.
+func TestServer_ChecksEveryWayClaudeCodePicksAModel(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		doc   map[string]any
+		wantX string // the one ✗ expected; "" for none
+	}{
+		{"model key, another model", map[string]any{"model": "glm-5.3"},
+			`✗ Claude Code asks for glm-5.3 instead of Claude's models ("model" in ~/.claude/settings.json). Cortex can't map that back: remove the line`},
+		{"fable variable, another model", map[string]any{"env": map[string]any{"ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3"}},
+			`✗ Claude Code asks for glm-5.3 instead of Claude's models (ANTHROPIC_DEFAULT_FABLE_MODEL in ~/.claude/settings.json)`},
+		{"model key fable", map[string]any{"model": "fable"}, ""},
+		{"model key opus", map[string]any{"model": "opus"}, ""},
+		{"model key, a claude id", map[string]any{"model": "claude-opus-5-5[1m]"}, ""},
+		{"fable and best variables", map[string]any{"env": map[string]any{"ANTHROPIC_MODEL": "fable", "CLAUDE_CODE_SUBAGENT_MODEL": "best"}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := serverEnv(t, closedAddr(t), routerBlock)
+			env, _ := tc.doc["env"].(map[string]any)
+			if env == nil {
+				env = map[string]any{}
+			}
+			env["ANTHROPIC_BASE_URL"] = "https://ete.example.com"
+			tc.doc["env"] = env
+			writeClaudeSettingsDoc(t, filepath.Dir(path), tc.doc)
+			_, out, _ := runServerCmd(t, "", "--config", path)
+			got := flat(out)
+			if tc.wantX == "" {
+				if want := "✓ Claude Code asks for Claude's own model names"; strings.Contains(got, "✗") || !strings.Contains(got, want) {
+					t.Errorf("want no ✗ and %q in:\n%s", want, out)
+				}
+				return
+			}
+			if strings.Count(got, "✗") != 1 || !strings.Contains(got, tc.wantX) {
+				t.Errorf("want exactly one ✗, %q, in:\n%s", tc.wantX, out)
+			}
+		})
+	}
+}
+
+// A key pasted into a server URL as user info must not reach the terminal, and
+// url.URL.Redacted would not stop it: it masks a password but not a username.
+func TestServer_ListsNoURLCredentials(t *testing.T) {
+	router := strings.NewReplacer(
+		"https://ete.example.com", "https://sk-SECRET-ETE@ete.example.com",
+		"https://glm.example.com:8443", "https://user:sk-SECRET-GLM@glm.example.com:8443",
+	).Replace(routerBlock)
+	path := serverEnv(t, closedAddr(t), router)
+	code, out, errOut := runServerCmd(t, "", "--config", path)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if all := out + errOut; strings.Contains(all, "sk-SECRET") || strings.Contains(all, "user:") {
+		t.Errorf("the listing prints URL user info:\n%s%s", out, errOut)
+	}
+	lines := strings.Split(out, "\n")
+	if got := flat(lines[0]); !strings.HasPrefix(got, "ete ete.example.com (not a valid URL)") {
+		t.Errorf("line 1 = %q, want the host and (not a valid URL)", got)
+	}
+	if got := flat(lines[1]); !strings.HasPrefix(got, "glm glm.example.com:8443 (not a valid URL)") {
+		t.Errorf("line 2 = %q, want the host and (not a valid URL)", got)
+	}
+}
+
+func TestServer_ChecksPrintNoURLCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name, baseURL, want string
+	}{
+		{"elsewhere, key as username", "https://sk-SECRET@api.anthropic.com/v1",
+			"✗ Claude Code points at https://api.anthropic.com/v1, which is not one of these servers"},
+		{"elsewhere, key as password", "https://user:sk-SECRET@api.anthropic.com",
+			"✗ Claude Code points at https://api.anthropic.com, which is not one of these servers"},
+		{"a server, with user info", "https://user:sk-SECRET@ete.example.com",
+			"✓ Claude Code points at ete"},
+		{"does not parse", "https://user:sk-SECRET@api.anthropic.com:port",
+			"✗ ANTHROPIC_BASE_URL in ~/.claude/settings.json is not a URL with a host, so nothing is routed. Point it at one of the servers above."},
+		{"no slashes", "https:user:sk-SECRET@api.anthropic.com",
+			"✗ ANTHROPIC_BASE_URL in ~/.claude/settings.json is not a URL with a host"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := serverEnv(t, closedAddr(t), routerBlock)
+			writeClaudeSettings(t, filepath.Dir(path), map[string]string{"ANTHROPIC_BASE_URL": tc.baseURL})
+			_, out, errOut := runServerCmd(t, "", "--config", path)
+			if all := out + errOut; strings.Contains(all, "sk-SECRET") || strings.Contains(all, "user:") {
+				t.Errorf("the checks print URL user info:\n%s%s", out, errOut)
+			}
+			if !strings.Contains(flat(out), tc.want) {
+				t.Errorf("want %q in:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+// A server no agent is routed to must not end the column block: tabwriter aligns a
+// column only across consecutive rows that all have it.
+func TestServer_AgentsLineUpAroundAServerWithNone(t *testing.T) {
+	path := serverEnv(t, closedAddr(t), `      - name: inference-router
+        config:
+          servers:
+            aaa:
+              url: https://a.example.com
+              key: sk-a
+              opus: big
+              sonnet: mid
+              haiku: small
+            bbb:
+              url: https://b.example.com
+              key: sk-b
+            ccc:
+              url: https://c.example.com
+              key: sk-c
+          agents:
+            claude-code: aaa
+            opencode: ccc
+`)
+	code, out, errOut := runServerCmd(t, "", "--config", path)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	lines := strings.Split(out, "\n")
+	// Columns, not bytes: the mapping's arrows are multi-byte.
+	col := func(line, word string) int {
+		i := strings.Index(line, word)
+		if i < 0 {
+			t.Fatalf("no %q in %q", word, line)
+		}
+		return utf8.RuneCountInString(line[:i])
+	}
+	if a, c := col(lines[0], "claude-code"), col(lines[2], "opencode"); a != c {
+		t.Errorf("agents start in columns %d and %d:\n%s", a, c, out)
+	}
+	for i, line := range lines[:3] {
+		if strings.TrimRight(line, " ") != line {
+			t.Errorf("line %d ends in spaces: %q", i+1, line)
+		}
+	}
+}
+
+// With no home directory there is no ~/.claude/settings.json to check. The
+// listing still prints, and the checks say why they did not run instead of
+// reading .claude/settings.json from wherever agentop was started.
+func TestServer_AnUnknownHomeIsReportedNotReadFromTheWorkingDirectory(t *testing.T) {
+	path := serverEnv(t, closedAddr(t), routerBlock)
+	cwd := t.TempDir()
+	writeClaudeSettings(t, cwd, map[string]string{"ANTHROPIC_BASE_URL": "https://ete.example.com"})
+	t.Chdir(cwd)
+	t.Setenv("HOME", "")
+	code, out, errOut := runServerCmd(t, "", "--config", path)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	got := flat(out)
+	if !strings.Contains(got, "ete ete.example.com") {
+		t.Errorf("want the listing still printed:\n%s", out)
+	}
+	if strings.Contains(got, "points at") {
+		t.Errorf("read the working directory's .claude/settings.json:\n%s", out)
+	}
+	if want := "✗ Claude Code's settings are not checked: cannot determine your home directory"; !strings.Contains(got, want) {
+		t.Errorf("want %q in:\n%s", want, out)
 	}
 }

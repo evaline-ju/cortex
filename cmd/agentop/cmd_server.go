@@ -179,20 +179,23 @@ func serverList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	tw := tabwriter.NewWriter(stdout, 0, 0, 3, ' ', 0)
+	// Every row has all four cells, the agents one empty when no agent is routed
+	// there: tabwriter aligns a column only across consecutive rows that have it, so
+	// a short row would restart the alignment below it. The padding that leaves after
+	// the mapping of such a row is trimmed.
+	var table strings.Builder
+	tw := tabwriter.NewWriter(&table, 0, 0, 3, ' ', 0)
 	for _, name := range slices.Sorted(maps.Keys(c.Servers)) {
 		s := c.Servers[name]
-		cells := []string{"  " + name, serverHost(s), mappingText(s)}
-		if agents := agentsOn(c, name); len(agents) > 0 {
-			cells = append(cells, strings.Join(agents, ", "))
-		}
-		fmt.Fprintln(tw, strings.Join(cells, "\t"))
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", name, serverHost(s), mappingText(s), strings.Join(agentsOn(c, name), ", "))
 	}
 	tw.Flush()
+	for line := range strings.Lines(table.String()) {
+		fmt.Fprintln(stdout, strings.TrimRight(line, " \n"))
+	}
 	fmt.Fprintln(stdout)
 
-	home, _ := os.UserHomeDir()
-	for _, ck := range claudeCodeChecks(filepath.Join(home, settingsRel), c) {
+	for _, ck := range claudeCodeChecksAtHome(c) {
 		printCheck(stdout, ck.ok, ck.text)
 	}
 	return 0
@@ -200,10 +203,16 @@ func serverList(args []string, stdout, stderr io.Writer) int {
 
 // serverHost is how a server's URL is listed: its host, or the whole URL for plain
 // http, so a server whose traffic crosses the network unencrypted says so.
+//
+// A URL the router refuses is listed by its host alone, never as written: the
+// likeliest reason it is refused is a key pasted in as user info.
 func serverHost(s routerconfig.Server) string {
 	ep, err := routerconfig.ParseURL(s.URL)
 	if err != nil {
-		return s.URL + " (not a valid URL)"
+		if u, perr := url.Parse(s.URL); perr == nil && u.Host != "" {
+			return u.Host + " (not a valid URL)"
+		}
+		return "(not a valid URL)"
 	}
 	if ep.Scheme == "http" {
 		return ep.URL()
@@ -234,12 +243,14 @@ type settingsCheck struct {
 	text string
 }
 
-// claudeCodeModelVars are the settings that make Claude Code ask for a model by a
-// name other than Claude's own. The router maps Claude's names, by family, to a
-// server's; a request already carrying a server's name has no family left to map,
-// and Claude Code shapes its requests for the model it believes it is using.
+// claudeCodeModelVars are the env settings that make Claude Code ask for a model by
+// a name other than Claude's own; the top-level "model" key, which /model writes,
+// is the other way. The router maps Claude's names, by family, to a server's; a
+// request already carrying a server's name has no family left to map, and Claude
+// Code shapes its requests for the model it believes it is using.
 var claudeCodeModelVars = []string{
 	"ANTHROPIC_MODEL",
+	"ANTHROPIC_DEFAULT_FABLE_MODEL",
 	"ANTHROPIC_DEFAULT_OPUS_MODEL",
 	"ANTHROPIC_DEFAULT_SONNET_MODEL",
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -247,9 +258,24 @@ var claudeCodeModelVars = []string{
 	"CLAUDE_CODE_SUBAGENT_MODEL",
 }
 
+// claudeCodeChecksAtHome is claudeCodeChecks on ~/.claude/settings.json. With no
+// home directory it says so rather than reading .claude/settings.json from wherever
+// agentop was started, which is what joining an empty home would do.
+func claudeCodeChecksAtHome(c routerconfig.Config) []settingsCheck {
+	home, err := os.UserHomeDir()
+	if err == nil && home == "" {
+		err = errors.New("it is empty")
+	}
+	if err != nil {
+		return []settingsCheck{{false, fmt.Sprintf("Claude Code's settings are not checked: cannot determine your home directory (%v)", err)}}
+	}
+	return claudeCodeChecks(filepath.Join(home, settingsRel), c)
+}
+
 // claudeCodeChecks checks the settings file at settingsPath: that ANTHROPIC_BASE_URL
-// is one of c's servers, and that no model variable names a non-Claude model. It
-// reads that one file, so it cannot see a file passed with `claude --settings`.
+// is one of c's servers, and that neither the "model" key nor any model variable
+// names a non-Claude model. It reads that one file, so it cannot see a file passed
+// with `claude --settings`, nor a variable set in the shell.
 func claudeCodeChecks(settingsPath string, c routerconfig.Config) []settingsCheck {
 	shown := homeTilde(settingsPath)
 	doc, err := readSettings(settingsPath)
@@ -257,33 +283,44 @@ func claudeCodeChecks(settingsPath string, c routerconfig.Config) []settingsChec
 		return []settingsCheck{{false, fmt.Sprintf("cannot read %s: %v", shown, err)}}
 	}
 	env := envStrings(doc)
-	return append([]settingsCheck{baseURLCheck(env["ANTHROPIC_BASE_URL"], shown, c)}, modelChecks(env, shown)...)
+	model, _ := doc["model"].(string)
+	return append([]settingsCheck{baseURLCheck(env["ANTHROPIC_BASE_URL"], shown, c)}, modelChecks(model, env, shown)...)
 }
 
 func baseURLCheck(raw, shown string, c routerconfig.Config) settingsCheck {
 	if raw == "" {
 		return settingsCheck{false, fmt.Sprintf("%s sets no ANTHROPIC_BASE_URL, so Claude Code talks to Anthropic and nothing is routed. Point it at one of the servers above.", shown)}
 	}
-	host := ""
-	if u, err := url.Parse(raw); err == nil {
-		host = strings.ToLower(u.Hostname())
+	// raw is never quoted: user info is where a key gets pasted, and a URL that does
+	// not parse cannot have it taken out.
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return settingsCheck{false, fmt.Sprintf("ANTHROPIC_BASE_URL in %s is not a URL with a host, so nothing is routed. Point it at one of the servers above.", shown)}
 	}
+	host := routerconfig.Hostname(u.Host)
 	for _, name := range slices.Sorted(maps.Keys(c.Servers)) {
-		if ep, err := routerconfig.ParseURL(c.Servers[name].URL); err == nil && host != "" && ep.Hostname == host {
+		if ep, err := routerconfig.ParseURL(c.Servers[name].URL); err == nil && ep.Hostname == host {
 			return settingsCheck{true, fmt.Sprintf("Claude Code points at %s (%s)", name, shown)}
 		}
 	}
-	return settingsCheck{false, fmt.Sprintf("Claude Code points at %s, which is not one of these servers, so nothing is routed (ANTHROPIC_BASE_URL in %s).", raw, shown)}
+	u.User = nil
+	return settingsCheck{false, fmt.Sprintf("Claude Code points at %s, which is not one of these servers, so nothing is routed (ANTHROPIC_BASE_URL in %s). Point it at one of the servers above.", u, shown)}
 }
 
-func modelChecks(env map[string]string, shown string) []settingsCheck {
+// modelChecks checks model, the settings' top-level "model" key, and env's model
+// variables.
+func modelChecks(model string, env map[string]string, shown string) []settingsCheck {
 	var out []settingsCheck
-	for _, v := range claudeCodeModelVars {
-		if m := env[v]; m != "" && !isClaudeModel(m) {
+	check := func(m, where string) {
+		if m != "" && !isClaudeModel(m) {
 			out = append(out, settingsCheck{false, fmt.Sprintf(
 				"Claude Code asks for %s instead of Claude's models (%s in %s). Cortex can't map that back: remove the line, and route Claude Code only to servers that serve Claude's names.",
-				m, v, shown)})
+				m, where, shown)})
 		}
+	}
+	check(model, `"model"`)
+	for _, v := range claudeCodeModelVars {
+		check(env[v], v)
 	}
 	if len(out) == 0 {
 		out = append(out, settingsCheck{true, fmt.Sprintf("Claude Code asks for Claude's own model names (%s)", shown)})
@@ -299,7 +336,7 @@ func isClaudeModel(m string) bool {
 		m = m[:i]
 	}
 	switch m {
-	case "default", "opus", "sonnet", "haiku", "opusplan":
+	case "default", "best", "fable", "opus", "opusplan", "sonnet", "haiku":
 		return true
 	}
 	return strings.Contains(m, "claude")
