@@ -442,21 +442,26 @@ func (p *ToolPrune) OnRequest(_ context.Context, pctx *pipeline.Context) (action
 	// headed for — the same model can bill differently on a discounted gateway
 	// than on the vendor endpoint, and only the target host distinguishes them.
 	//
-	// SetBody BEFORE publishing, so the event can report what was actually sent.
-	// Under ErrorPolicyObserve it is a no-op on bytes and leaves bodyMutated
-	// false — this same code path measures without enforcing.
-	pctx.SetBody(out)
-	applied := pctx.BodyMutated()
-	// The body upstream actually sees: the rewrite when it was applied, the
-	// original when it was only measured.
-	bodySent := len(out)
+	// SetBody BEFORE publishing, so the event can report whether the prune applied.
+	// Under ErrorPolicyObserve it is a no-op on bytes and answers false — this same
+	// code path measures without enforcing.
+	//
+	// Its own answer, not pctx.BodyMutated(): that one is request-wide, so with an
+	// earlier writer's bytes in effect it says true for this plugin's shadow write,
+	// and a measured saving would publish — and be priced — as realized.
+	applied := pctx.SetBody(out)
+	// The body as this plugin leaves it: the rewrite when it was applied, the body it
+	// was handed when it was only measured. A later writer may change it again, so
+	// settlement calibrates on the framework's record of what was sent, and reads
+	// this only when nothing was rewritten.
+	bodyAfter := len(out)
 	if !applied {
-		bodySent = len(body)
+		bodyAfter = len(body)
 	}
 	p.publish(pctx, pruneEvent{
 		ToolsRemoved:   names,
 		BytesRemoved:   removedBytes,
-		BodyBytesAfter: bodySent,
+		BodyBytesAfter: bodyAfter,
 		Projected:      !applied,
 		Model:          inferenceModel(pctx),
 	})

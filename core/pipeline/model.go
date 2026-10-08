@@ -74,8 +74,8 @@ func (c *Context) SetRequestModel(name string) error {
 		return fmt.Errorf("pipeline: SetRequestModel: %w", err)
 	}
 	details := map[string]string{"from": from, "to": name}
-	c.SetBody(body)
-	if c.currentPolicy == ErrorPolicyObserve {
+	// OnFinish is refused above, so a write that did not take effect is a shadow.
+	if !c.SetBody(body) {
 		c.Record(Invocation{Action: ActionModify, Reason: "model_rewritten", Shadow: true, Details: details})
 		return nil
 	}

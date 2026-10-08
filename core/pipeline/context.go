@@ -262,10 +262,11 @@ type Context struct {
 	redirectScheme string
 	redirectHost   string
 
-	// bodyMutated / responseBodyMutated flag that a plugin called
-	// SetBody / SetResponseBody on this context. Listeners read the flag
-	// via BodyMutated() / ResponseBodyMutated() after Run / RunResponse
-	// to decide whether to emit a body mutation on the wire.
+	// bodyMutated / responseBodyMutated flag that some plugin's
+	// SetBody / SetResponseBody took effect on this context. Listeners read
+	// the flag via BodyMutated() / ResponseBodyMutated() after Run /
+	// RunResponse to decide whether to emit a body mutation on the wire.
+	// Direction-wide, not per writer: a writer reads its own call's result.
 	//
 	// Flags (not byte-comparison) because a mutator that rewrites to
 	// byte-identical content still wants the Invocation recorded —
@@ -634,6 +635,16 @@ func (c *Context) DenyAndRecord(reason, code, message string) Action {
 // consults pctx.BodyMutated() after Run to decide whether to emit the new
 // bytes on the wire.
 //
+// It reports whether THIS write took effect. True means pctx.Body is now
+// newBody: the bytes the listener sends, or the bytes a later writer starts
+// from and may rewrite in turn. False means
+// pctx.Body is unchanged: the calling plugin runs under on_error: observe, so
+// this was a shadow write, or the call was dropped in OnFinish. A writer that
+// reports or counts its own outcome — applied or only measured — reads this
+// result, never BodyMutated(): that one answers for the request, so after an
+// earlier writer's bytes took effect it says true for a shadow write too.
+// Callers that need neither may ignore the result.
+//
 // NOTE — the capability is a contract, not an enforcement. SetBody sets
 // bodyMutated unconditionally outside observe mode, and the listeners gate
 // purely on pctx.BodyMutated(), so a plugin that calls SetBody WITHOUT
@@ -645,11 +656,12 @@ func (c *Context) DenyAndRecord(reason, code, message string) Action {
 // WritesRequestBody costs no streaming (see PluginCapabilities).
 //
 // Under ErrorPolicyObserve (shadow mode) SetBody is a NO-OP on bytes:
-// the in-memory body is not replaced, bodyMutated stays false, and
-// downstream plugins continue to see the original. A modify
+// the in-memory body is not replaced, this call does not set bodyMutated,
+// and downstream plugins continue to see the body as it was. A modify
 // Invocation is still recorded — with Shadow=true — so operators can
 // count "would have redacted" on the rollout dashboard. Plugin code
-// therefore looks identical under enforce and observe.
+// therefore looks identical under enforce and observe; only the result
+// differs.
 //
 // SetBody auto-emits a modify-action Invocation with Reason
 // "body_rewritten" and publishes a plugin-public event under
@@ -659,21 +671,22 @@ func (c *Context) DenyAndRecord(reason, code, message string) Action {
 //
 // Callers should NOT assign pctx.Body directly — the listener wouldn't
 // know to propagate the change, and the Invocation wouldn't be emitted.
-func (c *Context) SetBody(newBody []byte) {
+func (c *Context) SetBody(newBody []byte) bool {
 	if c.inFinish {
 		slog.Warn("pipeline: plugin called pctx.SetBody during OnFinish — dropped (response already sent)",
 			"plugin", c.currentPlugin,
 			"new_len", len(newBody))
-		return
+		return false
 	}
 	if c.currentPolicy == ErrorPolicyObserve {
 		c.recordShadowBodyMutation("request", c.Body, newBody)
-		return
+		return false
 	}
 	old := c.Body
 	c.Body = newBody
 	c.bodyMutated = true
 	c.emitBodyMutation("request", old, newBody)
+	return true
 }
 
 // SetResponseBody is the response-side analogue of SetBody. Used by
@@ -683,24 +696,30 @@ func (c *Context) SetBody(newBody []byte) {
 // and the same observe-mode suppression: under ErrorPolicyObserve the
 // response body is untouched and the Invocation is marked Shadow=true.
 //
+// It reports whether this write took effect, as SetBody does: true when
+// pctx.ResponseBody is now newBody and the client gets it, false for a shadow
+// write under on_error: observe or a call dropped in OnFinish.
+// ResponseBodyMutated() answers for the response, not for the caller.
+//
 // A plugin that calls this must declare WritesResponseBody: true. That
 // declaration is what makes listeners buffer the response instead of
 // relaying SSE frames incrementally, so it must not be omitted.
-func (c *Context) SetResponseBody(newBody []byte) {
+func (c *Context) SetResponseBody(newBody []byte) bool {
 	if c.inFinish {
 		slog.Warn("pipeline: plugin called pctx.SetResponseBody during OnFinish — dropped (response already sent)",
 			"plugin", c.currentPlugin,
 			"new_len", len(newBody))
-		return
+		return false
 	}
 	if c.currentPolicy == ErrorPolicyObserve {
 		c.recordShadowBodyMutation("response", c.ResponseBody, newBody)
-		return
+		return false
 	}
 	old := c.ResponseBody
 	c.ResponseBody = newBody
 	c.responseBodyMutated = true
 	c.emitBodyMutation("response", old, newBody)
+	return true
 }
 
 // recordShadowBodyMutation emits the would-mutate Invocation for a
@@ -732,14 +751,39 @@ func (c *Context) recordShadowBodyMutation(phase string, oldBody, newBody []byte
 	})
 }
 
-// BodyMutated reports whether a plugin called SetBody during this
+// BodyMutated reports whether some plugin's SetBody took effect during this
 // request. Listeners check this after Run to decide whether to emit a
 // body mutation on the wire. Stream-scoped — a new Context starts with
 // false regardless of what a previous request did.
+//
+// REQUEST-WIDE, not the caller's: with several writers it is true once any
+// of them took effect, including for a later writer whose own call was a
+// shadow under on_error: observe. A writer learns whether its own write
+// applied from SetBody's result.
 func (c *Context) BodyMutated() bool { return c.bodyMutated }
 
-// ResponseBodyMutated is the response-side analogue of BodyMutated.
+// ResponseBodyMutated is the response-side analogue of BodyMutated, and
+// answers for the response the same way.
 func (c *Context) ResponseBodyMutated() bool { return c.responseBodyMutated }
+
+// RewrittenBodyLen is the length of the request body as the writes that took
+// effect left it — the bytes the listener sends upstream — from the
+// framework's record of them. ok is false when no write took effect, so the
+// request goes upstream as the client sent it; a shadow write under
+// on_error: observe never counts.
+//
+// For a consumer that calibrates on what the request actually sent, as
+// settlement does in turning a byte saving into tokens. A writer's own figure
+// describes the body as that writer left it, and a later writer may have
+// changed it. Read here rather than off the published body-mutation event:
+// that event holds a shadow's would-be length while nothing has taken effect,
+// and a response write replaces it, since one key serves both directions.
+func (c *Context) RewrittenBodyLen() (n int, ok bool) {
+	if c.requestMutation == nil {
+		return 0, false
+	}
+	return c.requestMutation.LengthAfter, true
+}
 
 // ContentSources returns every protocol extension on this Context that
 // implements capabilities.ContentSource. Guardrail plugins call this to
@@ -869,7 +913,7 @@ func (c *Context) mutationRecord(phase string) **bodyMutationEvent {
 // The key carries a synthetic "body-mutation" plugin name rather than a real
 // one. Per the convention in extensions.go, keys MUST be the plugin's Name(); the
 // framework (not a specific plugin) owns this event, so a switch of plugin names
-// in a future refactor must not break operators' dashboards.
+// in a future refactor shouldn't break operators' dashboards.
 func (c *Context) publishBodyMutation(ev bodyMutationEvent) {
 	ev.Plugins = slices.Clone(ev.Plugins)
 	if c.Extensions.Custom == nil {
@@ -886,11 +930,16 @@ func (c *Context) publishBodyMutation(ev bodyMutationEvent) {
 // One record per direction per request, however many plugins wrote: before is
 // the body ahead of the first write, after the body the last one left, and
 // Plugins the writers in chain order. Plugin is the last of them, the field's
-// meaning when there was only ever one.
+// meaning when there was only ever one. While no write in the direction has
+// taken effect, the record is the latest shadow write's would-be rewrite
+// instead, and both name that observed writer.
 type bodyMutationEvent struct {
-	Phase        string   `json:"phase"`   // "request" | "response"
-	Plugin       string   `json:"plugin"`  // the last plugin whose write took effect
-	Plugins      []string `json:"plugins"` // every plugin whose write took effect, in order
+	Phase  string `json:"phase"`  // "request" | "response"
+	Plugin string `json:"plugin"` // the last plugin whose write took effect, or the observed writer (see Plugins)
+	// Plugins is every plugin whose write took effect, in order — or, while none
+	// has, the observed writer whose would-be rewrite this describes (its
+	// invocation carries shadow: true).
+	Plugins      []string `json:"plugins"`
 	LengthBefore int      `json:"length_before"`
 	LengthAfter  int      `json:"length_after"`
 	SHA256Before string   `json:"sha256_before"`

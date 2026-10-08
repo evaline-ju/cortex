@@ -176,7 +176,7 @@ func TestValidateCapabilities_ResponseAndRequestMutatorsCoexist(t *testing.T) {
 	if err != nil {
 		t.Errorf("[parser, sparc, tool-prune] should build: %v", err)
 	}
-	// Two mutators on the SAME side are still rejected.
+	// Two RESPONSE mutators are still rejected; request mutators chain.
 	if err := validateCapabilities([]Plugin{
 		&stubPlugin{name: "sparc", caps: PluginCapabilities{WritesResponseBody: true}},
 		&stubPlugin{name: "cpex", caps: PluginCapabilities{WritesResponseBody: true}},

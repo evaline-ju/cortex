@@ -392,6 +392,79 @@ func TestAvoided_PricesSavingsAtTheRequestsPromptSize(t *testing.T) {
 	}
 }
 
+// The saving is calibrated on the body the request SENT, as the framework recorded the
+// writes that took effect — not on the body as the saving's own component left it.
+//
+// Request writers chain, so a component that shrank the body is not necessarily the last
+// to write it. Its own figure then names a body larger than the one billed, the measured
+// tokens-per-byte comes out low, and so does every saving priced from it — by the ratio of
+// the two sizes. Here a later writer cuts 2,384,550 bytes to 1,200,000, so the component's
+// figure would understate the saving by half.
+func TestAvoided_CalibratesOnTheBodyTheRequestSent(t *testing.T) {
+	const removed, ownAfter, sent = 34_645, 2_384_550, 1_200_000
+	pctx := &pipeline.Context{
+		Host: "gw.internal",
+		Body: make([]byte, ownAfter),
+		Extensions: pipeline.Extensions{
+			Inference: &pipeline.InferenceExtension{
+				Model: "claude-opus-5", InputTokens: 26,
+				CacheWriteTokens: 640_985, OutputTokens: 1_075,
+			},
+			Custom: map[string]any{
+				"tool-prune" + pipeline.PluginEventSuffix: map[string]any{
+					"bytesRemoved": removed, "bodyBytesAfter": ownAfter,
+				},
+			},
+		},
+	}
+	pctx.SetCurrentPlugin("a-later-writer", pipeline.InvocationPhaseRequest)
+	pctx.SetBody(make([]byte, sent))
+	pctx.ClearCurrentPlugin()
+
+	got := Avoided(pctx, tieredTable(t))
+	if len(got) != 1 {
+		t.Fatalf("Avoided returned %d savings, want 1: %+v", len(got), got)
+	}
+	prompt := pricing.UsageFromInference(pctx.Extensions.Inference).PromptTotal()
+	want := pricing.EstimateTokensFromBytes(removed, prompt, sent)
+	if got[0].TokensAvoided != want {
+		t.Errorf("TokensAvoided = %d, want %d calibrated on the %d bytes sent; the component's own "+
+			"%d-byte figure gives %d", got[0].TokensAvoided, want, sent, ownAfter,
+			pricing.EstimateTokensFromBytes(removed, prompt, ownAfter))
+	}
+}
+
+// With no write that took effect there is no record, and the component's own figure is the
+// calibration — its body is the one that went upstream.
+func TestAvoided_WithNoRewriteCalibratesOnTheComponentsFigure(t *testing.T) {
+	const removed, ownAfter = 34_645, 2_384_550
+	pctx := &pipeline.Context{
+		Host: "gw.internal",
+		Extensions: pipeline.Extensions{
+			Inference: &pipeline.InferenceExtension{
+				Model: "claude-opus-5", InputTokens: 26,
+				CacheWriteTokens: 640_985, OutputTokens: 1_075,
+			},
+			Custom: map[string]any{
+				"tool-prune" + pipeline.PluginEventSuffix: map[string]any{
+					"bytesRemoved": removed, "bodyBytesAfter": ownAfter, "projected": true,
+				},
+			},
+		},
+	}
+	got := Avoided(pctx, tieredTable(t))
+	if len(got) != 1 {
+		t.Fatalf("Avoided returned %d savings, want 1: %+v", len(got), got)
+	}
+	prompt := pricing.UsageFromInference(pctx.Extensions.Inference).PromptTotal()
+	if want := pricing.EstimateTokensFromBytes(removed, prompt, ownAfter); got[0].TokensAvoided != want {
+		t.Errorf("TokensAvoided = %d, want %d from the component's own figure", got[0].TokensAvoided, want)
+	}
+	if !got[0].Projected {
+		t.Error("the component's projected flag was lost")
+	}
+}
+
 // A binary with no pricing wired must report unpriced, not panic. The trap is that the
 // resolver is an INTERFACE: a nil one panics on call where a nil *Registry would not.
 func TestSettle_NilResolverIsUnpriced(t *testing.T) {

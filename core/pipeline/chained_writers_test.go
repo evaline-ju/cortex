@@ -191,3 +191,192 @@ func TestBodyMutation_TheResponseRecordStartsFromTheResponse(t *testing.T) {
 
 	assertMutation(t, bodyMutation(t, c), "response", "resp", "resp+f", "filter")
 }
+
+// reporter is appender that keeps what its own SetBody call answered.
+func reporter(name, suffix string, applied *bool) *stubPlugin {
+	return &stubPlugin{
+		name: name,
+		caps: PluginCapabilities{WritesRequestBody: true},
+		onReq: func(_ context.Context, pctx *Context) Action {
+			*applied = pctx.SetBody(append(append([]byte{}, pctx.Body...), suffix...))
+			return Action{Type: Continue}
+		},
+	}
+}
+
+// SetBody answers for the call it was given: true when those bytes took effect,
+// false for a write under on_error: observe. BodyMutated is request-wide, so after
+// an earlier writer took effect it says true for an observed writer whose own
+// bytes went nowhere — which is why a writer must read its own result.
+func TestSetBody_SaysWhetherThisWriteTookEffect(t *testing.T) {
+	enforce, observe := ErrorPolicyEnforce, ErrorPolicyObserve
+	for name, tc := range map[string]struct {
+		policies              []ErrorPolicy
+		wantFirst, wantSecond bool
+		wantBody              string
+	}{
+		"both enforced":    {[]ErrorPolicy{enforce, enforce}, true, true, "x+a+b"},
+		"second observed":  {[]ErrorPolicy{enforce, observe}, true, false, "x+a"},
+		"first observed":   {[]ErrorPolicy{observe, enforce}, false, true, "x+b"},
+		"neither enforced": {[]ErrorPolicy{observe, observe}, false, false, "x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var first, second bool
+			p, err := New([]Plugin{reporter("first", "+a", &first), reporter("second", "+b", &second)},
+				WithPolicies(tc.policies...))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			pctx := &Context{Direction: Outbound, Body: []byte("x")}
+			p.Run(context.Background(), pctx)
+
+			if first != tc.wantFirst || second != tc.wantSecond {
+				t.Errorf("SetBody answered first=%v second=%v, want %v and %v",
+					first, second, tc.wantFirst, tc.wantSecond)
+			}
+			if string(pctx.Body) != tc.wantBody {
+				t.Errorf("Body = %q, want %q", pctx.Body, tc.wantBody)
+			}
+			if name == "second observed" && !pctx.BodyMutated() {
+				t.Error("BodyMutated = false; the first writer's bytes took effect, and it answers for the request")
+			}
+		})
+	}
+}
+
+// The response side answers the same way.
+func TestSetResponseBody_SaysWhetherThisWriteTookEffect(t *testing.T) {
+	for name, tc := range map[string]struct {
+		policy   ErrorPolicy
+		want     bool
+		wantBody string
+	}{
+		"enforced": {ErrorPolicyEnforce, true, "resp+f"},
+		"observed": {ErrorPolicyObserve, false, "resp"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var applied bool
+			filter := &stubPlugin{
+				name: "filter",
+				caps: PluginCapabilities{WritesResponseBody: true},
+				onResp: func(_ context.Context, pctx *Context) Action {
+					applied = pctx.SetResponseBody(append(append([]byte{}, pctx.ResponseBody...), "+f"...))
+					return Action{Type: Continue}
+				},
+			}
+			p, err := New([]Plugin{filter}, WithPolicies(tc.policy))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			pctx := &Context{Direction: Outbound, ResponseBody: []byte("resp")}
+			p.RunResponse(context.Background(), pctx)
+
+			if applied != tc.want || string(pctx.ResponseBody) != tc.wantBody {
+				t.Errorf("SetResponseBody answered %v and the body is %q; want %v and %q",
+					applied, pctx.ResponseBody, tc.want, tc.wantBody)
+			}
+		})
+	}
+}
+
+// A write dropped in OnFinish took no effect, and both calls say so.
+func TestSetBody_AWriteDroppedInOnFinishSaysSo(t *testing.T) {
+	reqApplied, respApplied := true, true
+	f := newFinisher("f", func(_ context.Context, pctx *Context) {
+		reqApplied = pctx.SetBody([]byte("late"))
+		respApplied = pctx.SetResponseBody([]byte("late"))
+	})
+	p, err := New([]Plugin{f})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{Body: []byte("req"), ResponseBody: []byte("resp")}
+	p.Run(context.Background(), pctx)
+	p.RunFinish(context.Background(), pctx, Outcome{FinalAction: OutcomeAllow})
+
+	if reqApplied || respApplied {
+		t.Errorf("SetBody answered %v and SetResponseBody %v in OnFinish; both were dropped", reqApplied, respApplied)
+	}
+}
+
+// [enforce, observe, enforce]: the shadow write in the middle sent nothing, so the
+// record names the two writers whose bytes went upstream, and its after is theirs.
+func TestBodyMutation_AShadowBetweenTwoAppliedWritesIsLeftOut(t *testing.T) {
+	p, err := New([]Plugin{appender("first", "+a"), appender("second", "+b"), appender("third", "+c")},
+		WithPolicies(ErrorPolicyEnforce, ErrorPolicyObserve, ErrorPolicyEnforce))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{Direction: Outbound, Body: []byte("x")}
+	p.Run(context.Background(), pctx)
+
+	assertMutation(t, bodyMutation(t, pctx), "request", "x", "x+a+c", "first", "third")
+}
+
+// Two shadow writes in a row: neither took effect, so the record is the last one's
+// would-be rewrite of the client's body, naming only it, and both invocations are
+// shadows.
+func TestBodyMutation_TwoShadowWritesRecordTheLastOnesWouldBeRewrite(t *testing.T) {
+	p, err := New([]Plugin{appender("first", "+a"), appender("second", "+b")},
+		WithPolicies(ErrorPolicyObserve, ErrorPolicyObserve))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{Direction: Outbound, Body: []byte("x")}
+	p.Run(context.Background(), pctx)
+
+	assertMutation(t, bodyMutation(t, pctx), "request", "x", "x+b", "second")
+	if pctx.BodyMutated() || string(pctx.Body) != "x" {
+		t.Errorf("BodyMutated = %v, Body = %q; want false and the client's x", pctx.BodyMutated(), pctx.Body)
+	}
+	invs := pctx.Extensions.Invocations.Outbound
+	if len(invs) != 2 || !invs[0].Shadow || !invs[1].Shadow {
+		t.Errorf("invocations = %+v, want two shadow body_rewritten records", invs)
+	}
+}
+
+// RewrittenBodyLen is how long the writes that took effect left the request body:
+// the last one's length, however many wrote, and nothing for a shadow write — the
+// published record holds a shadow's would-be length while nothing has taken effect.
+func TestRewrittenBodyLen_IsTheLengthTheAppliedWritesLeft(t *testing.T) {
+	enforce, observe := ErrorPolicyEnforce, ErrorPolicyObserve
+	for name, tc := range map[string]struct {
+		policies []ErrorPolicy
+		wantLen  int
+		wantOK   bool
+	}{
+		"both enforced":    {[]ErrorPolicy{enforce, enforce}, len("x+a+b"), true},
+		"second observed":  {[]ErrorPolicy{enforce, observe}, len("x+a"), true},
+		"first observed":   {[]ErrorPolicy{observe, enforce}, len("x+b"), true},
+		"neither enforced": {[]ErrorPolicy{observe, observe}, 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := New([]Plugin{appender("first", "+a"), appender("second", "+b")}, WithPolicies(tc.policies...))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			pctx := &Context{Direction: Outbound, Body: []byte("x")}
+			p.Run(context.Background(), pctx)
+
+			if n, ok := pctx.RewrittenBodyLen(); n != tc.wantLen || ok != tc.wantOK {
+				t.Errorf("RewrittenBodyLen = %d, %v; want %d, %v", n, ok, tc.wantLen, tc.wantOK)
+			}
+		})
+	}
+}
+
+// A response write publishes over the request's record in Extensions.Custom — one
+// key serves both directions — but leaves the request's length alone, which is why
+// a response-time reader asks RewrittenBodyLen rather than the published map.
+func TestRewrittenBodyLen_SurvivesAResponseWrite(t *testing.T) {
+	c := &Context{Direction: Outbound, Body: []byte("req")}
+	c.SetCurrentPlugin("pruner", InvocationPhaseRequest)
+	c.SetBody([]byte("req+a"))
+	c.ResponseBody = []byte("resp")
+	c.SetCurrentPlugin("filter", InvocationPhaseResponse)
+	c.SetResponseBody([]byte("a much longer response"))
+
+	if n, ok := c.RewrittenBodyLen(); n != len("req+a") || !ok {
+		t.Errorf("RewrittenBodyLen = %d, %v after a response write; want %d, true", n, ok, len("req+a"))
+	}
+}
