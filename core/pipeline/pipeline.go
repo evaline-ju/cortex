@@ -613,18 +613,19 @@ func (p *Pipeline) dispatchFinish(parent context.Context, name string, f Finishe
 }
 
 // validateCapabilities enforces body-mutation ordering rules and the destination rule:
-//   - At most one WritesRequestBody plugin per pipeline — mutation ordering would
-//     otherwise be ambiguous; downstream readers can't tell which version
-//     they're seeing.
-//   - A body reader (ReadsBody) must not follow a body mutator (WritesRequestBody) —
-//     the reader would silently see mutated bytes instead of the originals.
+//   - Any number of WritesRequestBody plugins may share a pipeline. They run in chain
+//     order, each seeing pctx.Body as the one before it left it, and the listener
+//     sends the last one's bytes.
+//   - At most one WritesResponseBody plugin per pipeline. Nothing needs more, and the
+//     response pass has its own ordering gap (see the KNOWN GAP note below).
+//   - A body reader (ReadsBody) must not follow a body mutator of either direction —
+//     the reader would silently see mutated bytes instead of the originals. This is
+//     what the old one-request-mutator rule protected, and it holds unchanged with
+//     any number of request mutators after the readers.
 //   - At most one WritesDestination plugin per pipeline — a request goes to one
 //     place, and a second redirect would silently override the first.
 func validateCapabilities(plugins []Plugin) error {
-	// Each direction admits at most one mutator. The rules are per-direction
-	// because ordering is only ambiguous between two plugins rewriting the
-	// same bytes; a request mutator and a response mutator never collide.
-	var requestMutator, responseMutator, destinationWriter string
+	var responseMutator, destinationWriter string
 	var firstMutator, readerAfterMutator string
 	for _, plugin := range plugins {
 		caps := plugin.Capabilities().Normalize()
@@ -633,12 +634,6 @@ func validateCapabilities(plugins []Plugin) error {
 				return fmt.Errorf("pipeline: two plugins declare WritesDestination: %q and %q — a request goes to one place; at most one destination writer per pipeline is allowed", destinationWriter, plugin.Name())
 			}
 			destinationWriter = plugin.Name()
-		}
-		if caps.WritesRequestBody {
-			if requestMutator != "" {
-				return fmt.Errorf("pipeline: two plugins declare WritesRequestBody: %q and %q — mutation ordering would be ambiguous; at most one request-body mutator per pipeline is allowed", requestMutator, plugin.Name())
-			}
-			requestMutator = plugin.Name()
 		}
 		if caps.WritesResponseBody {
 			if responseMutator != "" {
@@ -680,7 +675,7 @@ func validateCapabilities(plugins []Plugin) error {
 	}
 	warnResponseReaderOrdering(plugins)
 	if readerAfterMutator != "" {
-		return fmt.Errorf("pipeline: plugin %q reads body after mutator %q — body readers must precede the mutator so they see the original bytes", readerAfterMutator, firstMutator)
+		return fmt.Errorf("pipeline: plugin %q reads body after mutator %q — body readers must precede every mutator so they see the original bytes", readerAfterMutator, firstMutator)
 	}
 	return nil
 }

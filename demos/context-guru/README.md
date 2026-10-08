@@ -41,8 +41,9 @@ the request body before it leaves the pod.
                                     Ollama  (llama3.2, 12K-token window)
 ```
 
-The pipeline is `inference-parser → context-guru`. context-guru is the single
-outbound `WritesRequestBody` plugin (mutually exclusive with `sparc`).
+The pipeline is `inference-parser → context-guru`. context-guru is an outbound
+`WritesRequestBody` plugin; request-body writers chain, so it can share the
+chain with another (`tool-prune`, say).
 
 ## The engine: 2 deterministic reducers + extract-code
 
@@ -150,7 +151,8 @@ inject a second sidecar). The extract-code key lives in the `cg-model-key` Secre
   compacted request` log line without altering the request.
 - **collapse stays gentle** (`head/tail: 12`); `extract` (query-aware) is the primary
   reducer that preserves the mid-log needle. Very aggressive collapse can drop it.
-- **context-guru + SPARC are mutually exclusive** on the outbound chain (one WritesRequestBody slot).
+- **context-guru chains with other request-body writers** on the outbound chain
+  (`tool-prune`, say); every body reader, the parser included, must precede them.
 
 ## Files
 

@@ -9,11 +9,12 @@ import (
 
 	// Register inference-parser so context-guru's RequiresAny is satisfiable.
 	_ "github.com/rossoctl/cortex/core/plugins/inferenceparser"
+	// Register tool-prune, the other request-body writer context-guru now chains with.
+	_ "github.com/rossoctl/cortex/core/plugins/toolprune"
 )
 
 // TestBuild_InChainAfterInferenceParser confirms the plugin assembles on the
-// outbound chain when a parser precedes it (RequiresAny + the single-WritesRequestBody
-// slot are accepted together).
+// outbound chain when a parser precedes it.
 func TestBuild_InChainAfterInferenceParser(t *testing.T) {
 	p, err := plugins.Build([]config.PluginEntry{
 		{Name: "inference-parser"},
@@ -35,5 +36,22 @@ func TestBuild_FailsWhenBeforeParser(t *testing.T) {
 		{Name: "inference-parser"},
 	}); err == nil {
 		t.Fatal("expected build failure: context-guru requires inference-parser earlier in the chain")
+	}
+}
+
+// Request-body writers chain, so context-guru shares the outbound chain with
+// tool-prune: tool-prune prunes the manifest, then context-guru compacts what is
+// left. Both follow the parser, which must see the bytes the client sent.
+func TestBuild_ChainsAfterToolPrune(t *testing.T) {
+	p, err := plugins.Build([]config.PluginEntry{
+		{Name: "inference-parser"},
+		{Name: "tool-prune", Config: json.RawMessage(`{"remove": []}`)},
+		{Name: "context-guru", Config: json.RawMessage(collapseEngine)},
+	})
+	if err != nil {
+		t.Fatalf("pipeline should build with [inference-parser, tool-prune, context-guru]: %v", err)
+	}
+	if got := len(p.Plugins()); got != 3 {
+		t.Fatalf("expected 3 plugins, got %d", got)
 	}
 }

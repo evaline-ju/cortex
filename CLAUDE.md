@@ -426,9 +426,10 @@ per direction: `WritesRequestBody` (calls `pctx.SetBody`) and
 SSE streaming predicate — both proxy listeners fall back from incremental relay
 to the buffered path only when some plugin declares it. A request-only mutator
 (`tool-prune`, `context-guru`) therefore keeps streaming, because requests are
-never streamed in the first place. `pipeline.New` allows at most one mutator per
-direction, and no mutator of either direction may precede a `ReadsBody`-only
-plugin. See [`docs/plugin-reference.md`](docs/plugin-reference.md#capability-fields).
+never streamed in the first place. `pipeline.New` lets any number of request
+mutators chain — each sees `pctx.Body` as the one before it left it — allows at
+most one response mutator, and lets no mutator of either direction precede a
+`ReadsBody`-only plugin. See [`docs/plugin-reference.md`](docs/plugin-reference.md#capability-fields).
 
 **Plugin metrics.** Plugins that implement `pipeline.MetricsProvider` have their
 counters surfaced on `GET /v1/pipeline` and rendered in agentop's plugin pane.

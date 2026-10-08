@@ -607,7 +607,7 @@ mutator now keeps incremental relay.
 
 `pipeline.New` enforces two rules at build time:
 
-1. **At most one mutator per direction per pipeline.** Multiple mutators writing the same bytes would have ambiguous ordering semantics; the error names both plugins so an operator debugging pod logs knows which two to reconcile. A request mutator and a response mutator coexist fine.
+1. **Request mutators chain; at most one response mutator.** Any number of `WritesRequestBody` plugins may share a pipeline: they run in chain order, each seeing `pctx.Body` as the one before it left it, and the listener sends the last one's bytes. A second `WritesResponseBody` plugin is refused with an error naming both — nothing needs two, and the response pass runs in reverse with an ordering gap of its own. A request mutator and a response mutator coexist fine.
 2. **A mutator of either direction cannot precede a `ReadsBody`-only plugin.** A reader expects to see the original bytes; putting a mutator before it would silently feed the reader the post-rewrite content.
 
 **Mutation helpers.** `SetBody` / `SetResponseBody` replace the byte slice and flip an internal `bodyMutated` / `responseBodyMutated` flag that listeners read via `pctx.BodyMutated()` / `pctx.ResponseBodyMutated()`. They also auto-emit:

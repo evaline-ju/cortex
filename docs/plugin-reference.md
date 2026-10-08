@@ -771,12 +771,16 @@ nothing about how the response may be relayed.
 
 ### Build-time validation (enforced by `pipeline.New`)
 
-- At most **one** mutator **per direction** per pipeline. Two request mutators
-  (or two response mutators) would produce ambiguous ordering; `New` rejects
-  with an error naming both plugins. One request mutator plus one response
-  mutator is fine — they never rewrite the same bytes.
+- Request mutators **chain**: any number may share a pipeline. They run in
+  chain order, each seeing `pctx.Body` as the one before it left it, and the
+  listener sends the last one's bytes — so `tool-prune` and `context-guru` run
+  together, and a plugin that changes the model can follow them.
+- At most **one** response mutator per pipeline. Nothing needs more, and the
+  response pass has an ordering gap of its own (below); `New` rejects a second
+  with an error naming both plugins. A request mutator and a response mutator
+  coexist.
 - A mutator of **either** direction cannot precede a `ReadsBody`-only plugin.
-  The reader must see the original bytes.
+  The reader must see the bytes the client sent, however many mutators follow it.
 
 > **Reader-ordering is validated in request order only.** `RunResponse` iterates
 > the chain in reverse, so on the response pass the rule inverts — a reader needs

@@ -29,9 +29,11 @@ type PluginCapabilities struct {
 	// Listener propagates the mutation to the wire (ext_proc
 	// BodyMutation, or the outbound http.Request for proxy listeners).
 	//
-	// Pipeline.New rejects a pipeline that has more than one
-	// WritesRequestBody plugin per direction — mutation ordering would
-	// be ambiguous.
+	// Any number of WritesRequestBody plugins may share a pipeline. They
+	// run in chain order, each seeing pctx.Body as the one before it left
+	// it, and the listener sends the last one's bytes. Pipeline.New rejects
+	// one placed before a ReadsBody-only plugin, which must see the bytes
+	// the client sent.
 	//
 	// Declaring this does NOT cost response streaming. Requests are
 	// never streamed — they arrive complete with a Content-Length and
@@ -49,7 +51,8 @@ type PluginCapabilities struct {
 	// Pipeline.WritesResponseBody.
 	//
 	// Pipeline.New rejects more than one WritesResponseBody plugin per
-	// direction, for the same ordering reason as the request side.
+	// pipeline: nothing needs more, and the response pass, which runs in
+	// reverse, has an ordering gap of its own (see validateCapabilities).
 	WritesResponseBody bool
 
 	// WritesDestination: the plugin may call pctx.Redirect to send the request to a
