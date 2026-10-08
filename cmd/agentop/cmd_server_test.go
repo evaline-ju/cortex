@@ -289,11 +289,11 @@ func TestServer_ListsNoURLCredentials(t *testing.T) {
 		t.Errorf("the listing prints URL user info:\n%s%s", out, errOut)
 	}
 	lines := strings.Split(out, "\n")
-	if got := flat(lines[0]); !strings.HasPrefix(got, "ete ete.example.com (not a valid URL)") {
-		t.Errorf("line 1 = %q, want the host and (not a valid URL)", got)
+	if got := flat(lines[0]); !strings.HasPrefix(got, "ete not a valid URL uses") {
+		t.Errorf("line 1 = %q, want not a valid URL and nothing of the URL", got)
 	}
-	if got := flat(lines[1]); !strings.HasPrefix(got, "glm glm.example.com:8443 (not a valid URL)") {
-		t.Errorf("line 2 = %q, want the host and (not a valid URL)", got)
+	if got := flat(lines[1]); !strings.HasPrefix(got, "glm not a valid URL uses") {
+		t.Errorf("line 2 = %q, want not a valid URL and nothing of the URL", got)
 	}
 }
 
@@ -302,9 +302,9 @@ func TestServer_ChecksPrintNoURLCredentials(t *testing.T) {
 		name, baseURL, want string
 	}{
 		{"elsewhere, key as username", "https://sk-SECRET@api.anthropic.com/v1",
-			"✗ Claude Code points at https://api.anthropic.com, which is not one of these servers"},
+			"✗ Claude Code points at a URL that is not one of these servers, so nothing is routed"},
 		{"elsewhere, key as password", "https://user:sk-SECRET@api.anthropic.com",
-			"✗ Claude Code points at https://api.anthropic.com, which is not one of these servers"},
+			"✗ Claude Code points at a URL that is not one of these servers, so nothing is routed"},
 		{"a server, with user info", "https://user:sk-SECRET@ete.example.com",
 			"✓ Claude Code points at ete"},
 		{"does not parse", "https://user:sk-SECRET@api.anthropic.com:port",
@@ -401,5 +401,35 @@ func TestServer_AnUnknownHomeIsReportedNotReadFromTheWorkingDirectory(t *testing
 	}
 	if want := "✗ Claude Code's settings are not checked: cannot determine your home directory"; !strings.Contains(got, want) {
 		t.Errorf("want %q in:\n%s", want, out)
+	}
+}
+
+// A key given as a username that contains '/', '?' or '#' ends the authority
+// early, so url.Parse takes the KEY for the host: https://sk-SECRET/x@h.example.com
+// parses with Host "sk-SECRET". Nothing of a refused server URL may be shown, and
+// no host of an ANTHROPIC_BASE_URL containing '@'.
+func TestServer_AKeyTakenForTheHostIsNeverShown(t *testing.T) {
+	for _, raw := range []string{
+		"https://sk-SECRET/x@h.example.com",
+		"https://sk-SECRET?x@h.example.com",
+		"https://sk-SECRET#x@h.example.com",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			path := serverEnv(t, closedAddr(t), strings.Replace(routerBlock, "https://ete.example.com", raw, 1))
+			writeClaudeSettings(t, filepath.Dir(path), map[string]string{"ANTHROPIC_BASE_URL": raw})
+			code, out, errOut := runServerCmd(t, "", "--config", path)
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, errOut)
+			}
+			if all := strings.ToLower(out + errOut); strings.Contains(all, "secret") {
+				t.Errorf("prints the key:\n%s%s", out, errOut)
+			}
+			if got := flat(strings.Split(out, "\n")[0]); !strings.HasPrefix(got, "ete not a valid URL uses") {
+				t.Errorf("line 1 = %q, want the server listed as not a valid URL, with nothing of the URL", got)
+			}
+			if want := "✗ Claude Code points at a URL that is not one of these servers, so nothing is routed (ANTHROPIC_BASE_URL in ~/.claude/settings.json). Point it at one of the servers above."; !strings.Contains(flat(out), want) {
+				t.Errorf("want %q in:\n%s", want, out)
+			}
+		})
 	}
 }

@@ -76,9 +76,8 @@ func serverAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agentop server add: %v\n", err)
 		return 2
 	}
-	// ParseURL's error, never rawURL: a URL that fails to parse may carry a key as
-	// user info or in its query, and ParseURL's errors are the form with those
-	// taken out.
+	// ParseURL's error, never rawURL: a refused URL may carry a key anywhere in it,
+	// and ParseURL's errors quote no part of the URL.
 	ep, err := routerconfig.ParseURL(rawURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "agentop server add: %v\n", err)

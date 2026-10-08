@@ -212,15 +212,15 @@ func serverList(args []string, stdout, stderr io.Writer) int {
 // serverHost is how a server's URL is listed: its host, or the whole URL for plain
 // http, so a server whose traffic crosses the network unencrypted says so.
 //
-// A URL the router refuses is listed by its host alone, never as written: the
-// likeliest reason it is refused is a key pasted in as user info.
+// A URL the router refuses shows nothing of itself, not even its host: the likeliest
+// reason it is refused is a pasted key, and a key given as a username that contains
+// '/', '?' or '#' ends the authority early, so url.Parse takes the key for the host
+// (https://sk-.../x@gw.example parses with Host "sk-..."). No parentheses either:
+// `server add` already puts this in some.
 func serverHost(s routerconfig.Server) string {
 	ep, err := routerconfig.ParseURL(s.URL)
 	if err != nil {
-		if u, perr := url.Parse(s.URL); perr == nil && u.Host != "" {
-			return u.Host + " (not a valid URL)"
-		}
-		return "(not a valid URL)"
+		return "not a valid URL"
 	}
 	if ep.Scheme == "http" {
 		return ep.URL()
@@ -299,9 +299,11 @@ func baseURLCheck(raw, shown string, c routerconfig.Config) settingsCheck {
 	if raw == "" {
 		return settingsCheck{false, fmt.Sprintf("%s sets no ANTHROPIC_BASE_URL, so Claude Code talks to Anthropic and nothing is routed. Point it at one of the servers above.", shown)}
 	}
-	// raw is never quoted, and of a URL that parses only scheme://host[:port] is: a
-	// pasted key can sit in the user info, path, query or fragment. url.Parse admits
-	// only digits after the host's colon, so u.Host carries nothing else.
+	// raw is never quoted: a pasted key can sit in the user info, path, query or
+	// fragment. Of a URL that parses, scheme://host[:port] is quoted, and only when raw
+	// has no '@' anywhere: a username containing '/', '?' or '#' ends the authority
+	// early, and url.Parse then takes the key for the host. A URL with an '@' is
+	// still matched to a server by host, but a mismatch names no host.
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return settingsCheck{false, fmt.Sprintf("ANTHROPIC_BASE_URL in %s is not a URL with a host, so nothing is routed. Point it at one of the servers above.", shown)}
@@ -312,7 +314,11 @@ func baseURLCheck(raw, shown string, c routerconfig.Config) settingsCheck {
 			return settingsCheck{true, fmt.Sprintf("Claude Code points at %s (%s)", name, shown)}
 		}
 	}
-	return settingsCheck{false, fmt.Sprintf("Claude Code points at %s://%s, which is not one of these servers, so nothing is routed (ANTHROPIC_BASE_URL in %s). Point it at one of the servers above.", u.Scheme, u.Host, shown)}
+	where := "a URL that is"
+	if !strings.Contains(raw, "@") {
+		where = u.Scheme + "://" + u.Host + ", which is"
+	}
+	return settingsCheck{false, fmt.Sprintf("Claude Code points at %s not one of these servers, so nothing is routed (ANTHROPIC_BASE_URL in %s). Point it at one of the servers above.", where, shown)}
 }
 
 // modelChecks checks model, the settings' top-level "model" key, and env's model

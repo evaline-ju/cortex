@@ -351,3 +351,28 @@ func TestServerWrites_NeverWriteAConfigThePluginRefuses(t *testing.T) {
 		t.Error("the config was written")
 	}
 }
+
+// Replacing a server whose stored URL took the key for its host (see
+// TestServer_AKeyTakenForTheHostIsNeverShown) names it without that URL.
+func TestServerAdd_ReplacingShowsNothingOfARefusedStoredURL(t *testing.T) {
+	stubConfirm(t, true)
+	for _, raw := range []string{
+		"https://sk-SECRET/x@h.example.com",
+		"https://sk-SECRET?x@h.example.com",
+		"https://sk-SECRET#x@h.example.com",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			path := serverEnv(t, newFakeStats(t, 0).addr(), strings.Replace(routerBlock, "https://ete.example.com", raw, 1))
+			code, out, errOut := runServerCmd(t, "sk-new", "add", "ete", "https://ete.example.com", "--key-stdin", "--yes", "--config", path)
+			if code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out, errOut)
+			}
+			if all := strings.ToLower(out + errOut); strings.Contains(all, "secret") {
+				t.Errorf("prints the stored key:\n%s%s", out, errOut)
+			}
+			if !strings.Contains(out, "ete is already configured (not a valid URL).") {
+				t.Errorf("stdout:\n%s", out)
+			}
+		})
+	}
+}
