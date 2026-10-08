@@ -705,15 +705,24 @@ func validateCapabilities(plugins []Plugin) error {
 // promised no working configuration starts failing. But the deferral should not
 // be invisible — until now its only record was a code comment, which an operator
 // running the shape would never read.
+//
+// Only a reader with a response mutator AFTER it is warned about: with none
+// there, the response pass hands every reader the bytes the upstream sent. And
+// a reader here is a plugin that declares ReadsBody itself — the raw
+// capability, as NeedsResponseBody reads it. Normalize also counts a
+// request-only writer such as tool-prune or the inference-router as a reader,
+// but it reads no response, and counting it made both warn on every build and
+// reload of a chain with no response mutator at all.
 func warnResponseReaderOrdering(plugins []Plugin) {
-	var respMutator string
-	for _, p := range plugins {
-		caps := p.Capabilities().Normalize()
-		if caps.WritesResponseBody {
-			respMutator = p.Name()
-			continue
+	last := -1 // the last response mutator; New admits one
+	for i, p := range plugins {
+		if p.Capabilities().WritesResponseBody {
+			last = i
 		}
-		if respMutator != "" || !caps.ReadsBody {
+	}
+	for _, p := range plugins[:max(last, 0)] {
+		caps := p.Capabilities()
+		if caps.WritesResponseBody || !caps.ReadsBody {
 			continue
 		}
 		if _, streaming := p.(StreamingResponder); streaming {
