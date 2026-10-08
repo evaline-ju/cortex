@@ -72,6 +72,9 @@ func fullEvent() pipeline.SessionEvent {
 			Result:   map[string]any{"big": strings.Repeat("r", 1024)},
 			Err:      &pipeline.MCPError{Code: -1, Message: "boom"},
 		},
+		// Set only when a plugin redirected the request; differs from Host on purpose,
+		// so an assertion cannot pass by reading the wrong one.
+		RequestedHost: "requested.example.com",
 	}
 }
 
@@ -120,6 +123,13 @@ func TestSummarizeEvent_DropsPayloadsKeepsTimelineFields(t *testing.T) {
 	// Kept: everything the events table and its sort keys read.
 	if got.Seq != full.Seq || got.At != full.At || got.Host != full.Host {
 		t.Error("identity/time/host fields did not survive")
+	}
+	// requestedHost is kept although only the detail pane reads it: agentop draws its
+	// redirected: line from the projected event before the full one arrives, and never
+	// fetches the full one for an event with no protocol extension.
+	if got.RequestedHost != full.RequestedHost {
+		t.Errorf("requestedHost = %q, want %q — the detail pane's redirected: line reads it",
+			got.RequestedHost, full.RequestedHost)
 	}
 	if got.Direction != full.Direction || got.Phase != full.Phase {
 		t.Error("direction/phase did not survive")
@@ -305,9 +315,10 @@ func TestSummarizeEvent_ShapeIsGuarded(t *testing.T) {
 		typ  reflect.Type
 		want int
 	}{
-		// 24 since BytesUp/BytesDown, which are TIMELINE data: agentop's BYTES column
-		// renders them. Scalars, so the struct copy keeps them; asserted above.
-		{"SessionEvent", reflect.TypeOf(pipeline.SessionEvent{}), 24},
+		// 25 since RequestedHost, which is kept: agentop's detail pane draws its
+		// redirected: line from the projected event before the full one arrives. A
+		// scalar, so the struct copy keeps it; asserted above.
+		{"SessionEvent", reflect.TypeOf(pipeline.SessionEvent{}), 25},
 		// 25 since AgentRole, which is TIMELINE data: agentop's CONTEXT gauge reads it on every
 		// row the timeline serves. It needs no assertion of its own in the projection test
 		// beyond the equality one there — a scalar survives the struct copy, unlike the two
