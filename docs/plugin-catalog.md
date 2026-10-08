@@ -178,35 +178,46 @@ at startup, and in-cluster use has not been examined.
 ```
 
 **What it does to a request.** Only a request the forward proxy re-sends — a plain
-proxied one, or one decrypted by the TLS bridge — can be routed; a `CONNECT` is
+proxied one, or one decrypted by the TLS bridge — can be routed. A `CONNECT` or a
+transparently redirected connection is dialed where the client chose, and is
 `skip/not_redirectable`. A request to a host no server has is
 `skip/not_an_inference_server`. On a server's host every path is handled,
 `/v1/models` and `count_tokens` included, and the session decides:
 
-- A session's first request pins it, in the process store, to its agent's server at
-  that moment, or to "not routed". Every request renews the pin, which lapses 30
-  days after the last. Changing `agents` therefore moves only new sessions; the
-  pins survive a hot reload but not a restart. A request with no session follows
-  its agent's current server, unpinned.
+- A session's first request pins it, in the process store, to where that request
+  went: its agent's server when the redirect took effect, or "not routed" when the
+  request stayed where the client sent it — because the agent is not routed, or
+  because the router runs under `on_error: observe`, even for an agent with a
+  server. A session started under observe therefore stays unrouted after a switch
+  to enforce. A first request whose redirect failed pins nothing, and the next one
+  decides again. Every request renews the pin, which lapses 30 days after the last.
+  Changing `agents` therefore moves only new sessions; the pins survive a hot
+  reload but not a restart. A request with no session follows its agent's current
+  server, unpinned, and so does one filed under a synthetic session — the `default`
+  bucket or a `pending:<agent>` id — since each holds many conversations, not one.
 - Not routed: `skip/not_routed`, and the request is left as the client sent it.
-- Pinned to a server since removed by hand: `deny/pinned_server_removed`, a 503
-  asking for a new session. The conversation is never moved to another server.
-- Otherwise the request is redirected to the server, which the framework records
-  as `modify/redirected`, the key is replaced, and the router records
-  `modify/routed` with `server` and `pin` (`new`, `existing` or `none`). The
-  redirect happens even when the request already names the server's host: the
-  `Host` header is the client's word, and a TLS-bridged request is otherwise dialed
-  to the host the client `CONNECT`ed to, which need not be the same. The key is
-  set only once the redirect has taken effect, so it goes to the server and
-  nowhere else.
-- Under `on_error: observe` nothing moves, the client's key stays, and the record
-  is `observe/would_route`.
+- Pinned to a server since removed: `deny/pinned_server_removed`, a 503 asking for
+  a new session. The conversation is never moved to another server.
+- Otherwise the request is redirected to the server, and the key is replaced only
+  once the redirect has taken effect, so it goes to the server and nowhere else.
+  Every routed request is redirected, even one that already names the server's
+  host: the `Host` header is the client's word, and a TLS-bridged request is
+  otherwise dialed to the host the client `CONNECT`ed to, which need not be the
+  same. Each therefore carries the framework's `modify/redirected` record — with
+  `from` equal to `to` when the agent's base URL (`ANTHROPIC_BASE_URL`, for Claude
+  Code) already names the server — followed by the router's `modify/routed` with
+  `server` and `pin` (`new`, `existing` or `none`).
+- A redirect the listener refuses: `deny/redirect_failed`, a 503.
+- Under `on_error: observe` nothing moves and the client's key stays. The timeline
+  shows two rows: the framework's shadow `modify/redirected`, and the router's
+  `observe/would_route`.
 
 **Put it last in the outbound chain**, where `agentop server add` puts it. A
 redirect moves `pctx.Host`, so the plugins before the router decide on the host
 the client asked for, and a plugin after it would see the server's instead; put
 nothing after it that keys on the host. Session events, usage and cost follow the
-server's host, and each event's `requestedHost` keeps the one asked for.
+server's host, and each event's `requestedHost` keeps the one asked for when it
+differs.
 
 ## `jwt-validation`
 

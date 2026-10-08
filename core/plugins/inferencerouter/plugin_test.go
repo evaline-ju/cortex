@@ -348,11 +348,16 @@ func TestRouter_ARoutedRequestOnItsServersHostIsStillRedirected(t *testing.T) {
 		})
 	}
 	// A redirect back to the host the client named records no requested host, so the
-	// session row does not show a move that did not happen.
+	// session row does not show a move that did not happen, and the framework's record
+	// says it went from the server to the server.
 	pctx := request(newStore(t), eteHost, claudeUA, "s1")
 	run(t, build(t, routerConfig(`"claude-code": "ete"`)), pctx)
 	if got := pctx.RequestedHost(); got != "" {
 		t.Errorf("RequestedHost = %q, want \"\" for a request already on the server's host", got)
+	}
+	if invs := pctx.Extensions.Invocations.Outbound; len(invs) != 2 || invs[0].Reason != "redirected" ||
+		invs[0].Details["from"] != eteHost || invs[0].Details["to"] != eteHost {
+		t.Errorf("invocations = %+v, want modify/redirected from %s to %s, then routed", invs, eteHost, eteHost)
 	}
 }
 
@@ -417,8 +422,12 @@ func TestRouter_AFailedRedirectPinsNothing(t *testing.T) {
 		t.Fatalf("pipeline.New: %v", err)
 	}
 	pctx := request(store, eteHost, claudeUA, "s1")
-	if a := run(t, failing, pctx); a.Type != pipeline.Reject {
+	a := run(t, failing, pctx)
+	if a.Type != pipeline.Reject {
 		t.Fatalf("action = %+v, want Reject", a)
+	}
+	if status, _, _ := a.Violation.Render(); status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", status)
 	}
 	assertRecord(t, pctx, pipeline.ActionDeny, "redirect_failed", map[string]string{"server": "glm", "pin": pinNone})
 	assertUntouched(t, pctx, eteHost)
