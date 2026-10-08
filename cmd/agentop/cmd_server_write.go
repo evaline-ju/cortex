@@ -22,6 +22,11 @@ import (
 // claudeCodeConfirm is, so a test stubbing it cannot disarm another command's prompt.
 var serverConfirm = confirm
 
+// writePluginConfig is edit.WritePluginConfig. A var so a test can stand in for a
+// proxy that stops answering mid-poll, which the real poller takes about 16s of
+// backoff to give up on.
+var writePluginConfig = edit.WritePluginConfig
+
 // readServerKey reads a server's API key at a prompt that does not echo, on the
 // controlling terminal rather than stdin, so it works when stdin is a pipe and the
 // prompt is not written into redirected output. A var so tests can stand in for the
@@ -301,7 +306,7 @@ func verifyRouter(cfg *config.Config) error {
 // runServerWrite makes one change to the router entry and reports how it landed:
 // done once the proxy has it, unchanged when there was nothing to write.
 func runServerWrite(stdout, stderr io.Writer, path, statsURL string, ch edit.ConfigChange, done, unchanged string) int {
-	res, err := edit.WritePluginConfig(context.Background(), edit.ConfigWrite{
+	res, err := writePluginConfig(context.Background(), edit.ConfigWrite{
 		Path: path, StatsURL: statsURL, Changes: []edit.ConfigChange{ch}, Verify: verifyRouter,
 	})
 	if err != nil {
@@ -318,17 +323,18 @@ func runServerWrite(stdout, stderr io.Writer, path, statsURL string, ch edit.Con
 		fmt.Fprintln(stdout, done)
 		fmt.Fprintf(stdout, "Written to %s. No Cortex answered at its stats address, so this applies when the proxy next starts.\n", shown)
 	case edit.WriteReloadFailed:
-		// WritePluginConfig restores the file after a refusal, so it does not hold
-		// the change; saying it was written would send the user looking for an edit
-		// that is not there. Where the restore did not happen the file does hold it,
-		// and a refused config left on disk is what the proxy next starts from.
-		if !res.RolledBack {
-			fmt.Fprintf(stderr, "agentop server: the change was not applied: the proxy refused it and keeps its previous configuration, "+
-				"but %s still holds it; fix that by hand before the proxy next starts:\n  %s\n", shown, res.ReloadError)
-			return 1
-		}
+		// WritePluginConfig has put the file back, so it does not hold the change;
+		// saying it was written would send the user looking for an edit that is not
+		// there. Where it could not, it returned an error saying so, handled above.
 		fmt.Fprintf(stderr, "agentop server: the change was not applied: the proxy refused it and keeps its previous configuration, "+
 			"so %s was put back as it was:\n  %s\n", shown, res.ReloadError)
+		return 1
+	case edit.WriteStatusUnreachable:
+		// Not a refusal: nothing said no. The proxy went away, and whether it took
+		// the change before it did is unknown, so the file was put back to what it
+		// last ran, which is what it starts from if it was stopped.
+		fmt.Fprintf(stderr, "agentop server: the change was not confirmed: the proxy stopped answering at %s before it reported the reload, "+
+			"so %s was put back as it was; check the proxy is running and try again:\n  %s\n", statsURL, shown, res.ReloadError)
 		return 1
 	case edit.WriteReloadTimedOut:
 		fmt.Fprintf(stderr, "agentop server: wrote %s, but the proxy reported no reload within %s; check %s/reload/status\n",

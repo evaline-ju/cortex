@@ -22,7 +22,8 @@ type ConfigChange struct {
 	Path []string
 	// Value is the value to set: a scalar, or a mapping of scalars and mappings
 	// (see ScalarValue and MapValue). Nil removes the key, and with it every
-	// mapping the removal leaves empty, config: included.
+	// mapping the removal leaves empty, config: included — and every comment inside
+	// what it removes.
 	Value *yaml.Node
 	// CreatePlugin appends an entry for Plugin at the end of Chain when the chain
 	// has none. Without it a missing entry is an error. A removal never creates one.
@@ -53,9 +54,13 @@ func MapValue(pairs ...string) *yaml.Node {
 // nothing to change.
 //
 // Positions come from the YAML parser and the edit is made to plain lines, as
-// `agentop config migrate-pricing` does, so every comment and every line the change
-// does not touch survives byte for byte. Round-tripping the document through a YAML
-// encoder would reflow it and drop the comments the local config ships with.
+// `agentop config migrate-pricing` does, so every line the change does not touch
+// survives byte for byte, comments included. A change does touch the lines it
+// replaces or removes, and their comments go with them: a replaced value's, and on
+// a removal the key's whole block and every mapping the removal leaves empty, with
+// any comment inside, however deep. A comment above a removed key stays, since it may
+// be about what follows. Round-tripping the document through a YAML encoder would
+// reflow it and drop the comments the local config ships with.
 //
 // It edits indented (block) YAML. A mapping it has to descend into, or a chain's
 // plugins list, written in flow style ({...} or [...]) is refused with an error

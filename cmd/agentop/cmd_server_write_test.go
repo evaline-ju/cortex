@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/cortex/cmd/agentop/edit"
 )
 
 // fakeStats is a stats server whose /reload/status reports a reload at every poll,
@@ -404,5 +407,30 @@ func TestServerAdd_ReplacingShowsNothingOfARefusedStoredURL(t *testing.T) {
 				t.Errorf("stdout:\n%s", out)
 			}
 		})
+	}
+}
+
+// stubWrite stands in for edit.WritePluginConfig with a fixed answer.
+func stubWrite(t *testing.T, res edit.WriteResult, err error) {
+	t.Helper()
+	prev := writePluginConfig
+	writePluginConfig = func(context.Context, edit.ConfigWrite) (edit.WriteResult, error) { return res, err }
+	t.Cleanup(func() { writePluginConfig = prev })
+}
+
+// A proxy that stopped answering refused nothing. The command says what happened —
+// it stopped answering, and the file was put back — and exits 1, rather than
+// reporting a refusal the proxy never made.
+func TestServerWrites_TellAProxyThatStoppedAnsweringFromARefusal(t *testing.T) {
+	path := serverEnv(t, newFakeStats(t, 0).addr(), routerBlock)
+	stubWrite(t, edit.WriteResult{Outcome: edit.WriteStatusUnreachable, RolledBack: true,
+		ReloadError: "reload status endpoint unreachable (is the local proxy still running?)"}, nil)
+	code, out, errOut := runServerCmd(t, "", "use", "ete", "--agent", "opencode", "--config", path)
+	if code != 1 {
+		t.Errorf("exit %d, want 1; stdout:\n%s", code, out)
+	}
+	if strings.Contains(errOut, "refused") || !strings.Contains(errOut, "stopped answering") ||
+		!strings.Contains(errOut, "was put back as it was") || !strings.Contains(errOut, "is the local proxy still running?") {
+		t.Errorf("stderr:\n%s", errOut)
 	}
 }

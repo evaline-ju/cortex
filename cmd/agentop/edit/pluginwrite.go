@@ -35,9 +35,10 @@ const (
 	WriteUnchanged WriteOutcome = iota
 	// WriteReloaded: written, and the proxy reloaded it.
 	WriteReloaded
-	// WriteReloadFailed: written, and the proxy refused it. The file was restored
-	// to what it had; ReloadError says why. RolledBack reports whether the restore
-	// succeeded.
+	// WriteReloadFailed: written, and the proxy refused it, keeping the
+	// configuration it had. ReloadError says why. The file is put back as it was
+	// (RolledBack), since a refused config left on disk is what the proxy next starts
+	// from, and it may not start from it.
 	WriteReloadFailed
 	// WriteReloadTimedOut: written, and the proxy reported neither a reload nor a
 	// failure within LocalPollDeadline. The file is left as written; the reload may
@@ -45,21 +46,38 @@ const (
 	WriteReloadTimedOut
 	// WriteNotRunning: StatsURL was empty (no proxy to poll). The file was written.
 	WriteNotRunning
+	// WriteStatusUnreachable: written, and then the proxy stopped answering at
+	// StatsURL before it reported a reload or a refusal. Nothing refused the change;
+	// whether the proxy took it is unknown. The file is put back as after a refusal
+	// (RolledBack), as the TUI's RollbackCmd does: a proxy that went away next
+	// starts from the file, and this keeps that the configuration it last ran.
+	// ReloadError is the poller's account of what failed.
+	WriteStatusUnreachable
 )
 
 // WriteResult is what WritePluginConfig reports.
 type WriteResult struct {
-	Outcome     WriteOutcome
-	ReloadError string // set for WriteReloadFailed
-	RolledBack  bool   // set for WriteReloadFailed when the restore succeeded
+	Outcome WriteOutcome
+	// ReloadError is the proxy's error for WriteReloadFailed, and the poller's for
+	// WriteStatusUnreachable.
+	ReloadError string
+	// RolledBack reports, for those two outcomes, that the file was put back as it
+	// was. It is false beside an error saying why it was not.
+	RolledBack bool
 }
 
 // WritePluginConfig applies w.Changes to the file at w.Path and waits for the proxy
-// to reload it.
+// to reload it, for at most LocalPollDeadline or until ctx is done.
 //
-// It returns an error, having written nothing, when a change cannot be made, the
-// result does not load or fails Verify, or the file changed while it worked. Once
-// the file is written the error is nil and WriteResult says what the proxy did.
+// An error from before the write means nothing was written: a change cannot be
+// made, the result does not load or fails Verify, or the file changed while it
+// worked. Once the file is written the error is nil and the WriteResult says what
+// the proxy did, with one exception: the proxy refused the change or stopped
+// answering, and the file could not be put back, because someone changed it in the
+// meantime (it is then left as found) or because the restore failed. The WriteResult
+// still says what the proxy did, RolledBack is false, and the error says why the
+// file was not put back, with ReloadError in it. No error quotes the file, which
+// holds API keys.
 func WritePluginConfig(ctx context.Context, w ConfigWrite) (WriteResult, error) {
 	orig, err := os.ReadFile(w.Path)
 	if err != nil {
@@ -92,21 +110,44 @@ func WritePluginConfig(ctx context.Context, w ConfigWrite) (WriteResult, error) 
 
 	pctx, cancel := context.WithTimeout(ctx, LocalPollDeadline)
 	defer cancel()
-	switch res := PollUntilReloaded(pctx, w.StatsURL, applyTime, store.Describe().UnreachableHint); res.Status {
+	res := PollUntilReloaded(pctx, w.StatsURL, applyTime, store.Describe().UnreachableHint)
+	switch res.Status {
 	case PollSuccess:
 		return WriteResult{Outcome: WriteReloaded}, nil
 	case PollFailure:
-		// Restore the original bytes to avoid crash-looping on next start
-		_, rollbackErr := store.Apply(context.Background(), orig)
-		rolledBack := rollbackErr == nil
-		if rollbackErr != nil {
-			// File still holds the refused config and must be fixed by hand
-			return WriteResult{}, fmt.Errorf("restore after refused reload failed; config file must be fixed by hand: %w", rollbackErr)
+		out := WriteResult{Outcome: WriteReloadFailed, ReloadError: res.LastError}
+		what := "the proxy refused the change"
+		if res.Unreachable {
+			out.Outcome, what = WriteStatusUnreachable, "the proxy stopped answering before it reported the reload"
 		}
-		return WriteResult{Outcome: WriteReloadFailed, ReloadError: res.LastError, RolledBack: rolledBack}, nil
+		if err := putBack(store, updated, orig); err != nil {
+			return out, fmt.Errorf("%s (%s), and %w", what, res.LastError, err)
+		}
+		out.RolledBack = true
+		return out, nil
 	default:
 		return WriteResult{Outcome: WriteReloadTimedOut}, nil
 	}
+}
+
+// putBack restores orig over written after a reload that did not take, but only
+// while the file still holds exactly written. A person who edited it meanwhile, in
+// an editor or another agentop, made a change of their own, which a restore would
+// silently undo; that file is left as found. Its errors name the path and never the
+// file's bytes.
+func putBack(store FileStore, written, orig []byte) error {
+	current, err := os.ReadFile(store.Path)
+	if err != nil {
+		return fmt.Errorf("re-reading %s to put it back failed, so it may still hold the change; check it by hand: %w", store.Path, err)
+	}
+	if !bytes.Equal(current, written) {
+		return fmt.Errorf("%s changed while the proxy was reloading it, so it was left as found; "+
+			"check it by hand before the proxy next starts", store.Path)
+	}
+	if _, err := store.Apply(context.Background(), orig); err != nil {
+		return fmt.Errorf("putting %s back failed, so it still holds the change; fix it by hand before the proxy next starts: %w", store.Path, err)
+	}
+	return nil
 }
 
 // checkLoads reports whether b loads as a Cortex config and passes verify, as the

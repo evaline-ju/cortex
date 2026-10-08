@@ -2,8 +2,12 @@ package edit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -248,7 +252,9 @@ func TestWritePluginConfig_AfterRollbackWritingSameChangeIsNotUnchanged(t *testi
 	}
 }
 
-// A timed-out reload leaves the file with the new bytes (state is uncertain).
+// A timed-out reload leaves the file with the new bytes (state is uncertain). The
+// deadline is the caller's ctx when that is shorter than LocalPollDeadline, so the
+// test waits a fraction of a second rather than the real 30s.
 func TestWritePluginConfig_OnTimeoutLeavesNewBytes(t *testing.T) {
 	path := writeFixtureContent(t, withRouter, 0o600)
 	original := readFile(t, path)
@@ -257,7 +263,9 @@ func TestWritePluginConfig_OnTimeoutLeavesNewBytes(t *testing.T) {
 		return ReloadStatus{}
 	})
 
-	res, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: srv.URL, Changes: []ConfigChange{routeClaudeToGLM()}})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	res, err := WritePluginConfig(ctx, ConfigWrite{Path: path, StatsURL: srv.URL, Changes: []ConfigChange{routeClaudeToGLM()}})
 	if err != nil {
 		t.Fatalf("WritePluginConfig: %v", err)
 	}
@@ -270,5 +278,141 @@ func TestWritePluginConfig_OnTimeoutLeavesNewBytes(t *testing.T) {
 	}
 	if !strings.Contains(after, "claude-code: glm") {
 		t.Error("file should still have the new bytes after timeout")
+	}
+}
+
+// refuseOnSecondPoll is a /reload/status that takes its baseline on the first
+// poll and reports a refused reload on the second, after running during — the
+// moment a person's own edit or a failing disk would land.
+func refuseOnSecondPoll(t *testing.T, during func()) string {
+	t.Helper()
+	var calls atomic.Int32
+	return makeStatusServer(t, func() ReloadStatus {
+		if calls.Add(1) == 1 {
+			return ReloadStatus{ReloadsFailed: 2}
+		}
+		during()
+		return ReloadStatus{ReloadsFailed: 3, LastError: `configure "inference-router": servers: at least one server is required`}
+	}).URL
+}
+
+// A person who edits the file while the proxy reloads agentop's write keeps the
+// edit: the rollback puts back only what agentop wrote. The error says the file was
+// left as found and why the proxy refused, and quotes nothing from the file, which
+// holds API keys.
+func TestWritePluginConfig_ARefusalLeavesAFileEditedDuringTheReloadAsFound(t *testing.T) {
+	path := writeFixtureContent(t, withRouter, 0o600)
+	edited := strings.Replace(withRouter, "# only agents listed here are routed", "# edited by hand meanwhile", 1)
+	stats := refuseOnSecondPoll(t, func() {
+		if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+			t.Error(err)
+		}
+	})
+
+	res, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: stats, Changes: []ConfigChange{routeClaudeToGLM()}})
+	if got := readFile(t, path); got != edited {
+		t.Errorf("the edit made during the reload was overwritten:\n%s", Diff([]byte(edited), []byte(got)))
+	}
+	if err == nil {
+		t.Fatalf("err = nil, result %+v; want an error saying the file was left as found", res)
+	}
+	for _, want := range []string{"changed while", "left as found", "at least one server is required"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+	for _, leak := range []string{"sk-ete", "edited by hand", "claude-code: glm"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("err = %q quotes the file (%q)", err, leak)
+		}
+	}
+	if res.Outcome != WriteReloadFailed || res.RolledBack || !strings.Contains(res.ReloadError, "at least one server") {
+		t.Errorf("result = %+v, want WriteReloadFailed with the proxy's error, not rolled back", res)
+	}
+}
+
+// When the file cannot be put back after a refusal, the error still says why the
+// proxy refused it, and the result still says what the proxy did.
+func TestWritePluginConfig_AFailedRestoreStillSaysWhyTheProxyRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write into a read-only directory")
+	}
+	path := writeFixtureContent(t, withRouter, 0o600)
+	dir := filepath.Dir(path)
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	stats := refuseOnSecondPoll(t, func() {
+		// The restore writes a sibling temp file, which a read-only directory refuses.
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Error(err)
+		}
+	})
+
+	res, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: stats, Changes: []ConfigChange{routeClaudeToGLM()}})
+	if err == nil {
+		t.Fatalf("err = nil, result %+v; want the failed restore reported", res)
+	}
+	for _, want := range []string{"at least one server is required", "by hand"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "sk-ete") {
+		t.Errorf("err = %q quotes the file", err)
+	}
+	if res.Outcome != WriteReloadFailed || res.RolledBack || res.ReloadError == "" {
+		t.Errorf("result = %+v, want WriteReloadFailed with the proxy's error, not rolled back", res)
+	}
+	if !strings.Contains(readFile(t, path), "claude-code: glm") {
+		t.Error("the file does not hold the change, yet the restore was reported failed")
+	}
+}
+
+// shortenPollSchedule makes PollUntilReloaded's unreachable path take milliseconds
+// rather than its real ~16s of backoff.
+func shortenPollSchedule(t *testing.T) {
+	t.Helper()
+	interval, max := pollInterval, pollMaxBackoff
+	pollInterval, pollMaxBackoff = time.Millisecond, 4*time.Millisecond
+	t.Cleanup(func() { pollInterval, pollMaxBackoff = interval, max })
+}
+
+// A proxy that answers once and then stops answering has not refused anything,
+// and the result must not say it did. The file is still put back: whether the
+// proxy took the change is unknown, and one that went away may next start from it.
+func TestWritePluginConfig_TellsAProxyThatStoppedAnsweringFromARefusal(t *testing.T) {
+	shortenPollSchedule(t)
+	path := writeFixtureContent(t, withRouter, 0o600)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			_ = json.NewEncoder(w).Encode(ReloadStatus{ReloadsFailed: 2})
+			return
+		}
+		http.Error(w, "gone", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	res, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: srv.URL, Changes: []ConfigChange{routeClaudeToGLM()}})
+	if err != nil {
+		t.Fatalf("WritePluginConfig: %v", err)
+	}
+	if res.Outcome != WriteStatusUnreachable || !strings.Contains(res.ReloadError, "unreachable") {
+		t.Errorf("result = %+v: want WriteStatusUnreachable, not a refusal, with the poller's error", res)
+	}
+	if !res.RolledBack || readFile(t, path) != withRouter {
+		t.Errorf("result = %+v; want the file put back as it was", res)
+	}
+}
+
+// A refusal is still a refusal with the schedule shortened: the two outcomes differ.
+func TestWritePluginConfig_ARefusalIsStillARefusal(t *testing.T) {
+	shortenPollSchedule(t)
+	path := writeFixtureContent(t, withRouter, 0o600)
+	res, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: refuseOnSecondPoll(t, func() {}), Changes: []ConfigChange{routeClaudeToGLM()}})
+	if err != nil {
+		t.Fatalf("WritePluginConfig: %v", err)
+	}
+	if res.Outcome != WriteReloadFailed || !res.RolledBack {
+		t.Errorf("result = %+v, want WriteReloadFailed, rolled back", res)
 	}
 }

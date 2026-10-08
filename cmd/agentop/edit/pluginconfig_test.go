@@ -200,6 +200,18 @@ func TestSetPluginConfig_RemovingTheLastKeyRemovesItsMap(t *testing.T) {
 `, "", 1))
 }
 
+// A removal takes the comments inside what it removes. Removing the last agent
+// removes agents:, and a comment under it goes too, however deep; only the comment
+// above it stays. Pinned so the docs can say exactly which comments survive.
+func TestSetPluginConfig_ARemovalTakesTheCommentsInsideWhatItRemoves(t *testing.T) {
+	src := strings.Replace(withRouter, "            claude-code: ete\n",
+		"            # claude-code stays on ete until glm is ready\n            claude-code: ete   # see above\n", 1)
+	assertYAML(t, apply(t, src, change([]string{"agents", "claude-code"})),
+		strings.Replace(withRouter, `          agents:
+            claude-code: ete
+`, "", 1))
+}
+
 func TestSetPluginConfig_RemovingWhatIsAbsentChangesNothing(t *testing.T) {
 	for name, tc := range map[string]struct {
 		src string
