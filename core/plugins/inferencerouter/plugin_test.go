@@ -314,27 +314,61 @@ func TestRouter_APinToARemovedServerIsA503(t *testing.T) {
 	assertUntouched(t, pctx, eteHost)
 }
 
-// Claude Code pointed at a server it is routed to: nothing to move, but the
-// configured key still replaces the client's, and no requested host is recorded —
-// including when the request names the default port the server's URL leaves out.
-func TestRouter_AServerOnTheRequestedHostGetsItsKeyWithoutARedirect(t *testing.T) {
+// assertRedirectedTo fails unless the listener will dial scheme://host for pctx:
+// RedirectTarget is what it applies, whatever the Host header said.
+func assertRedirectedTo(t *testing.T, pctx *pipeline.Context, scheme, host string) {
+	t.Helper()
+	gotScheme, gotHost, ok := pctx.RedirectTarget()
+	if !ok || gotScheme != scheme || gotHost != host {
+		t.Errorf("RedirectTarget = %q %q %v, want %q %q true", gotScheme, gotHost, ok, scheme, host)
+	}
+}
+
+// Claude Code pointed at the server it is routed to is still redirected there. The
+// Host header is the client's word: on a TLS-bridged request the listener otherwise
+// dials the CONNECT authority, which need not be this host, and the server's key
+// would go with it. Including when the request names the default port the server's
+// URL leaves out.
+func TestRouter_ARoutedRequestOnItsServersHostIsStillRedirected(t *testing.T) {
 	for _, host := range []string{eteHost, "ETE.example.com:443"} {
 		t.Run(host, func(t *testing.T) {
 			p := build(t, routerConfig(`"claude-code": "ete"`))
 			pctx := request(newStore(t), host, claudeUA, "s1")
 			run(t, p, pctx)
 
-			if pctx.Redirected() || pctx.RequestedHost() != "" || pctx.Host != host {
-				t.Errorf("Redirected = %v, RequestedHost = %q, Host = %q; want no redirect",
-					pctx.Redirected(), pctx.RequestedHost(), pctx.Host)
+			if !pctx.Redirected() {
+				t.Fatal("Redirected = false: a routed request must be redirected even on its server's own host")
 			}
+			assertRedirectedTo(t, pctx, "https", eteHost)
 			if got := pctx.Headers.Get("Authorization"); got != "Bearer ete-key" {
 				t.Errorf("Authorization = %q, want Bearer ete-key", got)
 			}
-			if invs := pctx.Extensions.Invocations.Outbound; len(invs) != 1 {
-				t.Errorf("invocations = %+v, want only the router's routed record", invs)
-			}
+			assertRecord(t, pctx, pipeline.ActionModify, "routed", map[string]string{"server": "ete", "pin": pinNew})
 		})
+	}
+	// A redirect back to the host the client named records no requested host, so the
+	// session row does not show a move that did not happen.
+	pctx := request(newStore(t), eteHost, claudeUA, "s1")
+	run(t, build(t, routerConfig(`"claude-code": "ete"`)), pctx)
+	if got := pctx.RequestedHost(); got != "" {
+		t.Errorf("RequestedHost = %q, want \"\" for a request already on the server's host", got)
+	}
+}
+
+// A plain-http request naming an https server's host is moved to https before the
+// key is set, so the key never crosses the network in plaintext.
+func TestRouter_APlaintextRequestOnAnHTTPSServersHostIsRedirectedToHTTPS(t *testing.T) {
+	p := build(t, routerConfig(`"claude-code": "ete"`))
+	pctx := request(newStore(t), eteHost, claudeUA, "s1")
+	pctx.Scheme = "http"
+	run(t, p, pctx)
+
+	assertRedirectedTo(t, pctx, "https", eteHost)
+	if pctx.Scheme != "https" {
+		t.Errorf("Scheme = %q, want https", pctx.Scheme)
+	}
+	if got := pctx.Headers.Get("Authorization"); got != "Bearer ete-key" {
+		t.Errorf("Authorization = %q, want Bearer ete-key", got)
 	}
 }
 

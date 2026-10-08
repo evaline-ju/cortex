@@ -191,10 +191,14 @@ proxied one, or one decrypted by the TLS bridge — can be routed; a `CONNECT` i
 - Not routed: `skip/not_routed`, and the request is left as the client sent it.
 - Pinned to a server since removed by hand: `deny/pinned_server_removed`, a 503
   asking for a new session. The conversation is never moved to another server.
-- Otherwise the request goes to the server — redirected when it is not already
-  there, which the framework records as `modify/redirected` — the key is replaced,
-  and the router records `modify/routed` with `server` and `pin` (`new`,
-  `existing` or `none`).
+- Otherwise the request is redirected to the server, which the framework records
+  as `modify/redirected`, the key is replaced, and the router records
+  `modify/routed` with `server` and `pin` (`new`, `existing` or `none`). The
+  redirect happens even when the request already names the server's host: the
+  `Host` header is the client's word, and a TLS-bridged request is otherwise dialed
+  to the host the client `CONNECT`ed to, which need not be the same. The key is
+  set only once the redirect has taken effect, so it goes to the server and
+  nowhere else.
 - Under `on_error: observe` nothing moves, the client's key stays, and the record
   is `observe/would_route`.
 

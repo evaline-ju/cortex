@@ -11,6 +11,19 @@
 // moves pctx.Host, so the plugins before it decide on the host the client asked for
 // and any plugin after it would see the server's host instead. Nothing should follow
 // it that keys on the host.
+//
+// A routed request is always redirected to its server's own scheme and host, even
+// when it already names that host. pctx.Host is the request's Host header, the
+// client's word, and on a TLS-bridged request the forward proxy dials the CONNECT
+// authority, which need not be that host. A router that skipped the redirect because
+// the Host header already named the server would hand the server's key to whatever
+// the client CONNECTed to. With the redirect the listener dials RedirectTarget, the
+// server, whatever the Host header or the CONNECT said.
+//
+// The server's key replaces the client's only when pctx.Redirected() reports that the
+// redirect took effect. Under on_error: observe, Redirect returns nil and moves
+// nothing, so a key set on the strength of that nil would go to the host the client
+// named.
 package inferencerouter
 
 import (
@@ -52,16 +65,16 @@ const (
 	pinNone     = "none"     // no session, or no store: nothing was pinned
 )
 
-// route is one configured server, ready to compare and redirect to.
+// route is one configured server, ready to redirect to.
 type route struct {
 	endpoint routerconfig.Endpoint
 	key      string
 }
 
-// serves reports whether pctx already goes to this server: the same scheme, and the
-// same host once the scheme's default port is dropped.
-func (r route) serves(pctx *pipeline.Context) bool {
-	return pctx.Scheme == r.endpoint.Scheme && routerconfig.NormalHost(pctx.Scheme, pctx.Host) == r.endpoint.Host
+// target is the server's own scheme and host, where every request routed to it is
+// redirected.
+func (r route) target() *url.URL {
+	return &url.URL{Scheme: r.endpoint.Scheme, Host: r.endpoint.Host}
 }
 
 // Router is the plugin. Built by Configure; the zero value routes nothing.
@@ -159,22 +172,21 @@ func (p *Router) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.A
 			"this session is pinned to inference server %q, which is no longer configured; add it back, or start a new session", name))
 	}
 
-	if !srv.serves(pctx) {
-		target := &url.URL{Scheme: srv.endpoint.Scheme, Host: srv.endpoint.Host}
-		if err := pctx.Redirect(target); err != nil {
-			pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "redirect_failed", Details: details})
-			return pipeline.Deny(codeUnavailable, fmt.Sprintf("inference-router could not send this request to %q: %v", name, err))
-		}
-		// Redirect returns nil under on_error: observe without moving anything. The
-		// server's key must then stay off the request, which still goes to the host
-		// the client named; Redirected is the only signal that it moved.
-		if !pctx.Redirected() {
-			pctx.Record(pipeline.Invocation{Action: pipeline.ActionObserve, Reason: "would_route", Details: details})
-			return cont
-		}
+	// Redirected even when the Host header already names the server: the listener
+	// dials the redirect target, and without one it dials what the client chose,
+	// which on a bridged request is the CONNECT authority and not the Host header.
+	if err := pctx.Redirect(srv.target()); err != nil {
+		pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "redirect_failed", Details: details})
+		return pipeline.Deny(codeUnavailable, fmt.Sprintf("inference-router could not send this request to %q: %v", name, err))
 	}
-	// Replaced even when the request was already on the server's host, so the key in
-	// use is always the configured one.
+	// Redirect returns nil under on_error: observe without moving anything. The
+	// server's key must then stay off the request, which still goes where the client
+	// sent it. Redirected is the signal that it moved, and it is this router's
+	// redirect: a pipeline admits one WritesDestination plugin.
+	if !pctx.Redirected() {
+		pctx.Record(pipeline.Invocation{Action: pipeline.ActionObserve, Reason: "would_route", Details: details})
+		return cont
+	}
 	setKey(pctx, srv.key)
 	pctx.Record(pipeline.Invocation{Action: pipeline.ActionModify, Reason: "routed", Details: details})
 	return cont

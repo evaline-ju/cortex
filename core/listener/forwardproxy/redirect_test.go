@@ -179,7 +179,9 @@ func certPEM(s *httptest.Server) []byte {
 // bridgedGet CONNECTs to authority through proxy, completes the agent-side TLS
 // handshake against the bridge's CA, and GETs path over the bridged connection —
 // the sequence TestConnectBridge drives inline. It returns the status and body.
-func bridgedGet(t *testing.T, proxy *httptest.Server, bridgeCA []byte, authority, path string) (int, string) {
+// edits change the decrypted request before it is sent: its Host header, which a
+// client may set to something other than the CONNECT authority, or its headers.
+func bridgedGet(t *testing.T, proxy *httptest.Server, bridgeCA []byte, authority, path string, edits ...func(*http.Request)) (int, string) {
 	t.Helper()
 	rawConn, err := net.Dial("tcp", mustParseURL(proxy.URL).Host)
 	if err != nil {
@@ -224,6 +226,9 @@ func bridgedGet(t *testing.T, proxy *httptest.Server, bridgeCA []byte, authority
 	req, err := http.NewRequest(http.MethodGet, "https://"+host+path, nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
+	}
+	for _, edit := range edits {
+		edit(req)
 	}
 	// Write from a goroutine: the proxy makes a blocking upstream round trip between
 	// reading the request and answering, as in TestConnectBridge.

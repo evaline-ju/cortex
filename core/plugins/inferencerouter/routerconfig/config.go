@@ -155,8 +155,7 @@ type Endpoint struct {
 	// Scheme is "http" or "https".
 	Scheme string
 	// Host is the lowercased host, with the port only when it is not the scheme's
-	// default. It is the redirect target's host, and what a request's NormalHost is
-	// compared with.
+	// default. It is the redirect target's host.
 	Host string
 	// Hostname is the lowercased host without any port: what a request is matched
 	// to a server by, and what makes two servers the same host.
@@ -180,8 +179,8 @@ func (e Endpoint) PlaintextRemote() bool {
 // pipeline.Context.Redirect accepts — http or https, a host, no user info, no path
 // beyond "/", no query or fragment — and two things more: a port must be a number
 // from 1 to 65535, and the scheme's default port is dropped, so a server at
-// https://x:443 is the host a request for x names and no redirect is recorded
-// between them.
+// https://x:443 is the host a request for x names, and the redirect a routed request
+// for x still gets records no requested host.
 func ParseURL(raw string) (Endpoint, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
