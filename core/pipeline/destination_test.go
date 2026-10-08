@@ -234,14 +234,15 @@ func TestRedirectTarget_IgnoresALaterWriteToTheExportedFields(t *testing.T) {
 
 func TestRedirect_RefusesMalformedTargets(t *testing.T) {
 	for _, target := range []string{
-		"ftp://b.example",           // scheme
-		"b.example",                 // no scheme: parses as a path
-		"https://",                  // no host
-		"https:b.example",           // opaque, no host
-		"https://user:pw@b.example", // credentials belong in headers
-		"https://b.example/v1",      // a redirect moves the host, never the path
-		"https://b.example?x=1",     // query
-		"https://b.example#top",     // fragment
+		"ftp://sk-secret.b.example",        // scheme
+		"sk-secret.b.example",              // no scheme: parses as a path
+		"https://",                         // no host
+		"https:sk-secret@b.example",        // opaque, no host
+		"https://sk-secret@b.example",      // credentials belong in headers
+		"https://user:sk-secret@b.example", // and so does a password
+		"https://b.example/v1/sk-secret",   // a redirect moves the host, never the path
+		"https://b.example?key=sk-secret",  // query
+		"https://b.example#sk-secret",      // fragment
 	} {
 		t.Run(target, func(t *testing.T) {
 			var err error
@@ -250,6 +251,10 @@ func TestRedirect_RefusesMalformedTargets(t *testing.T) {
 			}), true)
 			if err == nil {
 				t.Fatal("Redirect accepted a malformed target")
+			}
+			// A refused target is where a key sits; the error must quote none of it.
+			if strings.Contains(err.Error(), "sk-secret") || strings.Contains(err.Error(), "b.example") {
+				t.Errorf("the error quotes the target: %v", err)
 			}
 			assertUntouched(t, pctx)
 			if invs := outbound(pctx); len(invs) != 0 {

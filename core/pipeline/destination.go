@@ -133,23 +133,24 @@ func (c *Context) RequestedHost() string {
 	return c.requestedHost
 }
 
-// checkRedirectTarget enforces Redirect's shape rule. Errors print the target
-// through Redacted so a password in user info never reaches a log.
+// checkRedirectTarget enforces Redirect's shape rule. Errors quote no part of the
+// target: a refused target is exactly where a key sits — as user info, in the
+// query, in a path segment — and Redacted masks only a password.
 func checkRedirectTarget(u *url.URL) error {
 	if u == nil {
 		return errors.New("pipeline: Redirect target is nil")
 	}
 	switch {
 	case u.Scheme != "http" && u.Scheme != "https":
-		return fmt.Errorf("pipeline: Redirect target %q: the scheme must be http or https", u.Redacted())
+		return errors.New("pipeline: Redirect target's scheme must be http or https")
 	case u.Opaque != "" || u.Hostname() == "":
-		return fmt.Errorf("pipeline: Redirect target %q has no host", u.Redacted())
+		return errors.New("pipeline: Redirect target has no host")
 	case u.User != nil:
-		return fmt.Errorf("pipeline: Redirect target %q carries user info; credentials belong in headers", u.Redacted())
+		return errors.New("pipeline: Redirect target carries user info; credentials belong in headers")
 	case u.Path != "" && u.Path != "/":
-		return fmt.Errorf("pipeline: Redirect target %q has a path; a redirect changes only the scheme and host", u.Redacted())
+		return errors.New("pipeline: Redirect target has a path; a redirect changes only the scheme and host")
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
-		return fmt.Errorf("pipeline: Redirect target %q has a query or fragment", u.Redacted())
+		return errors.New("pipeline: Redirect target has a query or fragment")
 	}
 	return nil
 }
