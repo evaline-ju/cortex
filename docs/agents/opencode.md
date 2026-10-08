@@ -278,7 +278,7 @@ chosen one, whatever provider was picked in OpenCode, so it works only between
 servers that serve the model names OpenCode asks for. The reason to do it is to
 keep keys out of `opencode.json`: on a routed request the router puts the
 configured server's key in the `X-Api-Key` or `Authorization` header OpenCode
-sent.
+sent, and when OpenCode sent neither, it adds `Authorization: Bearer <key>`.
 
 ## Verified depth
 
@@ -326,6 +326,9 @@ Not tested live:
   [#941](https://github.com/rossoctl/cortex/issues/941) has one user's report of a
   LiteLLM run, started with `agentop exec` under its earlier name, in which token counts
   showed.
+- **Routing through `inference-router`** with a live OpenCode. It is covered so far by
+  unit and listener tests and by scratch-`HOME` runs of `agentop server` against a fake
+  stats server.
 
 ## Known issues
 

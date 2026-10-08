@@ -704,20 +704,31 @@ With Claude Code's `ANTHROPIC_BASE_URL` at `ete`, the listing after `use` reads:
   It reads that one file, so it cannot see a project's settings, a file passed
   with `claude --settings`, or a variable set in the shell.
 
+Two things the router needs that `agentop server` does not check. It routes only
+requests it can read: a plain `http` request sent through the proxy, or an `https`
+one the TLS bridge decrypts, which needs the bridge on and the port the agent
+connects to in `tls_bridge.ports`, 443 and 8443 unless set. An agent whose base URL
+is `https` on another port, such as `:4000`, reaches the proxy as an opaque
+`CONNECT` tunnel and is never routed, although the check above, which matches by
+host alone, shows ✓ for it; a server on such a port can still be where routed
+requests go. And a server is `scheme://host[:port]` only: a routed request keeps
+its own path, so an agent whose base URL has a path needs that same path on every
+server.
+
 Every change is written to `~/.cortex/config.yaml`, keeping its comments, and
 returns once the proxy has reloaded it; nothing restarts. If the proxy refuses the
-reload, the command puts the file back as it was, prints the proxy's error and
-exits 1, and the proxy keeps the configuration it had. If the proxy reports
-neither a reload nor a refusal within 30 seconds, the command exits 1 and leaves
-the file as written. With no proxy running the file is still written, and the
-change applies at the next start. Nothing is written unless the result loads as a Cortex config and
+reload, the command puts the file back as it was, prints the proxy's error and exits
+1, and the proxy keeps the configuration it had. If the proxy reports neither a
+reload nor a refusal within 30 seconds, the command exits 1 and leaves the file as
+written. With no proxy running the file is still written, and the change applies at
+the next start. Nothing is written unless the result loads as a Cortex config and
 passes the router's own rules; what only the running proxy can check, such as
 whether its build includes the router, is what a refused reload reports. A change
 that changes nothing writes nothing. `--config PATH` points every form at another
 config, with the stats address read from it: that is how to try this against a
 second Cortex without touching the one every session uses. Flags go after the
-action. Exit codes: 0 done, or nothing to do; 1 refused or failed; 2 a usage
-error, a malformed name, agent or URL included; 3 a replacement declined.
+action. Exit codes: 0 done, or nothing to do; 1 refused or failed; 2 a usage error,
+a malformed name, agent or URL included; 3 a replacement declined.
 
 ## Panes
 

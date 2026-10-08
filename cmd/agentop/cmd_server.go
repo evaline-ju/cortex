@@ -252,10 +252,10 @@ type settingsCheck struct {
 }
 
 // claudeCodeModelVars are the env settings that make Claude Code ask for a model by
-// a name other than Claude's own; the top-level "model" key, which /model writes,
-// is the other way. The router maps Claude's names, by family, to a server's; a
-// request already carrying a server's name has no family left to map, and Claude
-// Code shapes its requests for the model it believes it is using.
+// a name other than Claude's own; the settings' top-level "model" key is the other
+// way. The router maps Claude's names, by family, to a server's; a request already
+// carrying a server's name has no family left to map, and Claude Code shapes its
+// requests for the model it believes it is using.
 var claudeCodeModelVars = []string{
 	"ANTHROPIC_MODEL",
 	"ANTHROPIC_DEFAULT_FABLE_MODEL",

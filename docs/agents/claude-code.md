@@ -125,18 +125,26 @@ list. Claude Code is the only agent it can build a list for. See
 
 With more than one LiteLLM server, `agentop server` chooses which one Claude
 Code's **new** sessions use, with one Claude Code configuration and without
-restarting anything. A running conversation finishes on the server it started on.
+restarting anything. A running conversation stays on the server it started on,
+with the exceptions below.
 See [Choosing an inference server](../../cmd/agentop/README.md#choosing-an-inference-server-agentop-server).
 
 That one configuration is:
 
 - **`ANTHROPIC_BASE_URL` at one of the configured servers.** Cortex routes only
   requests addressed to a configured server, so Claude Code pointed anywhere else
-  is not routed. That server must be up even for sessions routed elsewhere: Claude
-  Code reaches an `https` server through a `CONNECT` to it, which the proxy dials
-  before it sees the request inside.
-- **No model settings**, or only Claude's own names in them: the `model` setting,
-  which `/model` writes, and the variables `ANTHROPIC_MODEL`,
+  is not routed. An `https` base URL is routed only when the TLS bridge decrypts
+  it, which needs its port in `tls_bridge.ports`, 443 and 8443 unless set. On
+  another port, such as `:4000`, the request stays an opaque `CONNECT` tunnel and
+  is not routed, although `agentop server`'s check, which matches by host alone,
+  shows ✓.
+  An `http` base URL reaches the router only if Claude Code sends it through the
+  proxy, and `agentop configure claude-code enable` sets `HTTPS_PROXY` only. The
+  server named must be up even for sessions routed elsewhere: the proxy dials the
+  `CONNECT` target before it sees the request inside. And a routed request keeps
+  its path, so a base URL with a path needs that same path on every server.
+- **No model settings**, or only Claude's own names in them: the top-level
+  `model` setting and the variables `ANTHROPIC_MODEL`,
   `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
   `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`,
   `ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL`. Claude's own names
@@ -162,13 +170,22 @@ shows: the events table's host is where each request went, and the detail pane's
 
 A session is pinned on its first request, so switch **before** `/clear` or a new
 `claude`, not after. A proxy restart forgets the pins: a running conversation then
-follows its agent's current server from its next request.
+follows its agent's current server from its next request. A conversation carried to
+a new session id is pinned as new, to its agent's current server, which happens in
+three ways: Claude Code's continued-in hand-off copies a live conversation to a new
+id; `claude daemon` starts background jobs with
+`--session-id <new> --fork-session --resume <parent>`; and `/clear` with background
+subagents running moves their traffic to the new id.
+
+Nothing fails over. When a session's server is down its requests fail, with a 502
+from the proxy when the server cannot be reached; route the agent to another
+server, and start a new session there.
 
 **`/model` may list a server's own names.** If Claude Code asks the gateway for its
 model list, that request is routed like the rest, so the picker can show, say,
 `glm-5.3`. Routing is unaffected, since Claude Code keeps sending its own names,
-but choosing such a name there breaks the rule above, and `agentop server` then
-reports the `model` setting.
+but choosing such a name there breaks the rule above. If Claude Code saves that
+choice as `model` in `~/.claude/settings.json`, `agentop server` reports it.
 
 ## Verified depth
 
@@ -190,7 +207,9 @@ Sonnet 5 and Claude Haiku 4.5. This was exercised:
 
 Not exercised: Linux; `install.sh --claude-code`; Claude Code talking to
 `api.anthropic.com` directly rather than through a gateway; Amazon Bedrock and Google
-Vertex AI.
+Vertex AI; routing through `inference-router` with a live Claude Code, which so far is
+covered by unit and listener tests and by scratch-`HOME` runs of `agentop server`
+against a fake stats server.
 
 ## Known issues
 
