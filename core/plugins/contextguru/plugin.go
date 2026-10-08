@@ -252,10 +252,15 @@ func (p *ContextGuru) OnRequest(ctx context.Context, pctx *pipeline.Context) pip
 	before := len(pctx.Body)
 	out, changed := apply.BodyWithModel(ctx, p.pipe, p.store, provider, pctx.Body, sid, false, models)
 	if changed && len(out) > 0 {
-		pctx.SetBody(out)
 		// Per-request byte-level view (the engine's token-level view is logged by
 		// logEmitter.Run). The framework also emits a body-mutation session event.
-		slog.Info("context-guru rewrote request body",
+		// The message follows this plugin's own SetBody result, not BodyMutated: under
+		// on_error: observe the write is a shadow and the client's body goes upstream.
+		msg := "context-guru rewrote request body"
+		if !pctx.SetBody(out) {
+			msg = "context-guru would rewrite request body (on_error: observe, not applied)"
+		}
+		slog.Info(msg,
 			"provider", provider, "path", pctx.Path, "session", sid,
 			"bytesBefore", before, "bytesAfter", len(out), "pctSaved", pct(before, len(out)))
 	}

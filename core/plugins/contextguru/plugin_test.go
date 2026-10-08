@@ -1,8 +1,10 @@
 package contextguru
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -175,5 +177,37 @@ func TestOnResponse_PassThrough(t *testing.T) {
 	pctx := inferencePctx("/v1/chat/completions", chatBody(bigToolOutput()))
 	if act := p.OnResponse(context.Background(), pctx); act.Type != pipeline.Continue {
 		t.Fatalf("v1 OnResponse must be a pass-through, got %v", act.Type)
+	}
+}
+
+// The log says what happened to the request, from the plugin's own SetBody result:
+// under on_error: observe the body goes upstream as the client sent it, so a line
+// saying it was rewritten would send an operator looking for a change that was
+// never made.
+func TestOnRequest_LogsWhetherItsOwnRewriteApplied(t *testing.T) {
+	for _, tc := range []struct {
+		policy      pipeline.ErrorPolicy
+		want, never string
+	}{
+		{pipeline.ErrorPolicyEnforce, "context-guru rewrote request body", "would rewrite"},
+		{pipeline.ErrorPolicyObserve, "context-guru would rewrite request body", "context-guru rewrote"},
+	} {
+		t.Run(string(tc.policy), func(t *testing.T) {
+			var logs bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			p, err := pipeline.New([]pipeline.Plugin{configured(t, collapseEngine)}, pipeline.WithPolicies(tc.policy))
+			if err != nil {
+				t.Fatalf("pipeline.New: %v", err)
+			}
+			p.Run(context.Background(), inferencePctx("/v1/chat/completions", chatBody(bigToolOutput())))
+
+			out := logs.String()
+			if !strings.Contains(out, tc.want) || strings.Contains(out, tc.never) {
+				t.Errorf("logs want %q and never %q:\n%s", tc.want, tc.never, out)
+			}
+		})
 	}
 }
