@@ -215,3 +215,22 @@ func TestParseURL_KeepsUserInfoOutOfEveryError(t *testing.T) {
 		})
 	}
 }
+
+// A query or fragment can carry a key as surely as user info can
+// (?key=..., #token), so neither reaches an error either.
+func TestParseURL_KeepsQueryAndFragmentOutOfErrors(t *testing.T) {
+	for _, raw := range []string{
+		"https://h.example.com/?key=sk-SECRET",
+		"https://h.example.com/#sk-SECRET",
+		"https://h.example.com/?a=1#sk-SECRET",
+		"ftp://h.example.com/?key=sk-SECRET",
+	} {
+		_, err := ParseURL(raw)
+		if err == nil {
+			t.Fatalf("ParseURL(%q) accepted a query or fragment", raw)
+		}
+		if msg := err.Error(); strings.Contains(msg, "sk-SECRET") || !strings.Contains(msg, "h.example.com") {
+			t.Errorf("ParseURL(%q) error = %q, want the host named and no query or fragment", raw, msg)
+		}
+	}
+}

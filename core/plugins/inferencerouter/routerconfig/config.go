@@ -194,21 +194,21 @@ func ParseURL(raw string) (Endpoint, error) {
 	}
 	switch {
 	case u.Scheme != "http" && u.Scheme != "https":
-		return Endpoint{}, fmt.Errorf("%q: the scheme must be http or https", withoutUserInfo(u))
+		return Endpoint{}, fmt.Errorf("%q: the scheme must be http or https", shownURL(u))
 	case u.Opaque != "" || u.Hostname() == "":
-		return Endpoint{}, fmt.Errorf("%q has no host", withoutUserInfo(u))
+		return Endpoint{}, fmt.Errorf("%q has no host", shownURL(u))
 	case u.User != nil:
-		return Endpoint{}, fmt.Errorf("%q carries user info; the key belongs in key", withoutUserInfo(u))
+		return Endpoint{}, fmt.Errorf("%q carries user info; the key belongs in key", shownURL(u))
 	case u.Path != "" && u.Path != "/":
-		return Endpoint{}, fmt.Errorf("%q has a path; give scheme://host[:port] only, since a routed request keeps its own path", withoutUserInfo(u))
+		return Endpoint{}, fmt.Errorf("%q has a path; give scheme://host[:port] only, since a routed request keeps its own path", shownURL(u))
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
-		return Endpoint{}, fmt.Errorf("%q has a query or fragment", withoutUserInfo(u))
+		return Endpoint{}, fmt.Errorf("%q has a query or fragment", shownURL(u))
 	}
 	port := ""
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 {
-			return Endpoint{}, fmt.Errorf("%q: the port must be a number from 1 to 65535", withoutUserInfo(u))
+			return Endpoint{}, fmt.Errorf("%q: the port must be a number from 1 to 65535", shownURL(u))
 		}
 		port = strconv.Itoa(n)
 	}
@@ -216,14 +216,16 @@ func ParseURL(raw string) (Endpoint, error) {
 	return Endpoint{Scheme: u.Scheme, Host: joinHost(hostname, withoutDefault(u.Scheme, port)), Hostname: hostname}, nil
 }
 
-// withoutUserInfo is u as an error may quote it: re-serialised with no user info,
-// since that is where a pasted key sits. Not url.URL.Redacted, which masks only a
-// password and so quotes a key given as the username intact. An opaque URL
-// (https:key@host, slashes forgotten) parses with no user info at all, so what
-// precedes its last '@' goes too.
-func withoutUserInfo(u *url.URL) string {
+// shownURL is u as an error may quote it: re-serialised with no user info, query
+// or fragment, the three places a pasted key sits (https://key@host, ?key=,
+// #token). Not url.URL.Redacted, which masks only a password and so quotes a key
+// given as the username intact. An opaque URL (https:key@host, slashes forgotten)
+// parses with no user info at all, so what precedes its last '@' goes too.
+func shownURL(u *url.URL) string {
 	c := *u
 	c.User = nil
+	c.RawQuery, c.ForceQuery = "", false
+	c.Fragment, c.RawFragment = "", ""
 	if i := strings.LastIndexByte(c.Opaque, '@'); i >= 0 {
 		c.Opaque = c.Opaque[i+1:]
 	}

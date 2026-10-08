@@ -311,13 +311,17 @@ func TestServer_ChecksPrintNoURLCredentials(t *testing.T) {
 			"✗ ANTHROPIC_BASE_URL in ~/.claude/settings.json is not a URL with a host, so nothing is routed. Point it at one of the servers above."},
 		{"no slashes", "https:user:sk-SECRET@api.anthropic.com",
 			"✗ ANTHROPIC_BASE_URL in ~/.claude/settings.json is not a URL with a host"},
+		{"elsewhere, key in the query", "https://other.example.com/?key=sk-SECRET",
+			"✗ Claude Code points at https://other.example.com/, which is not one of these servers"},
+		{"elsewhere, key in the fragment", "https://other.example.com/v1#sk-SECRET",
+			"✗ Claude Code points at https://other.example.com/v1, which is not one of these servers"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := serverEnv(t, closedAddr(t), routerBlock)
 			writeClaudeSettings(t, filepath.Dir(path), map[string]string{"ANTHROPIC_BASE_URL": tc.baseURL})
 			_, out, errOut := runServerCmd(t, "", "--config", path)
 			if all := out + errOut; strings.Contains(all, "sk-SECRET") || strings.Contains(all, "user:") {
-				t.Errorf("the checks print URL user info:\n%s%s", out, errOut)
+				t.Errorf("the checks print a key from the URL:\n%s%s", out, errOut)
 			}
 			if !strings.Contains(flat(out), tc.want) {
 				t.Errorf("want %q in:\n%s", tc.want, out)
