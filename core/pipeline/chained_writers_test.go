@@ -102,3 +102,92 @@ func TestNew_StillRejectsTwoResponseMutators(t *testing.T) {
 		t.Fatalf("err = %v, want two response mutators refused", err)
 	}
 }
+
+// bodyMutation is the framework's record of the rewrites on pctx.
+func bodyMutation(t *testing.T, pctx *Context) bodyMutationEvent {
+	t.Helper()
+	raw, ok := pctx.Extensions.Custom["body-mutation"+PluginEventSuffix]
+	if !ok {
+		t.Fatalf("no body-mutation event; keys: %v", keys(pctx.Extensions.Custom))
+	}
+	ev, ok := raw.(bodyMutationEvent)
+	if !ok {
+		t.Fatalf("event type = %T, want bodyMutationEvent", raw)
+	}
+	return ev
+}
+
+// assertMutation fails unless ev describes before → after, written by plugins in
+// that order, with plugin naming the last of them.
+func assertMutation(t *testing.T, ev bodyMutationEvent, phase, before, after string, plugins ...string) {
+	t.Helper()
+	if ev.Phase != phase {
+		t.Errorf("phase = %q, want %q", ev.Phase, phase)
+	}
+	if ev.LengthBefore != len(before) || ev.SHA256Before != hashHex([]byte(before)) {
+		t.Errorf("before = %d bytes %s, want %q", ev.LengthBefore, ev.SHA256Before, before)
+	}
+	if ev.LengthAfter != len(after) || ev.SHA256After != hashHex([]byte(after)) {
+		t.Errorf("after = %d bytes %s, want %q", ev.LengthAfter, ev.SHA256After, after)
+	}
+	if strings.Join(ev.Plugins, ",") != strings.Join(plugins, ",") || ev.Plugin != plugins[len(plugins)-1] {
+		t.Errorf("plugin = %q, plugins = %v; want %q and %v", ev.Plugin, ev.Plugins, plugins[len(plugins)-1], plugins)
+	}
+}
+
+// With two writers the record keeps the bytes the client sent as before, the
+// bytes sent upstream as after, and both writers in order. Each writer's own
+// modify/body_rewritten stays on the timeline.
+func TestBodyMutation_RecordsTheClientsBytesAndEveryWriter(t *testing.T) {
+	p := mustBuild(t, appender("first", "+a"), appender("second", "+b"))
+	pctx := &Context{Direction: Outbound, Body: []byte("x")}
+	p.Run(context.Background(), pctx)
+
+	assertMutation(t, bodyMutation(t, pctx), "request", "x", "x+a+b", "first", "second")
+	invs := pctx.Extensions.Invocations.Outbound
+	if len(invs) != 2 || invs[0].Plugin != "first" || invs[1].Plugin != "second" ||
+		invs[0].Reason != "body_rewritten" || invs[1].Reason != "body_rewritten" {
+		t.Errorf("invocations = %+v, want one body_rewritten per writer, in order", invs)
+	}
+}
+
+// A shadow write sent nothing upstream, so it must not displace the record of a
+// write that did.
+func TestBodyMutation_AShadowWriteLeavesAnAppliedRecordAlone(t *testing.T) {
+	p, err := New([]Plugin{appender("first", "+a"), appender("second", "+b")},
+		WithPolicies(ErrorPolicyEnforce, ErrorPolicyObserve))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{Direction: Outbound, Body: []byte("x")}
+	p.Run(context.Background(), pctx)
+
+	assertMutation(t, bodyMutation(t, pctx), "request", "x", "x+a", "first")
+}
+
+// A shadow write publishes its would-be record, as a lone observed writer always
+// has, until a write takes effect and replaces it.
+func TestBodyMutation_AnAppliedWriteReplacesAShadowRecord(t *testing.T) {
+	p, err := New([]Plugin{appender("first", "+a"), appender("second", "+b")},
+		WithPolicies(ErrorPolicyObserve, ErrorPolicyEnforce))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{Direction: Outbound, Body: []byte("x")}
+	p.Run(context.Background(), pctx)
+
+	assertMutation(t, bodyMutation(t, pctx), "request", "x", "x+b", "second")
+}
+
+// The response side keeps its own record: its before is the response the
+// upstream sent, not the request the client did.
+func TestBodyMutation_TheResponseRecordStartsFromTheResponse(t *testing.T) {
+	c := &Context{Direction: Outbound, Body: []byte("req")}
+	c.SetCurrentPlugin("pruner", InvocationPhaseRequest)
+	c.SetBody([]byte("req+a"))
+	c.ResponseBody = []byte("resp")
+	c.SetCurrentPlugin("filter", InvocationPhaseResponse)
+	c.SetResponseBody([]byte("resp+f"))
+
+	assertMutation(t, bodyMutation(t, c), "response", "resp", "resp+f", "filter")
+}

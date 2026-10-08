@@ -374,6 +374,40 @@ func TestParity_OutboundRequestBodyMutation(t *testing.T) {
 	assertParity(t, f, pipeline.SessionRequest, outboundListeners)
 }
 
+// TestParity_OutboundChainedRequestBodyMutation: two request-body writers in one
+// chain, as tool-prune and the inference router are on the laptop. The second is
+// handed the first's bytes, the upstream receives the second's, and the
+// framework's record keeps the client's bytes as before and names both writers —
+// on both outbound deployment shapes.
+func TestParity_OutboundChainedRequestBodyMutation(t *testing.T) {
+	reqBody := []byte(`{"model":"claude","tools":["alpha","beta","gamma"]}`)
+	pruned := []byte(`{"model":"claude","tools":["alpha"]}`)
+	remodelled := []byte(`{"model":"glm","tools":["alpha"]}`)
+	f := fixture{
+		name:      "outbound-chained-request-body-mutation",
+		direction: pipeline.Outbound,
+		entries: []config.PluginEntry{
+			spyEntry(spyPluginA, spyConfig{RecordRequestBody: true, MutateRequestBody: pruned}),
+			spyEntry(spyPluginB, spyConfig{RecordRequestBody: true, MutateRequestBody: remodelled}),
+		},
+		method:         "POST",
+		path:           "/parity/mutate-chained",
+		reqBody:        reqBody,
+		upstreamStatus: 200,
+		upstreamBody:   []byte(`{"reply":"ok"}`),
+		expectedPluginEvents: map[string]string{
+			spyPluginA + bodyReqStrippedSuffix: jsonOf(bodyObservation{Body: string(reqBody)}),
+			spyPluginB + bodyReqStrippedSuffix: jsonOf(bodyObservation{Body: string(pruned)}),
+			bodyMutationKey:                    chainedBodyMutationJSON([]string{spyPluginA, spyPluginB}, reqBody, remodelled),
+		},
+		expectedUpstream: &upstreamSummary{
+			Body:          string(remodelled),
+			ContentLength: fmt.Sprintf("%d", len(remodelled)),
+		},
+	}
+	assertParity(t, f, pipeline.SessionRequest, outboundListeners)
+}
+
 // TestParity_RequestBodyMutationToEmpty: a rewrite DOWN TO ZERO BYTES, which
 // is a distinct wire shape rather than an edge case for its own sake — it is
 // what a truncating plugin emits at its limit, and it is the one mutation that
@@ -424,8 +458,16 @@ const bodyMutationKey = "body-mutation"
 // no auth, so a before/after digest is how a rewrite stays auditable without
 // publishing whatever credential the body held.
 func bodyMutationJSON(plugin string, before, after []byte) string {
-	return fmt.Sprintf(`{"phase":"request","plugin":%q,"length_before":%d,"length_after":%d,"sha256_before":%q,"sha256_after":%q}`,
-		plugin, len(before), len(after), sha256Hex(before), sha256Hex(after))
+	return chainedBodyMutationJSON([]string{plugin}, before, after)
+}
+
+// chainedBodyMutationJSON is the payload for a chain of rewrites: before is the
+// body the client sent, after the body sent upstream, plugins every writer in
+// order, and plugin the last of them.
+func chainedBodyMutationJSON(plugins []string, before, after []byte) string {
+	names, _ := json.Marshal(plugins)
+	return fmt.Sprintf(`{"phase":"request","plugin":%q,"plugins":%s,"length_before":%d,"length_after":%d,"sha256_before":%q,"sha256_after":%q}`,
+		plugins[len(plugins)-1], names, len(before), len(after), sha256Hex(before), sha256Hex(after))
 }
 
 func sha256Hex(b []byte) string {

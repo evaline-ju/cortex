@@ -613,7 +613,7 @@ mutator now keeps incremental relay.
 **Mutation helpers.** `SetBody` / `SetResponseBody` replace the byte slice and flip an internal `bodyMutated` / `responseBodyMutated` flag that listeners read via `pctx.BodyMutated()` / `pctx.ResponseBodyMutated()`. They also auto-emit:
 
 - A `modify`-action Invocation with `Reason: "body_rewritten"`, framework-attributed to the mutating plugin.
-- A plugin-public event under `pctx.Extensions.Custom["body-mutation" + PluginEventSuffix]` with the phase (`request` / `response`), plugin name, byte length before/after, and sha256 before/after. Never the raw body content — the session store is unauthenticated.
+- A plugin-public event under `pctx.Extensions.Custom["body-mutation" + PluginEventSuffix]` with the phase (`request` / `response`), byte length and sha256 before and after, and the writers: `plugins` lists every plugin whose write took effect in that direction, in order, and `plugin` is the last. With several request mutators the event describes the chain — before is the body the client sent, after the body sent upstream — and a write under `on_error: observe` never replaces the record of one that took effect. Never the raw body content — the session store is unauthenticated.
 
 The flags (not byte-compare) are the source of truth. A rewrite that produces byte-identical output still records the Invocation because "redactor ran, nothing matched" is valid telemetry.
 

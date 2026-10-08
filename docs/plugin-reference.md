@@ -729,7 +729,10 @@ Plugins that need to rewrite request or response bodies declare
 helpers. The framework propagates the rewrite to the wire, emits a
 `modify`-action Invocation, and publishes a `body-mutation/event`
 entry in `pctx.Extensions.Custom` with length delta + sha256
-before/after (never the raw body).
+before/after (never the raw body). With several request mutators there is one
+entry for the chain: `before` is the bytes the client sent, `after` the bytes
+sent upstream, and `plugins` the writers whose writes took effect, in order
+(`plugin` is the last of them).
 
 > For the full lifecycle — per-listener wire behavior, content-encoding
 > policy, ordering rules, body-size limits — see

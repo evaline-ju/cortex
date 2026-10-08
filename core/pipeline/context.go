@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/rossoctl/cortex/core/capabilities"
@@ -266,6 +267,13 @@ type Context struct {
 	// "tried to redact, nothing matched" is valid telemetry.
 	bodyMutated         bool
 	responseBodyMutated bool
+
+	// requestMutation and responseMutation are the framework's account of the body
+	// writes that took effect, one per direction: the bytes before the first of them,
+	// and every writer since, in chain order. emitBodyMutation keeps them and
+	// publishes each under the body-mutation key; see bodyMutationEvent.
+	requestMutation  *bodyMutationEvent
+	responseMutation *bodyMutationEvent
 
 	// dispatched lists the pipeline indices whose OnRequest was actually
 	// invoked (including the plugin that denied, if any). Populated by
@@ -694,23 +702,28 @@ func (c *Context) SetResponseBody(newBody []byte) {
 // mode. Mirrors emitBodyMutation's telemetry (length + sha256 delta)
 // so dashboards get the same shape they see under enforce, just with
 // Shadow=true and no wire-level effect.
+//
+// The would-be record is published only while no write in that direction has
+// taken effect: a shadow write sent nothing upstream, so it never displaces the
+// record of one that did. A write that takes effect later replaces it.
 func (c *Context) recordShadowBodyMutation(phase string, oldBody, newBody []byte) {
 	c.Record(Invocation{
 		Action: ActionModify,
 		Reason: "body_rewritten",
 		Shadow: true,
 	})
-	if c.Extensions.Custom == nil {
-		c.Extensions.Custom = map[string]any{}
+	if *c.mutationRecord(phase) != nil {
+		return
 	}
-	c.Extensions.Custom["body-mutation"+PluginEventSuffix] = bodyMutationEvent{
+	c.publishBodyMutation(bodyMutationEvent{
 		Phase:        phase,
 		Plugin:       c.currentPlugin,
+		Plugins:      []string{c.currentPlugin},
 		LengthBefore: len(oldBody),
 		LengthAfter:  len(newBody),
 		SHA256Before: hashHex(oldBody),
 		SHA256After:  hashHex(newBody),
-	}
+	})
 }
 
 // BodyMutated reports whether a plugin called SetBody during this
@@ -815,38 +828,67 @@ func (c *Context) Classification() (anyAction, anyBypass bool) {
 // emitBodyMutation records the Invocation and publishes the
 // plugin-public event carrying length delta + sha256 before/after.
 // Never logs raw body bytes — the session store is unauthenticated.
+//
+// With several writers in one direction the event describes the chain, not the
+// last call: before is the body as it was before the first write took effect —
+// for a request, the bytes the client sent, since readers precede every mutator —
+// after is the body now, and plugins lists every writer whose write took effect,
+// in order. Each writer's own modify/body_rewritten Invocation is recorded above.
 func (c *Context) emitBodyMutation(phase string, oldBody, newBody []byte) {
 	c.Record(Invocation{Action: ActionModify, Reason: "body_rewritten"})
 
+	rec := c.mutationRecord(phase)
+	if *rec == nil {
+		*rec = &bodyMutationEvent{Phase: phase, LengthBefore: len(oldBody), SHA256Before: hashHex(oldBody)}
+	}
+	r := *rec
+	r.Plugin = c.currentPlugin
+	r.Plugins = append(r.Plugins, c.currentPlugin)
+	r.LengthAfter, r.SHA256After = len(newBody), hashHex(newBody)
+	c.publishBodyMutation(*r)
+}
+
+// mutationRecord is the record for phase's direction: "request" or "response".
+func (c *Context) mutationRecord(phase string) **bodyMutationEvent {
+	if phase == "response" {
+		return &c.responseMutation
+	}
+	return &c.requestMutation
+}
+
+// publishBodyMutation puts ev in Extensions.Custom under the framework's
+// body-mutation key, with a Plugins slice of its own, so a later write appending
+// to the record cannot reach an event already published from it.
+//
+// The key carries a synthetic "body-mutation" plugin name rather than a real
+// one. Per the convention in extensions.go, keys MUST be the plugin's Name(); the
+// framework (not a specific plugin) owns this event, so a switch of plugin names
+// in a future refactor must not break operators' dashboards.
+func (c *Context) publishBodyMutation(ev bodyMutationEvent) {
+	ev.Plugins = slices.Clone(ev.Plugins)
 	if c.Extensions.Custom == nil {
 		c.Extensions.Custom = map[string]any{}
 	}
-	// Prefix with a synthetic "body-mutation" plugin name — per the
-	// convention in extensions.go, keys MUST be the plugin's Name(). We
-	// use a fixed plugin-like prefix here because the framework (not a
-	// specific plugin) owns this event: a switch of plugin names in a
-	// future refactor shouldn't break operators' dashboards.
-	c.Extensions.Custom["body-mutation"+PluginEventSuffix] = bodyMutationEvent{
-		Phase:        phase,
-		Plugin:       c.currentPlugin,
-		LengthBefore: len(oldBody),
-		LengthAfter:  len(newBody),
-		SHA256Before: hashHex(oldBody),
-		SHA256After:  hashHex(newBody),
-	}
+	c.Extensions.Custom["body-mutation"+PluginEventSuffix] = ev
 }
 
 // bodyMutationEvent is the public payload shape under the
 // body-mutation/event key. Purely observational — no raw body bytes.
 // Consumers (agentop, audit systems) can render a per-mutation timeline
 // with these fields alone.
+//
+// One record per direction per request, however many plugins wrote: before is
+// the body ahead of the first write, after the body the last one left, and
+// Plugins the writers in chain order. Plugin is the last of them, the field's
+// meaning when there was only ever one.
 type bodyMutationEvent struct {
-	Phase        string `json:"phase"`  // "request" | "response"
-	Plugin       string `json:"plugin"` // plugin that called SetBody
-	LengthBefore int    `json:"length_before"`
-	LengthAfter  int    `json:"length_after"`
-	SHA256Before string `json:"sha256_before"`
-	SHA256After  string `json:"sha256_after"`
+	Phase        string   `json:"phase"`   // "request" | "response"
+	Plugin       string   `json:"plugin"`  // the last plugin whose write took effect
+	Plugins      []string `json:"plugins"` // every plugin whose write took effect, in order
+	LengthBefore int      `json:"length_before"`
+	LengthAfter  int      `json:"length_after"`
+	SHA256Before string   `json:"sha256_before"`
+	SHA256After  string   `json:"sha256_after"`
 }
 
 func hashHex(b []byte) string {
