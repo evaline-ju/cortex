@@ -190,3 +190,28 @@ func TestParseURL_KeepsCredentialsOutOfErrors(t *testing.T) {
 		})
 	}
 }
+
+// User info is where a pasted key sits, and it may be the username alone, which
+// url.URL.Redacted leaves intact. Every error a URL with user info can reach must
+// drop it whole, and still name the host so the message points somewhere.
+func TestParseURL_KeepsUserInfoOutOfEveryError(t *testing.T) {
+	for _, tc := range []struct {
+		name, url, want string
+	}{
+		{"key as the username", "https://sk-SECRET@h.example.com", `"https://h.example.com" carries user info`},
+		{"key as the password", "https://u:sk-SECRET@h.example.com", `"https://h.example.com" carries user info`},
+		{"wrong scheme", "ftp://u:sk-SECRET@h.example.com", `"ftp://h.example.com": the scheme must be http or https`},
+		{"no host", "https://u:sk-SECRET@", "has no host"},
+		{"no slashes", "https:u:sk-SECRET@h.example.com", `"https:h.example.com" has no host`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseURL(tc.url)
+			if err == nil {
+				t.Fatal("ParseURL accepted a URL with user info")
+			}
+			if msg := err.Error(); strings.Contains(msg, "sk-SECRET") || strings.Contains(msg, "u:") || !strings.Contains(msg, tc.want) {
+				t.Errorf("error = %q, want %q in it and no user info", msg, tc.want)
+			}
+		})
+	}
+}
