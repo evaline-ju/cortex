@@ -29,6 +29,9 @@ type Pipeline struct {
 	// redirects[i] is plugins[i]'s WritesDestination, read once at New so Run does
 	// not ask every plugin for its capabilities on every request.
 	redirects []bool
+	// requestWriters[i] is plugins[i]'s WritesRequestBody, read once at New for the
+	// same reason. SetRequestModel is accepted only from a plugin that declares it.
+	requestWriters []bool
 }
 
 // Option configures pipeline construction.
@@ -82,10 +85,14 @@ func New(plugins []Plugin, opts ...Option) (*Pipeline, error) {
 		finishTimeout = DefaultFinishTimeout
 	}
 	redirects := make([]bool, len(plugins))
+	requestWriters := make([]bool, len(plugins))
 	for i, plugin := range plugins {
-		redirects[i] = plugin.Capabilities().WritesDestination
+		caps := plugin.Capabilities()
+		redirects[i] = caps.WritesDestination
+		requestWriters[i] = caps.WritesRequestBody
 	}
-	return &Pipeline{plugins: plugins, policies: policies, finishTimeout: finishTimeout, redirects: redirects}, nil
+	return &Pipeline{plugins: plugins, policies: policies, finishTimeout: finishTimeout,
+		redirects: redirects, requestWriters: requestWriters}, nil
 }
 
 // Run executes the request phase of the pipeline sequentially.
@@ -120,6 +127,7 @@ func (p *Pipeline) Run(ctx context.Context, pctx *Context) Action {
 		}
 		pctx.setCurrent(plugin.Name(), InvocationPhaseRequest, policy)
 		pctx.currentMayRedirect = p.redirectsAt(i)
+		pctx.currentMayWriteRequestBody = p.writesRequestAt(i)
 		pctx.dispatched = append(pctx.dispatched, i)
 		action := plugin.OnRequest(ctx, pctx)
 		pctx.clearCurrent()
@@ -260,6 +268,12 @@ func (p *Pipeline) policyAt(i int) ErrorPolicy {
 // like policyAt, so a Pipeline not built by New never panics.
 func (p *Pipeline) redirectsAt(i int) bool {
 	return i < len(p.redirects) && p.redirects[i]
+}
+
+// writesRequestAt reports whether plugins[i] declares WritesRequestBody. Bounds-safe,
+// like redirectsAt.
+func (p *Pipeline) writesRequestAt(i int) bool {
+	return i < len(p.requestWriters) && p.requestWriters[i]
 }
 
 // markShadowAndLog records the would-have-denied Invocation as

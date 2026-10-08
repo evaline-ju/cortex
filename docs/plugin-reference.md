@@ -744,14 +744,15 @@ sent upstream, and `plugins` the writers whose writes took effect, in order
 ```go
 type PluginCapabilities struct {
     ReadsBody          bool // plugin reads pctx.Body / pctx.ResponseBody
-    WritesRequestBody  bool // plugin may call pctx.SetBody
+    WritesRequestBody  bool // plugin may call pctx.SetBody and pctx.SetRequestModel
     WritesResponseBody bool // plugin may call pctx.SetResponseBody
 }
 ```
 
 - `ReadsBody`: listener buffers the body; plugin sees bytes.
 - `WritesRequestBody`: implies `ReadsBody`. Listener propagates `pctx.SetBody`
-  rewrites to the upstream.
+  rewrites to the upstream. Required by `pctx.SetRequestModel`, which refuses a
+  plugin that does not declare it.
 - `WritesResponseBody`: implies `ReadsBody`. Listener propagates
   `pctx.SetResponseBody` rewrites to the downstream client.
 
@@ -894,6 +895,45 @@ package supplies:
 A capability some listener cannot honor is added the same way: a field on
 `pipeline.ListenerSupport`, a case in its `Unsupported`, and each listener's
 `Support` saying whether it can.
+
+## Changing the model
+
+A plugin that changes which model serves a request — a router, a downgrader, an
+A/B test — declares `WritesRequestBody: true` and calls `pctx.SetRequestModel`
+from `OnRequest`. Do not edit the body's `model` yourself, and do not write
+`pctx.Extensions.Inference`: that record belongs to the parser.
+
+```go
+if name, ok := pctx.RequestModel(); ok && strings.Contains(name, "opus") {
+    if err := pctx.SetRequestModel("glm-5.3"); err != nil {
+        return pctx.DenyAndRecord("model_rewrite_failed", "upstream.unreachable", err.Error())
+    }
+}
+```
+
+| Call | Effect |
+|---|---|
+| `pctx.RequestModel()` | The body's top-level `model` string, exactly as `SetRequestModel` would replace it; `false` for a body it would refuse. |
+| `pctx.SetRequestModel(name)` | Replaces that one value in place — every other byte stays as the client sent it, which a prompt cache depends on — and sends the result through `SetBody`. |
+
+What it changes besides the bytes:
+
+- **The inference record.** When the parser built `pctx.Extensions.Inference`,
+  `model` becomes the new name and `requestedModel` keeps the one the client sent
+  (`omitempty`, present only while the two differ). Settlement prices `model`, so
+  the cost record and agentop's model column describe the model the request was
+  sent for, and agentop's detail pane shows both. With no extension none is
+  created.
+- **The timeline.** The framework records `modify/model_rewritten` with `from`
+  and `to` in `Details`, after the `modify/body_rewritten` every `SetBody` records.
+
+Under `on_error: observe` nothing changes — not the body, not the record — and
+both rows are shadows. A name equal to the current model changes nothing and
+records nothing. `SetRequestModel` is refused, with nothing changed, from a plugin
+that does not declare `WritesRequestBody`, outside `OnRequest`, and for a body
+with no top-level string `model`, one that is not valid JSON, or one that names
+`model` more than once — gjson and sjson read the first, encoding/json and most
+servers the last, so changing one would leave the other serving.
 
 ## Finishing requests (stateful plugins)
 

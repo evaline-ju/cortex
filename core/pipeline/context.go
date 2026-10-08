@@ -241,6 +241,11 @@ type Context struct {
 	// that declares WritesDestination — the one dispatch Redirect is accepted from.
 	currentMayRedirect bool
 
+	// currentMayWriteRequestBody is true while Pipeline.Run dispatches OnRequest into a
+	// plugin that declares WritesRequestBody — the one dispatch SetRequestModel is
+	// accepted from. SetBody does not consult it; see SetBody.
+	currentMayWriteRequestBody bool
+
 	// redirectable is set by a listener that builds the upstream request from this
 	// context itself, so a redirect can take effect. See MarkRedirectable.
 	redirectable bool
@@ -480,6 +485,7 @@ func (c *Context) clearCurrent() {
 	c.currentPhase = ""
 	c.currentPolicy = ""
 	c.currentMayRedirect = false
+	c.currentMayWriteRequestBody = false
 }
 
 // RejectingPlugin returns the name of the plugin whose Reject action

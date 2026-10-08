@@ -55,6 +55,8 @@ func fullEvent() pipeline.SessionEvent {
 			OutputTokens:     50,
 			PresentKinds:     9,
 			FinishReason:     "stop",
+			// Set only when a plugin changed the model; differs from Model on purpose.
+			RequestedModel: "claude-opus-5-5",
 		},
 		A2A: &pipeline.A2AExtension{
 			Method:       "message/send",
@@ -109,6 +111,12 @@ func TestSummarizeEvent_DropsPayloadsKeepsTimelineFields(t *testing.T) {
 	// CONTEXT gauge exactly as dropping the counts did.
 	if got.Inference.AgentRole != full.Inference.AgentRole {
 		t.Errorf("agentRole = %q, want %q", got.Inference.AgentRole, full.Inference.AgentRole)
+	}
+	// requestedModel is kept for the reason requestedHost is, below: agentop's detail pane
+	// draws its model: line from the projected event before the full one arrives.
+	if got.Inference.RequestedModel != full.Inference.RequestedModel {
+		t.Errorf("requestedModel = %q, want %q — the detail pane's model: line reads it",
+			got.Inference.RequestedModel, full.Inference.RequestedModel)
 	}
 	if got.A2A.Artifact != "" {
 		t.Error("A2A.Artifact survived")
@@ -323,7 +331,9 @@ func TestSummarizeEvent_ShapeIsGuarded(t *testing.T) {
 		// row the timeline serves. It needs no assertion of its own in the projection test
 		// beyond the equality one there — a scalar survives the struct copy, unlike the two
 		// slices whose lengths had to be recorded before they were dropped.
-		{"InferenceExtension", reflect.TypeOf(pipeline.InferenceExtension{}), 25},
+		// 26 since RequestedModel, which is kept as RequestedHost is: agentop's detail pane
+		// draws its model: line from the projected event. A scalar; asserted above.
+		{"InferenceExtension", reflect.TypeOf(pipeline.InferenceExtension{}), 26},
 		{"A2AExtension", reflect.TypeOf(pipeline.A2AExtension{}), 11},
 		{"MCPExtension", reflect.TypeOf(pipeline.MCPExtension{}), 6},
 	} {
