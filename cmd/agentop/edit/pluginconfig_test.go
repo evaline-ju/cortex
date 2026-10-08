@@ -3,6 +3,8 @@ package edit
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // localConfig is shaped like the config a laptop install writes: comments, the
@@ -309,80 +311,118 @@ func TestSetPluginConfig_ALineBreakIsRefusedWithoutEchoingTheValue(t *testing.T)
 	}
 }
 
-// Line breaks the YAML parser counts but the editor would not (U+0085, U+2028, U+2029)
-// make every later edit land one line off if not refused.
+// uncountedBreaks are the characters yaml.v3 counts as a line break when it numbers
+// lines and strings.Split(src, "\n") does not split on, each with the name the
+// editor's refusal gives it. A lone \r is one; a CRLF is not, since both count it once.
+var uncountedBreaks = []struct{ char, name string }{
+	{"\u0085", "U+0085"},
+	{"\u2028", "U+2028"},
+	{"\u2029", "U+2029"},
+	{"\r", "carriage return"},
+}
+
+// withUncountedBreak is withRouter with one uncounted break put where the document
+// still parses, ahead of agents.claude-code: inside a quoted value, or ending a
+// comment line in place of its \n. It fails the test if a result does not parse, so
+// a refusal of it is the editor's guard and never the parser's.
+func withUncountedBreak(t *testing.T, char string) map[string]string {
+	t.Helper()
+	srcs := map[string]string{
+		"in a quoted value": strings.Replace(withRouter, "key: sk-ete   #", `key: "sk-a`+char+`b"   #`, 1),
+		"ending a comment":  strings.Replace(withRouter, "# servers Claude Code can be sent to\n", "# servers Claude Code can be sent to"+char, 1),
+	}
+	for where, src := range srcs {
+		if src == withRouter {
+			t.Fatalf("%s: the fixture no longer has the line the break goes in", where)
+		}
+		var doc yaml.Node
+		if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
+			t.Fatalf("%s: the fixture does not parse, so it cannot test the editor: %v", where, err)
+		}
+	}
+	return srcs
+}
+
+// Keys and values are written one to a line, so every character YAML counts as a
+// line break is refused in them, and the refusal does not repeat the value.
 func TestSetPluginConfig_RefusesSpecialLineBreaksInValues(t *testing.T) {
-	for name, ch := range map[string]ConfigChange{
-		"U+0085": change([]string{"servers", "ete"}, "url", "https://ete.example.com", "key", "sk-a\x85b"),
-		"U+2028": change([]string{"servers", "ete"}, "url", "https://ete.example.com", "key", "sk-a b"),
-		"U+2029": change([]string{"servers", "ete"}, "url", "https://ete.example.com", "key", "sk-a b"),
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := SetPluginConfig([]byte(withRouter), ch)
+	for _, b := range uncountedBreaks {
+		t.Run(b.name, func(t *testing.T) {
+			ch := change([]string{"servers", "ete"}, "url", "https://ete.example.com", "key", "sk-a"+b.char+"b")
+			out, err := SetPluginConfig([]byte(withRouter), ch)
 			if err == nil {
-				t.Fatal("err = nil, want refusal of line break the YAML parser counts")
+				t.Fatalf("err = nil, want the value refused; it wrote:\n%s", Diff([]byte(withRouter), out))
 			}
-			if strings.Contains(err.Error(), "sk-a") {
-				t.Errorf("err contains value: %v", err)
+			if !strings.Contains(err.Error(), "a value with a line break") || strings.Contains(err.Error(), "sk-a") {
+				t.Errorf("err = %q, want the line-break refusal, without the value", err)
 			}
 		})
 	}
 }
 
-// A value with a bare \r (not followed by \n) causes the same line-count mismatch.
-func TestSetPluginConfig_RefusesBareCarriageReturn(t *testing.T) {
-	_, err := SetPluginConfig([]byte(withRouter), change([]string{"servers", "ete"}, "key", "sk-a\rb"))
-	if err == nil {
-		t.Fatal("err = nil, want refusal of bare carriage return")
-	}
-}
-
-// RefusesSourceWithSpecialLineBreaks rejects input containing U+0085, U+2028, or U+2029.
+// A source holding an uncounted break anywhere is refused before it is edited, with
+// an error naming the character and quoting nothing of the file.
 func TestSetPluginConfig_RefusesSourceWithSpecialLineBreaks(t *testing.T) {
-	for name, src := range map[string]string{
-		"U+0085": strings.Replace(withRouter, "ete:", "ete\x85:", 1),
-		"U+2028": strings.Replace(withRouter, "ete:", "ete :", 1),
-		"U+2029": strings.Replace(withRouter, "ete:", "ete :", 1),
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := SetPluginConfig([]byte(src), change([]string{"agents", "new"}, "ete"))
-			if err == nil {
-				t.Fatal("err = nil, want refusal")
-			}
-		})
+	for _, b := range uncountedBreaks {
+		for where, src := range withUncountedBreak(t, b.char) {
+			t.Run(b.name+" "+where, func(t *testing.T) {
+				out, err := SetPluginConfig([]byte(src), change([]string{"agents", "opencode"}, "ete"))
+				if err == nil {
+					t.Fatalf("err = nil, want the source refused; it wrote:\n%s", Diff([]byte(src), out))
+				}
+				msg := err.Error()
+				if !strings.HasPrefix(msg, "edit: ") || !strings.Contains(msg, b.name) || !strings.Contains(msg, "counts as a line break") {
+					t.Errorf("err = %q, want an edit: refusal naming %s", msg, b.name)
+				}
+				if strings.Contains(msg, "sk-a") || strings.Contains(msg, "servers Claude Code") || strings.Contains(msg, b.char) {
+					t.Errorf("err = %q quotes the source", msg)
+				}
+			})
+		}
 	}
 }
 
-// RefusesSourceWithBareCarriageReturn rejects input with \r not followed by \n.
-func TestSetPluginConfig_RefusesSourceWithBareCarriageReturn(t *testing.T) {
-	src := strings.Replace(withRouter, "ete:", "ete\r:", 1)
-	_, err := SetPluginConfig([]byte(src), change([]string{"agents", "new"}, "ete"))
-	if err == nil {
-		t.Fatal("err = nil, want refusal of bare carriage return in source")
-	}
-}
-
-// ProbeSequence: set a value with U+2028, then remove a later key — the file should
-// not be corrupted (the line numbers stay accurate).
+// What the refusal prevents: past an uncounted break, each yaml.Node.Line is one
+// more than the line strings.Split puts that node on, so a change to
+// agents.claude-code would replace session: instead. The same document with the
+// break made a \n, which both count, takes the change where it belongs, so the
+// refusal is the break's alone.
 func TestSetPluginConfig_SpecialLineBreaksDoNotCorruptLaterEdits(t *testing.T) {
-	// Start with the config and set a key containing U+2028
-	// This should fail, so we can't execute it. Instead, manually test
-	// by setting a value WITHOUT the special char first,  then removing later.
-	// The point is that the refusal prevents corruption.
-	//
-	// Since setting a special char fails, the file stays clean and later
-	// edits work correctly. Verify by removing a key after the "would-be" set location.
-	src := withRouter
-	ch := change([]string{"agents", "claude-code"})
-	result, err := SetPluginConfig([]byte(src), ch)
-	if err != nil {
-		t.Fatalf("removing a key should work: %v", err)
+	ch := change([]string{"agents", "claude-code"}, "glm")
+	for _, b := range uncountedBreaks {
+		for where, src := range withUncountedBreak(t, b.char) {
+			t.Run(b.name+" "+where, func(t *testing.T) {
+				counted := strings.ReplaceAll(src, b.char, "\n")
+				assertYAML(t, apply(t, counted, ch), strings.Replace(counted, "claude-code: ete", "claude-code: glm", 1))
+
+				in := []byte(src)
+				out, err := SetPluginConfig(in, ch)
+				if err == nil {
+					t.Fatalf("the edit was made, not refused:\n%s", Diff(in, out))
+				}
+				if out != nil || string(in) != src {
+					t.Errorf("a refused edit returned %d bytes or changed its input", len(out))
+				}
+			})
+		}
 	}
-	expected := strings.Replace(src, `          agents:
-            claude-code: ete
-`, "", 1)
-	if string(result) != expected {
-		t.Errorf("removal failed:\n--- got ---\n%s\n--- want ---\n%s\n--- diff ---\n%s",
-			string(result), expected, Diff([]byte(expected), result))
-	}
+}
+
+// Only those breaks are refused. U+FFFD is the rune a byte-wise "\x85" decodes to,
+// and a CRLF is a single break to the parser and to strings.Split alike.
+func TestSetPluginConfig_RefusesOnlyTheLineBreaksItCannotCount(t *testing.T) {
+	t.Run("U+FFFD in a comment", func(t *testing.T) {
+		src := strings.Replace(withRouter, "# rotated in October", "# rotated in October \ufffd", 1)
+		assertYAML(t, apply(t, src, change([]string{"agents", "claude-code"}, "glm")),
+			strings.Replace(src, "claude-code: ete", "claude-code: glm", 1))
+	})
+	t.Run("U+FFFD in a value", func(t *testing.T) {
+		assertYAML(t, apply(t, withRouter, change([]string{"servers", "ete"}, "url", "https://ete.example.com", "key", "sk-\ufffd")),
+			strings.Replace(withRouter, "              key: sk-ete   # rotated in October\n", "              key: sk-\ufffd\n", 1))
+	})
+	t.Run("CRLF line endings", func(t *testing.T) {
+		src := strings.ReplaceAll(withRouter, "\n", "\r\n")
+		got := apply(t, src, change([]string{"agents", "claude-code"}, "glm"))
+		assertYAML(t, strings.ReplaceAll(got, "\r\n", "\n"), strings.Replace(withRouter, "claude-code: ete", "claude-code: glm", 1))
+	})
 }

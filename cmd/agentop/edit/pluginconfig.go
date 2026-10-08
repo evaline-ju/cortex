@@ -64,20 +64,15 @@ func SetPluginConfig(src []byte, ch ConfigChange) ([]byte, error) {
 	if len(ch.Path) == 0 {
 		return nil, errors.New("edit: a config change needs at least one key")
 	}
-	// Reject src containing line separators the YAML parser counts but strings.Split
-	// Reject src containing line separators the YAML parser counts but strings.Split
-	// would not: U+0085 (NEL), U+2028 (LS), U+2029 (PS), or \r not in \r\n pair.
-	// The parser's yaml.Node.Line disagrees with split line counts when these occur,
-	// causing later edits to land on wrong lines.
-	srcStr := string(src)
-	// Check for U+0085, or the UTF-8 sequences for U+2028 (\xe2\x80\xa8) and U+2029 (\xe2\x80\xa9)
-	if strings.ContainsAny(srcStr, "\x85") || strings.Contains(srcStr, "\xe2\x80\xa8") || strings.Contains(srcStr, "\xe2\x80\xa9") {
-		return nil, errors.New("source contains a line separator the YAML parser counts; editing would lose accuracy")
-	}
-	for i := 0; i < len(srcStr); i++ {
-		if srcStr[i] == '\r' && (i+1 >= len(srcStr) || srcStr[i+1] != '\n') {
-			return nil, errors.New("source contains a bare carriage return; editing would lose accuracy")
-		}
+	// Refuse a src holding U+0085 (NEL), U+2028 (LS), U+2029 (PS), or a \r not
+	// immediately followed by \n, wherever it is: in a comment or a quoted value as
+	// much as between lines. The parser counts each as a line break and the split
+	// below does not, so after one, every yaml.Node.Line points further down lines
+	// than the line it was read from, and an edit lands there. A CRLF passes: both
+	// count it as one break.
+	if b := uncountedBreak(string(src)); b != "" {
+		return nil, fmt.Errorf("edit: the config contains %s, which YAML counts as a line break and this editor does not; "+
+			"remove it or make it a newline, then try again", b)
 	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(src, &doc); err != nil {
@@ -86,7 +81,7 @@ func SetPluginConfig(src []byte, ch ConfigChange) ([]byte, error) {
 	if len(doc.Content) == 0 || !blockMapping(doc.Content[0]) {
 		return nil, errors.New("the config is not an indented mapping; not editing it")
 	}
-	lines := strings.Split(srcStr, "\n")
+	lines := strings.Split(string(src), "\n")
 
 	plugins, err := chainPlugins(doc.Content[0], ch)
 	if err != nil {
@@ -300,11 +295,14 @@ func renderKey(key string, value *yaml.Node, indent int) ([]string, error) {
 
 // scalarText is s as a one-line YAML string, quoted only when it has to be. The
 // error never repeats s: the values written here include API keys.
+//
+// It refuses s holding any character YAML counts as a line break: \n, \r, U+0085
+// (NEL), U+2028 (LS) or U+2029 (PS). yaml.v3 would write a \n as a block over
+// several lines, and an LS or PS raw, which the next SetPluginConfig would refuse
+// the file for; it would escape a \r or NEL, but those are refused as well, so no
+// value carries a line break of any kind.
 func scalarText(s string) (string, error) {
-	// Reject line breaks: \r, \n, and the three separators the YAML parser counts
-	// as line breaks (U+0085/NEL, U+2028/LS, U+2029/PS). The parser's line numbers
-	// would disagree with strings.Split line counts, causing later edits to land wrong.
-	if strings.ContainsAny(s, "\x85\r\n") || strings.Contains(s, "\xe2\x80\xa8") || strings.Contains(s, "\xe2\x80\xa9") {
+	if strings.ContainsAny(s, "\n\r\u0085\u2028\u2029") {
 		return "", errors.New("edit: a value with a line break cannot be written on one line")
 	}
 	b, err := yaml.Marshal(ScalarValue(s))
@@ -312,6 +310,26 @@ func scalarText(s string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSuffix(string(b), "\n"), nil
+}
+
+// uncountedBreak names the first character in src that the YAML parser counts as
+// a line break and strings.Split(src, "\n") does not split on, or is "" when there
+// is none. Those are U+0085 (NEL), U+2028 (LS), U+2029 (PS), and a \r not
+// immediately followed by \n. The name is all an error may say: src can hold API keys.
+func uncountedBreak(src string) string {
+	for i, r := range src {
+		switch {
+		case r == '\u0085':
+			return "U+0085 (NEXT LINE)"
+		case r == '\u2028':
+			return "U+2028 (LINE SEPARATOR)"
+		case r == '\u2029':
+			return "U+2029 (PARAGRAPH SEPARATOR)"
+		case r == '\r' && !strings.HasPrefix(src[i+1:], "\n"):
+			return "a carriage return not followed by a newline"
+		}
+	}
+	return ""
 }
 
 // sameValue reports whether the node in the file already holds want, whatever its
