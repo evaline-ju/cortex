@@ -46,6 +46,13 @@ var readServerKey = func(name string) (string, error) {
 	return string(b), nil
 }
 
+// stdinIsTerminal reports whether stdin is a terminal. A var so a test can say it
+// is: a test's stdin never is.
+var stdinIsTerminal = func(stdin io.Reader) bool {
+	f, ok := stdin.(*os.File)
+	return ok && term.IsTerminal(f.Fd())
+}
+
 // readKey is the key for server name: from stdin with --key-stdin, else at the
 // hidden prompt. Never from an argument, which would put it in shell history.
 func readKey(name string, fromStdin bool, stdin io.Reader) (string, error) {
@@ -87,6 +94,14 @@ func serverAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "agentop server add: %v\n", err)
 		return 2
+	}
+	// Before anything is asked or read: --key-stdin reads stdin as typed, so on a
+	// terminal the key would echo, character by character, onto the screen and into
+	// any recording of it. The prompt without the flag reads it without echo.
+	if *keyStdin && stdinIsTerminal(stdin) {
+		fmt.Fprintln(stderr, "agentop server add: --key-stdin reads the key from stdin, and stdin is a terminal, "+
+			"so the key would echo as you typed it. Pipe the key in, or drop --key-stdin to be asked for it without echo.")
+		return 1
 	}
 
 	cfg, path, statsURL, err := serverTarget(*cfgPath)
@@ -143,7 +158,11 @@ func serverAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(agentsOn(c, name)) == 0 {
 		done += " No agent uses it yet. Route one with\n  agentop server use " + name + " --agent claude-code"
 	}
-	return runServerWrite(stdout, stderr, path, statsURL, ch, done, name+" already has that URL and key; nothing to change.")
+	return runServerWrite(stdout, stderr, path, statsURL, ch, writeReport{
+		done:      done,
+		unchanged: name + " already has that URL and key; nothing to change.",
+		note:      routerInactive(cfg, path),
+	})
 }
 
 func serverRemove(args []string, stdout, stderr io.Writer) int {
@@ -178,7 +197,25 @@ func serverRemove(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agentop server remove: no server named %s%s\n", name, configuredServers(c))
 		return 1
 	}
-	if agents := agentsOn(c, name); len(agents) > 0 {
+	agents := agentsOn(c, name)
+	// The only server first, since no command removes it. With agents routed to it
+	// the refusal names the step that makes it carry no traffic too, rather than
+	// naming that step alone and refusing again once it is taken.
+	if len(c.Servers) == 1 {
+		fmt.Fprintf(stderr, "agentop server remove: %s is the only server, and %s needs one. ", name, routerName)
+		if len(agents) > 0 {
+			fmt.Fprintf(stderr, "It is %s's server for new sessions; stop routing to it with\n", strings.Join(agents, " and "))
+			for _, a := range agents {
+				fmt.Fprintf(stderr, "  agentop server reset --agent %s\n", a)
+			}
+			fmt.Fprint(stderr, "and it changes no traffic. ")
+		} else {
+			fmt.Fprint(stderr, "With no agent routed to it it changes no traffic. ")
+		}
+		fmt.Fprintf(stderr, "To take the router out altogether, delete its entry from %s.\n", homeTilde(path))
+		return 1
+	}
+	if len(agents) > 0 {
 		var other string
 		for _, s := range slices.Sorted(maps.Keys(c.Servers)) {
 			if s != name {
@@ -186,28 +223,17 @@ func serverRemove(args []string, stdout, stderr io.Writer) int {
 				break
 			}
 		}
-		fmt.Fprintf(stderr, "%s is %s's server for new sessions. ", name, strings.Join(agents, " and "))
-		if other != "" {
-			fmt.Fprintln(stderr, "Pick another first:")
-			for _, a := range agents {
-				fmt.Fprintf(stderr, "  agentop server use %s --agent %s\n", other, a)
-			}
-		} else {
-			fmt.Fprintln(stderr, "Stop routing it first:")
-			for _, a := range agents {
-				fmt.Fprintf(stderr, "  agentop server reset --agent %s\n", a)
-			}
+		fmt.Fprintf(stderr, "%s is %s's server for new sessions. Pick another first:\n", name, strings.Join(agents, " and "))
+		for _, a := range agents {
+			fmt.Fprintf(stderr, "  agentop server use %s --agent %s\n", other, a)
 		}
 		return 1
 	}
-	if len(c.Servers) == 1 {
-		fmt.Fprintf(stderr, "agentop server remove: %s is the only server, and %s needs one. With no agent routed to it "+
-			"it changes no traffic; to take the router out altogether, delete its entry from %s.\n", name, routerName, homeTilde(path))
-		return 1
-	}
 	ch := edit.ConfigChange{Chain: "outbound", Plugin: routerName, Path: []string{"servers", name}}
-	done := fmt.Sprintf("Removed %s. A session that started on it now gets an error asking for a new session; adding %s back restores it.", name, name)
-	return runServerWrite(stdout, stderr, path, statsURL, ch, done, "")
+	return runServerWrite(stdout, stderr, path, statsURL, ch, writeReport{
+		done: "Removed " + name + ".",
+		live: fmt.Sprintf("A session that started on it now gets an error asking for a new session; adding %s back restores it.", name),
+	})
 }
 
 func serverUse(args []string, stdout, stderr io.Writer) int {
@@ -248,9 +274,12 @@ func serverUse(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	ch := edit.ConfigChange{Chain: "outbound", Plugin: routerName, Path: []string{"agents", *agent}, Value: edit.ScalarValue(name)}
-	return runServerWrite(stdout, stderr, path, statsURL, ch,
-		fmt.Sprintf("New %s sessions → %s. Sessions already running stay where they are.", *agent, name),
-		fmt.Sprintf("New %s sessions already go to %s.", *agent, name))
+	return runServerWrite(stdout, stderr, path, statsURL, ch, writeReport{
+		done:      fmt.Sprintf("New %s sessions → %s.", *agent, name),
+		live:      runningSessionsStay,
+		unchanged: fmt.Sprintf("New %s sessions already go to %s.", *agent, name),
+		note:      routerInactive(cfg, path),
+	})
 }
 
 func serverReset(args []string, stdout, stderr io.Writer) int {
@@ -284,10 +313,19 @@ func serverReset(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	ch := edit.ConfigChange{Chain: "outbound", Plugin: routerName, Path: []string{"agents", *agent}}
-	return runServerWrite(stdout, stderr, path, statsURL, ch,
-		fmt.Sprintf("New %s sessions are no longer routed. Sessions already running stay where they are.", *agent),
-		fmt.Sprintf("%s is not routed; nothing to change.", *agent))
+	return runServerWrite(stdout, stderr, path, statsURL, ch, writeReport{
+		done:      fmt.Sprintf("New %s sessions are no longer routed.", *agent),
+		live:      runningSessionsStay,
+		unchanged: fmt.Sprintf("%s is not routed; nothing to change.", *agent),
+	})
 }
+
+// runningSessionsStay is what use and reset mean for sessions already running,
+// said once the running proxy has the change. It holds a session it has seen a
+// request from since it started, by its pin or by the request its history records;
+// one that has sent nothing since looks new to it.
+const runningSessionsStay = "Sessions already running stay where they are, except one that has sent nothing " +
+	"since the proxy last started, which is treated as a new one."
 
 // verifyRouter is the check every `agentop server` write makes of its result: the
 // router entry must pass the plugin's own validation, so agentop never writes a
@@ -303,9 +341,23 @@ func verifyRouter(cfg *config.Config) error {
 	return nil
 }
 
-// runServerWrite makes one change to the router entry and reports how it landed:
-// done once the proxy has it, unchanged when there was nothing to write.
-func runServerWrite(stdout, stderr io.Writer, path, statsURL string, ch edit.ConfigChange, done, unchanged string) int {
+// writeReport is what runServerWrite says about a change, by how it landed.
+type writeReport struct {
+	// done is the change, said once the proxy has it or will load it at start.
+	done string
+	// live is what the change means for sessions already running. Said only when
+	// the running proxy reloaded it: that proxy's pins and history are what hold a
+	// running session where it is, and a proxy that starts later has neither.
+	live string
+	// unchanged is said when there was nothing to write.
+	unchanged string
+	// note, when set, follows any of those: why the router will route nothing
+	// whatever was changed (see routerInactive).
+	note string
+}
+
+// runServerWrite makes one change to the router entry and reports how it landed.
+func runServerWrite(stdout, stderr io.Writer, path, statsURL string, ch edit.ConfigChange, r writeReport) int {
 	res, err := writePluginConfig(context.Background(), edit.ConfigWrite{
 		Path: path, StatsURL: statsURL, Changes: []edit.ConfigChange{ch}, Verify: verifyRouter,
 	})
@@ -313,15 +365,27 @@ func runServerWrite(stdout, stderr io.Writer, path, statsURL string, ch edit.Con
 		fmt.Fprintf(stderr, "agentop server: %v\n", err)
 		return 1
 	}
+	say := func(lines ...string) {
+		for _, l := range lines {
+			if l != "" {
+				fmt.Fprintln(stdout, l)
+			}
+		}
+	}
 	shown := homeTilde(path)
 	switch res.Outcome {
 	case edit.WriteUnchanged:
-		fmt.Fprintln(stdout, unchanged)
+		say(r.unchanged, r.note)
 	case edit.WriteReloaded:
-		fmt.Fprintln(stdout, done)
+		say(r.done, r.live, r.note)
 	case edit.WriteNotRunning:
-		fmt.Fprintln(stdout, done)
-		fmt.Fprintf(stdout, "Written to %s. No Cortex answered at its stats address, so this applies when the proxy next starts.\n", shown)
+		next := fmt.Sprintf("Written to %s. No Cortex answered at its stats address, so this applies when the proxy next starts.", shown)
+		if r.live != "" {
+			// Not r.live: a proxy that starts holds no pins and no history.
+			next += " A proxy that starts knows where no session is, so it treats every session it sees as a new one, " +
+				"the ones running now included."
+		}
+		say(r.done, next, r.note)
 	case edit.WriteReloadFailed:
 		// WritePluginConfig has put the file back, so it does not hold the change;
 		// saying it was written would send the user looking for an edit that is not

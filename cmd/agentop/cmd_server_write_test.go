@@ -287,7 +287,10 @@ func TestServerRemove_NamesTheServersThatExist(t *testing.T) {
 func TestServerUse_RoutesTheAgentsNewSessions(t *testing.T) {
 	path := serverEnv(t, newFakeStats(t, 0).addr(), routerBlock)
 	code, out, errOut := runServerCmd(t, "", "use", "ete", "--agent", "opencode", "--config", path)
-	if code != 0 || !strings.Contains(out, "New opencode sessions → ete. Sessions already running stay where they are.") {
+	// A running session stays because the proxy holds its pin or the request its
+	// history records, both of which it has only for sessions seen since it started.
+	if code != 0 || out != "New opencode sessions → ete.\nSessions already running stay where they are, except one that has "+
+		"sent nothing since the proxy last started, which is treated as a new one.\n" {
 		t.Fatalf("exit %d, stdout:\n%s%s", code, out, errOut)
 	}
 	if !strings.Contains(readConfig(t, path), "            claude-code: glm\n            opencode: ete\n") {
@@ -432,5 +435,104 @@ func TestServerWrites_TellAProxyThatStoppedAnsweringFromARefusal(t *testing.T) {
 	if strings.Contains(errOut, "refused") || !strings.Contains(errOut, "stopped answering") ||
 		!strings.Contains(errOut, "was put back as it was") || !strings.Contains(errOut, "is the local proxy still running?") {
 		t.Errorf("stderr:\n%s", errOut)
+	}
+}
+
+// --key-stdin reads the key from stdin as typed, so on a terminal every character
+// of the key would echo. The command refuses before asking anything, and reads and
+// writes nothing.
+func TestServerAdd_RefusesKeyStdinFromATerminal(t *testing.T) {
+	prev := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = prev })
+	path := serverEnv(t, newFakeStats(t, 0).addr(), "")
+	before := readConfig(t, path)
+
+	code, _, errOut := runServerCmd(t, "sk-typed\n", "add", "ete", "https://ete.example.com", "--key-stdin", "--config", path)
+	if code != 1 || !strings.Contains(errOut, "stdin is a terminal") || !strings.Contains(errOut, "Pipe the key in, or drop --key-stdin") {
+		t.Errorf("exit %d, stderr:\n%s", code, errOut)
+	}
+	if readConfig(t, path) != before {
+		t.Error("the config was written")
+	}
+}
+
+// observeRouter is routerBlock with the router's entry under on_error: policy.
+func observeRouter(policy string) string {
+	return strings.Replace(routerBlock, "      - name: inference-router\n",
+		"      - name: inference-router\n        on_error: "+policy+"\n", 1)
+}
+
+// Under on_error: observe the router moves nothing and only records would_route,
+// and under off it does not run: either way nothing is routed, which use, add and
+// the listing must say rather than report a route that will not happen.
+func TestServer_SaysWhenTheRouterCannotRoute(t *testing.T) {
+	for policy, want := range map[string]string{
+		"observe": "on_error: observe, so nothing is routed",
+		"off":     "on_error: off, so it does not run and nothing is routed",
+	} {
+		t.Run(policy, func(t *testing.T) {
+			path := serverEnv(t, newFakeStats(t, 0).addr(), observeRouter(policy))
+			_, out, _ := runServerCmd(t, "", "--config", path)
+			if !strings.Contains(flat(out), "✗ The "+routerName+" entry runs under "+want) {
+				t.Errorf("listing:\n%s", out)
+			}
+			_, out, errOut := runServerCmd(t, "", "use", "ete", "--agent", "opencode", "--config", path)
+			if !strings.Contains(flat(out), want) {
+				t.Errorf("use:\n%s%s", out, errOut)
+			}
+			_, out, errOut = runServerCmd(t, "sk-lan", "add", "lan", "http://127.0.0.1:4000", "--key-stdin", "--config", path)
+			if !strings.Contains(flat(out), want) {
+				t.Errorf("add:\n%s%s", out, errOut)
+			}
+		})
+	}
+	path := serverEnv(t, newFakeStats(t, 0).addr(), observeRouter("enforce"))
+	if _, out, _ := runServerCmd(t, "", "use", "ete", "--agent", "opencode", "--config", path); strings.Contains(out, "on_error") {
+		t.Errorf("enforce named on_error:\n%s", out)
+	}
+}
+
+// The only server, with an agent routed to it, needs two steps to remove, and the
+// refusal names both at once rather than one and then, after it, the other.
+func TestServerRemove_TheOnlyServerWithAnAgentNamesBothSteps(t *testing.T) {
+	only := strings.Replace(routerBlock, `            ete:
+              url: https://ete.example.com
+              key: sk-ete
+`, "", 1)
+	path := serverEnv(t, newFakeStats(t, 0).addr(), only)
+	code, _, errOut := runServerCmd(t, "", "remove", "glm", "--config", path)
+	for _, want := range []string{"glm is the only server", "agentop server reset --agent claude-code", "delete its entry"} {
+		if !strings.Contains(flat(errOut), want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errOut)
+		}
+	}
+	if code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+}
+
+// A proxy that is not running holds no pins and, once started, no history, so it
+// routes every session it then sees as a new one. Written for the next start, the
+// change must not promise that running sessions stay where they are.
+func TestServerWrites_ForTheNextStartPromiseNoRunningSessionStays(t *testing.T) {
+	for _, args := range [][]string{
+		{"use", "ete", "--agent", "opencode"},
+		{"reset", "--agent", "claude-code"},
+		{"remove", "ete"},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			path := serverEnv(t, closedAddr(t), routerBlock)
+			code, out, errOut := runServerCmd(t, "", append(args, "--config", path)...)
+			if code != 0 || !strings.Contains(out, "applies when the proxy next starts") {
+				t.Fatalf("exit %d, stdout:\n%s%s", code, out, errOut)
+			}
+			if strings.Contains(out, "stay where they are") || strings.Contains(out, "now gets an error") {
+				t.Errorf("promises what a restart does not keep:\n%s", out)
+			}
+			if !strings.Contains(flat(out), "treats every session it sees as a new one, the ones running now included") {
+				t.Errorf("does not say what the next start does:\n%s", out)
+			}
+		})
 	}
 }

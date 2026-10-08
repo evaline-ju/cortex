@@ -232,7 +232,7 @@ func TestServer_AnActionAfterAFlagIsRefusedWithTheFix(t *testing.T) {
 }
 
 // The router maps Claude's names, so every place Claude Code takes a model from is
-// checked: the top-level "model" key /model writes, and each model variable,
+// checked: the settings' top-level "model" setting, and each model variable,
 // ANTHROPIC_DEFAULT_FABLE_MODEL among them. Claude's aliases pass wherever they sit.
 func TestServer_ChecksEveryWayClaudeCodePicksAModel(t *testing.T) {
 	for _, tc := range []struct {

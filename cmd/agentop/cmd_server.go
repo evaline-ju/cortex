@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rossoctl/cortex/core/config"
+	"github.com/rossoctl/cortex/core/pipeline"
 	"github.com/rossoctl/cortex/core/plugins/inferencerouter/routerconfig"
 )
 
@@ -39,7 +40,8 @@ that Claude Code's settings let it be routed.
 A server is a gateway, such as LiteLLM, with its own URL and key. Routing is per
 agent and opt-in: until "use" gives an agent a server, its traffic goes wherever
 the agent sends it. A session stays on the server it started on, so a change
-applies to new sessions only.
+applies to new sessions only. A proxy restart forgets where each session is, and
+treats each one it then sees as new.
 
 "add" reads the server's API key at a prompt that does not echo, or from stdin
 with --key-stdin; it is never an argument. Adding a name that exists asks before
@@ -148,6 +150,30 @@ func readRouter(cfg *config.Config) (c routerconfig.Config, present bool, err er
 	return routerconfig.Config{}, false, nil
 }
 
+// routerInactive is why the router entry in cfg routes nothing although it is in
+// the chain, or "" when it routes: its on_error. Under observe the router redirects
+// nothing and records observe/would_route where it would have routed; under off it
+// does not run. Either way a server given to an agent changes no traffic, and a
+// command that said the agent's sessions now go there would be wrong. path is the
+// config file, for the fix.
+func routerInactive(cfg *config.Config, path string) string {
+	for _, e := range cfg.Pipeline.Outbound.Plugins {
+		if e.Name != routerName {
+			continue
+		}
+		fix := fmt.Sprintf("Remove on_error from the entry in %s, or set it to enforce, to route.", homeTilde(path))
+		switch e.OnError.Resolved() {
+		case pipeline.ErrorPolicyObserve:
+			return fmt.Sprintf("The %s entry runs under on_error: observe, so nothing is routed: a request it would "+
+				"route is only recorded, as observe/would_route. %s", routerName, fix)
+		case pipeline.ErrorPolicyOff:
+			return fmt.Sprintf("The %s entry runs under on_error: off, so it does not run and nothing is routed. %s", routerName, fix)
+		}
+		return ""
+	}
+	return ""
+}
+
 // agentsOn lists the agents routed to server, sorted.
 func agentsOn(c routerconfig.Config, server string) []string {
 	var out []string
@@ -171,7 +197,7 @@ func serverList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agentop server: unexpected argument %q; the action comes first: agentop server <action> [flags]\n", pos[0])
 		return 2
 	}
-	cfg, _, _, err := serverTarget(*cfgPath)
+	cfg, path, _, err := serverTarget(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "agentop server: %v\n", err)
 		return 1
@@ -203,6 +229,10 @@ func serverList(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout)
 
+	// First: while it holds, the checks below change nothing.
+	if why := routerInactive(cfg, path); why != "" {
+		printCheck(stdout, false, why)
+	}
 	for _, ck := range claudeCodeChecksAtHome(c) {
 		printCheck(stdout, ck.ok, ck.text)
 	}
