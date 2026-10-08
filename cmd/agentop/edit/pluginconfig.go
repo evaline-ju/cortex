@@ -64,6 +64,21 @@ func SetPluginConfig(src []byte, ch ConfigChange) ([]byte, error) {
 	if len(ch.Path) == 0 {
 		return nil, errors.New("edit: a config change needs at least one key")
 	}
+	// Reject src containing line separators the YAML parser counts but strings.Split
+	// Reject src containing line separators the YAML parser counts but strings.Split
+	// would not: U+0085 (NEL), U+2028 (LS), U+2029 (PS), or \r not in \r\n pair.
+	// The parser's yaml.Node.Line disagrees with split line counts when these occur,
+	// causing later edits to land on wrong lines.
+	srcStr := string(src)
+	// Check for U+0085, or the UTF-8 sequences for U+2028 (\xe2\x80\xa8) and U+2029 (\xe2\x80\xa9)
+	if strings.ContainsAny(srcStr, "\x85") || strings.Contains(srcStr, "\xe2\x80\xa8") || strings.Contains(srcStr, "\xe2\x80\xa9") {
+		return nil, errors.New("source contains a line separator the YAML parser counts; editing would lose accuracy")
+	}
+	for i := 0; i < len(srcStr); i++ {
+		if srcStr[i] == '\r' && (i+1 >= len(srcStr) || srcStr[i+1] != '\n') {
+			return nil, errors.New("source contains a bare carriage return; editing would lose accuracy")
+		}
+	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(src, &doc); err != nil {
 		return nil, fmt.Errorf("reading the config's structure: %w", err)
@@ -71,7 +86,7 @@ func SetPluginConfig(src []byte, ch ConfigChange) ([]byte, error) {
 	if len(doc.Content) == 0 || !blockMapping(doc.Content[0]) {
 		return nil, errors.New("the config is not an indented mapping; not editing it")
 	}
-	lines := strings.Split(string(src), "\n")
+	lines := strings.Split(srcStr, "\n")
 
 	plugins, err := chainPlugins(doc.Content[0], ch)
 	if err != nil {
@@ -286,7 +301,10 @@ func renderKey(key string, value *yaml.Node, indent int) ([]string, error) {
 // scalarText is s as a one-line YAML string, quoted only when it has to be. The
 // error never repeats s: the values written here include API keys.
 func scalarText(s string) (string, error) {
-	if strings.ContainsAny(s, "\r\n") {
+	// Reject line breaks: \r, \n, and the three separators the YAML parser counts
+	// as line breaks (U+0085/NEL, U+2028/LS, U+2029/PS). The parser's line numbers
+	// would disagree with strings.Split line counts, causing later edits to land wrong.
+	if strings.ContainsAny(s, "\x85\r\n") || strings.Contains(s, "\xe2\x80\xa8") || strings.Contains(s, "\xe2\x80\xa9") {
 		return "", errors.New("edit: a value with a line break cannot be written on one line")
 	}
 	b, err := yaml.Marshal(ScalarValue(s))
@@ -386,10 +404,3 @@ func splice(lines []string, from, to int, add []string) []string {
 func indentOf(line string) int { return len(line) - len(strings.TrimLeft(line, " ")) }
 
 func pad(n int) string { return strings.Repeat(" ", n) }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
