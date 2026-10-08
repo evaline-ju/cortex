@@ -636,10 +636,12 @@ func (c *Context) DenyAndRecord(reason, code, message string) Action {
 // bytes on the wire.
 //
 // It reports whether THIS write took effect. True means pctx.Body is now
-// newBody: the bytes the listener sends, or the bytes a later writer starts
-// from and may rewrite in turn. False means
-// pctx.Body is unchanged: the calling plugin runs under on_error: observe, so
-// this was a shadow write, or the call was dropped in OnFinish. A writer that
+// newBody. From OnRequest those are the bytes the listener sends, or the bytes
+// a later writer starts from and may rewrite in turn; from OnResponse the
+// request has already been sent, so they replace pctx.Body and go nowhere.
+// False means pctx.Body is unchanged: the calling plugin runs under
+// on_error: observe, so this was a shadow write, or the call was dropped in
+// OnFinish. A writer that
 // reports or counts its own outcome — applied or only measured — reads this
 // result, never BodyMutated(): that one answers for the request, so after an
 // earlier writer's bytes took effect it says true for a shadow write too.
@@ -697,7 +699,9 @@ func (c *Context) SetBody(newBody []byte) bool {
 // response body is untouched and the Invocation is marked Shadow=true.
 //
 // It reports whether this write took effect, as SetBody does: true when
-// pctx.ResponseBody is now newBody and the client gets it, false for a shadow
+// pctx.ResponseBody is now newBody — which the client gets when the call
+// comes from OnResponse, since the listener fills ResponseBody from the
+// upstream only after the request pass — false for a shadow
 // write under on_error: observe or a call dropped in OnFinish.
 // ResponseBodyMutated() answers for the response, not for the caller.
 //

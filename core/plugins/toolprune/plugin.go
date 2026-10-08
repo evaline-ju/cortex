@@ -489,8 +489,9 @@ type requestState struct{ bytesRemoved int }
 //
 // Two things make a single "tokens saved" number wrong, which is why this is
 // per-tier. First, the ratio: rather than bundling a tokenizer or assuming
-// bytes-per-token, it is calibrated on this request — prompt tokens over request
-// bytes, both post-pruning, so the two sides are consistent. Second, and larger:
+// bytes-per-token, it is calibrated on this request — prompt tokens over the
+// bytes of the body actually sent, after every request writer, this one and any
+// that follows it, so the two sides describe the same request. Second, and larger:
 // providers price prompt tiers very differently. Anthropic charges 1.25x the
 // input rate for a cache write and 0.1x for a cache read, so identical saved
 // bytes are worth more than 12x more on a cache miss than on a hit. Reporting
