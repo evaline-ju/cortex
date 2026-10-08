@@ -860,7 +860,11 @@ in `Details`. Under `on_error: observe` nothing moves and the record is a shadow
   moves while header writes still apply, so a plugin that attaches credentials
   meant for the target must do so only when the request actually goes there:
   check `pctx.Redirected()` after the call, as above — it stays false under
-  observe and on a refusal — or compare `pctx.Host` with the target. Otherwise
+  observe and on a refusal. Redirected is the only safe gate. pctx.Host names
+  what the client asked for, and on a TLS-bridged request is the client's own
+  Host header, which need not match the address the proxy dials. A plugin that
+  attaches credentials meant for a server should always Redirect to that server,
+  even when pctx.Host already names it, so the request is dialed there. Otherwise
   the target's key goes to the host the client named.
 - **It does not re-run earlier plugins.** Plugins before the redirecting one in
   the chain made their decisions on the requested host.

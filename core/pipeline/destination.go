@@ -50,9 +50,12 @@ func (c *Context) Redirectable() bool { return c.redirectable }
 // observe nothing moves while those still apply, so a plugin that attaches
 // credentials meant for the target must do so only when the request actually goes
 // there — check Redirected after the call, which stays false under observe and on a
-// refusal, or compare Host with the target — or the target's key goes to the host the
-// client named. Plugins earlier in the chain made their decisions on the requested
-// host and are not run again.
+// refusal. Redirected is the only safe gate: pctx.Host names what the client asked for
+// and, on a TLS-bridged request, is the client's own Host header, which need not match
+// the address the proxy dials. A plugin that attaches credentials meant for a server
+// should always Redirect to that server, even when pctx.Host already names it, so the
+// request is dialed there. Plugins earlier in the chain made their decisions on the
+// requested host and are not run again.
 //
 // Refused, with nothing changed and nothing recorded, when the calling plugin does
 // not declare WritesDestination, when the listener did not mark the context
@@ -97,11 +100,13 @@ func (c *Context) Redirect(target *url.URL) error {
 // that changed only the scheme, or that pointed back at the host the client named,
 // still has to be applied.
 //
-// It is also the gate for a plugin that attaches credentials meant for the target.
-// The request's headers go wherever the request goes, and Redirect returns nil under
-// on_error: observe without moving anything, so a key set on the strength of that nil
-// alone would reach the host the client named. Redirected stays false under observe
-// and after a refusal.
+// It is also the only safe gate for a plugin that attaches credentials meant for the
+// target. The request's headers go wherever the request goes, and Redirect returns nil
+// under on_error: observe without moving anything, so a key set on the strength of that
+// nil alone would reach the host the client named. Redirected stays false under observe
+// and after a refusal. Comparing pctx.Host with the target is unsafe: on a TLS-bridged
+// request, pctx.Host is the client's own Host header, not necessarily the address the
+// proxy will dial.
 func (c *Context) Redirected() bool { return c.redirected }
 
 // RedirectTarget is the scheme and host the last accepted Redirect validated, with ok
