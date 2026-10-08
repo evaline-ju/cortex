@@ -185,7 +185,10 @@ func main() {
 		// live traffic priced from a config that was refused. Plugins only store the
 		// resolver during Configure and never resolve through it, so building against
 		// the old table is safe.
-		deps := plugins.Deps{SPIFFE: provider, Pricing: pricingRegistry}
+		// ext_proc answers Envoy with header and body mutations only, so it honors no
+		// redirect on either chain; a WritesDestination plugin fails the build here
+		// instead of recording redirects that never happen.
+		deps := plugins.Deps{SPIFFE: provider, Pricing: pricingRegistry, Listener: extproc.Support()}
 		in, err := plugins.BuildWithDeps(c.Pipeline.Inbound.Plugins, deps)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("inbound: %w", err)
