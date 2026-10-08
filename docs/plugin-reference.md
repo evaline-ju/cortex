@@ -825,23 +825,45 @@ if pctx.Redirectable() {
     if err := pctx.Redirect(&url.URL{Scheme: "https", Host: "glm-litellm.example.com"}); err != nil {
         return pctx.DenyAndRecord("redirect_failed", "router.redirect", err.Error())
     }
+    // Only when the request really goes there: under on_error: observe, Redirect
+    // returns nil and moves nothing, but this header write would still apply.
+    if pctx.Redirected() {
+        pctx.Headers.Set("Authorization", "Bearer "+glmKey)
+    }
 }
 ```
 
 | Call | Effect |
 |---|---|
-| `pctx.Redirect(target)` | Sends the request to `target`'s scheme and host. `target` carries nothing else — no user info, path, query or fragment. |
-| `pctx.Redirectable()` | Whether the listener will honor a redirect on this request. False on a `CONNECT` and on a transparently redirected connection, which are dialed where the client chose. |
-| `pctx.Redirected()` | Whether a redirect took effect. Listeners act on it. |
+| `pctx.Redirect(target)` | Sends the request to `target`'s scheme and host. `target` carries nothing else — no user info, no path beyond `/`, no query, no fragment. |
+| `pctx.Redirectable()` | Whether the listener will honor a redirect on this request. False on a `CONNECT` and on a transparently redirected connection, which are dialed where the client chose. True on the TLS-bridged requests decrypted from either, which the forward proxy re-originates — that is how HTTPS inference traffic arrives. |
+| `pctx.Redirected()` | Whether a redirect took effect. False under `on_error: observe` and after a refusal. |
+| `pctx.RedirectTarget()` | The scheme and host the last accepted redirect validated, and whether there was one. Listeners apply this. |
 | `pctx.RequestedHost()` | The host the client named, or `""` unless the request now goes elsewhere. |
 
 **`pctx.Host` follows the redirect.** The session events, usage, the cost ledger
 and modelled pricing all key on it, so they describe where the bytes went. A
 plugin that runs after the redirect and keys on the host sees the new one. Each
-session event records the requested host beside it as `requestedHost`.
+session event records the requested host beside it as `requestedHost`. Writing
+`pctx.Host` does not move a request: the listener applies `RedirectTarget`, the
+copy `Redirect` validated, and resets `pctx.Host` to match before recording.
 
 The framework records every redirect as `modify/redirected` with `from` and `to`
 in `Details`. Under `on_error: observe` nothing moves and the record is a shadow.
+
+**What a redirect does not do.**
+
+- **It does not touch the headers.** The client's headers — credentials
+  included — go to the new host unchanged. A plugin that must not forward them
+  removes or replaces them itself.
+- **It does not gate your header writes.** Under `on_error: observe` nothing
+  moves while header writes still apply, so a plugin that attaches credentials
+  meant for the target must do so only when the request actually goes there:
+  check `pctx.Redirected()` after the call, as above — it stays false under
+  observe and on a refusal — or compare `pctx.Host` with the target. Otherwise
+  the target's key goes to the host the client named.
+- **It does not re-run earlier plugins.** Plugins before the redirecting one in
+  the chain made their decisions on the requested host.
 
 `Redirect` is refused, with nothing changed, from a plugin that did not declare
 the capability, outside `OnRequest`, for a malformed target, and on a context the
@@ -854,9 +876,9 @@ package supplies:
 
 | Listener | Honors a redirect |
 |---|---|
-| forward proxy (`cortex`, `cortex-cpex`) | yes, unless `mtls:` is configured |
-| reverse proxy (every inbound chain) | no |
-| ext_proc (`cortex-envoy`) | no |
+| forward proxy — the outbound chain in `cortex` and `cortex-cpex` | yes, unless `mtls:` is configured |
+| reverse proxy — the inbound chain in `cortex` and `cortex-cpex` | no |
+| ext_proc — both chains in `cortex-envoy` | no |
 
 A capability some listener cannot honor is added the same way: a field on
 `pipeline.ListenerSupport`, a case in its `Unsupported`, and each listener's

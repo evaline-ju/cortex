@@ -771,7 +771,7 @@ curl http://localhost:9093/config               # now-active config
 | `listener.*` (ports) | ❌ | Bound sockets; refuse reload |
 | `session.*` (TTL, MaxEvents, MaxSessions, ID headers) | ❌ | Every consumer reads the block once at startup — `session.New(...)` in each `cmd` main, `forwardproxy.Server.SessionIDHeaders` assigned before `ListenAndServe`. There is no live object to reach; refuse reload |
 | `cost_ledger.*` (`enabled`, `dir`, `retention_days`) | ❌ | The ledger is a `*ledger.Writer` opened once at startup and handed to the session store as a `Recorder`. Refuse reload |
-| `mtls.*` (`mode`, cert paths) | ❌ | The forward proxy's mTLS dialer and the inbound TLS listener are built once at startup, and the outbound chain is built for `forwardproxy.Support` of that state; refuse reload |
+| `mtls.*` (the block's presence and `mode`, the only field it carries) | ❌ | The inbound TLS listener and, under `strict`, the forward proxy's mTLS dialer are built once at startup, and the outbound chain is built for `forwardproxy.Support` of that state; refuse reload. Legacy `cert_file` / `key_file` / `bundle_file` keys are dropped at load, so an edit to them is neither applied nor refused |
 
 **Why `session.*` and `cost_ledger.*` are refused rather than "reloaded but ineffective".**
 Both used to be accepted: the reload succeeded, `ReloadsOK` incremented,

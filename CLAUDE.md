@@ -684,15 +684,20 @@ can talk to this authbridge. Per-caller policy / SPIFFE allowlists are
 out of scope; the trust bundle IS the policy. Plugins that want
 per-caller decisions read `pctx.PeerCert` and check the URI SAN.
 
-**Hot-reload boundary:** mTLS config (`mtls.mode`, cert paths) requires a
-pod restart to apply, matching the existing rule for `listener.*`
-addresses. A reload that changes the `mtls` block in any way — adding it,
-removing it, or editing a field — is refused rather than half-applied: the
-active pipeline keeps serving, `reloads_failed` increments, and
-`/reload/status` names `mtls.*` among the fields that need a restart. The
-forward proxy's mTLS dialer is built once at boot, so no reload can reach it;
-refusing the change is also what keeps the outbound chain's redirect check
-(`forwardproxy.Support`) describing the dialer that actually runs.
+**Hot-reload boundary:** mTLS config requires a pod restart to apply,
+matching the existing rule for `listener.*` addresses. A reload that adds the
+`mtls` block, removes it, or changes `mtls.mode` — the only field the block
+carries — is refused rather than half-applied: the active pipeline keeps
+serving, `reloads_failed` increments, and `/reload/status` names `mtls.*`
+among the fields that need a restart. Legacy `cert_file` / `key_file` /
+`bundle_file` keys are dropped at load, so editing them is neither applied nor
+refused. The inbound TLS listener and, under `strict`, the forward proxy's
+mTLS dialer are built once at boot, so no reload can reach them. The outbound
+chain's redirect check (`forwardproxy.Support`) refuses a `WritesDestination`
+plugin whenever an `mtls:` block is configured: under `strict` the dialer
+would nest TLS inside TLS; under `permissive` there is no dialer, so the
+refusal is broader than strictly needed and fails closed. Refusing the reload
+keeps that check matched to the mtls config the listeners were built from.
 Plugin-pipeline config keeps its own hot-reload behavior.
 
 ### envoy-sidecar mTLS

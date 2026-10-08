@@ -45,6 +45,15 @@ func (c *Context) Redirectable() bool { return c.redirectable }
 // records nothing of its own. Under on_error: observe nothing moves and the
 // Invocation is marked Shadow, so plugin code looks the same under enforce and observe.
 //
+// What a redirect does not do. The request's headers — credentials included — go to
+// the new host unchanged. And it does not gate the plugin's own header writes: under
+// observe nothing moves while those still apply, so a plugin that attaches
+// credentials meant for the target must do so only when the request actually goes
+// there — check Redirected after the call, which stays false under observe and on a
+// refusal, or compare Host with the target — or the target's key goes to the host the
+// client named. Plugins earlier in the chain made their decisions on the requested
+// host and are not run again.
+//
 // Refused, with nothing changed and nothing recorded, when the calling plugin does
 // not declare WritesDestination, when the listener did not mark the context
 // redirectable, when the target is malformed, and outside OnRequest.
@@ -87,6 +96,12 @@ func (c *Context) Redirect(target *url.URL) error {
 // RedirectTarget reports. The listener keys on that, not on RequestedHost: a redirect
 // that changed only the scheme, or that pointed back at the host the client named,
 // still has to be applied.
+//
+// It is also the gate for a plugin that attaches credentials meant for the target.
+// The request's headers go wherever the request goes, and Redirect returns nil under
+// on_error: observe without moving anything, so a key set on the strength of that nil
+// alone would reach the host the client named. Redirected stays false under observe
+// and after a refusal.
 func (c *Context) Redirected() bool { return c.redirected }
 
 // RedirectTarget is the scheme and host the last accepted Redirect validated, with ok
