@@ -78,6 +78,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Every commit and tag, so release_notes.sh can find the previous release
+          # by ancestry. blob:none keeps that to commits and trees; the build fetches
+          # the blobs of this one commit only.
+          fetch-depth: 0
+          filter: blob:none
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
@@ -201,6 +207,21 @@ jobs:
           # backticks literal (no shell expansion).
           notes=""
           add() { notes="${notes}${1}"$'\n'; }
+          # The PRs merged since the previous release lead the page: they are what
+          # someone deciding whether to upgrade came for. A failure here costs the
+          # list, not the release. main-latest is skipped; its notes are replaced below.
+          if [ "${TAG}" != "main-latest" ]; then
+            if changes=$(sh scripts/release_notes.sh "${TAG}"); then
+              if [ -n "${changes}" ]; then
+                add "${changes}"
+                add ''
+                add '## Install'
+                add ''
+              fi
+            else
+              echo "::warning::Could not list the changes since the previous release; publishing ${TAG} without them."
+            fi
+          fi
           add 'Prebuilt `agentop` and `cortex` binaries for linux and macOS (amd64/arm64).'
           add ''
           # The rename shipped with no alias, so it has to be said somewhere a v0.7.0

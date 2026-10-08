@@ -256,6 +256,10 @@ PRs must follow **conventional commits** format:
 
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`
 
+The type also decides where the PR appears in the release notes: `feat` under New features,
+`fix` and `perf` under Bug fixes, a `!` before the colon (`feat!:`) under Breaking changes,
+and everything else under a collapsed Other changes.
+
 ## Pull Requests
 
 When submitting a pull request, clear communication is appreciated:
