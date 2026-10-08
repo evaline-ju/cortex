@@ -755,7 +755,7 @@ curl http://localhost:9093/config               # now-active config
 2. Debounce 250 ms so a symlink-swap's REMOVE+CREATE+CHMOD burst fires one reload, not three.
 3. SHA-256 dedup — identical bytes are ignored (mtime-only touches don't trigger rebuilds).
 4. `PipelineBuilder` runs: `config.Load` → mode override → `ApplyPreset` → `Validate` → `plugins.Build`. Any failure records the error in `Status.LastError` and leaves the active pipeline untouched.
-5. Compare the new config to the active one on unreloadable fields (`Mode`, `Listener.*`, `Session.*`, `CostLedger.*`); refuse if they differ (see below).
+5. Compare the new config to the active one on unreloadable fields (`Mode`, `Listener.*`, `Session.*`, `CostLedger.*`, `MTLS.*`); refuse if they differ (see below).
 6. `Start` the new pipelines with a 60 s budget. On Start failure, `Stop` any partially-started pipelines so their goroutines don't leak.
 7. `inboundH.Store(newIn)` + `outboundH.Store(newOut)` — new requests now route to the new pipelines.
 8. Background goroutine: `time.Sleep(drainWindow)` (default 30 s) → `oldPipeline.Stop(ctx)` with a 15 s budget. In-flight requests that already Loaded the old pipeline finish against it.
@@ -771,6 +771,7 @@ curl http://localhost:9093/config               # now-active config
 | `listener.*` (ports) | ❌ | Bound sockets; refuse reload |
 | `session.*` (TTL, MaxEvents, MaxSessions, ID headers) | ❌ | Every consumer reads the block once at startup — `session.New(...)` in each `cmd` main, `forwardproxy.Server.SessionIDHeaders` assigned before `ListenAndServe`. There is no live object to reach; refuse reload |
 | `cost_ledger.*` (`enabled`, `dir`, `retention_days`) | ❌ | The ledger is a `*ledger.Writer` opened once at startup and handed to the session store as a `Recorder`. Refuse reload |
+| `mtls.*` (`mode`, cert paths) | ❌ | The forward proxy's mTLS dialer and the inbound TLS listener are built once at startup, and the outbound chain is built for `forwardproxy.Support` of that state; refuse reload |
 
 **Why `session.*` and `cost_ledger.*` are refused rather than "reloaded but ineffective".**
 Both used to be accepted: the reload succeeded, `ReloadsOK` incremented,
@@ -786,7 +787,7 @@ For the unreloadable cases, `Status.LastError` names the field(s) that changed a
 
 **Validation guarantee: bad YAML never takes the pod down.** Any failure during Load / Validate / Build / Start results in the status being updated and the active pipeline continuing to serve traffic on the previous config. Only a successful end-to-end reload swaps the holders.
 
-**Non-reloadable choices elsewhere.** The in-memory session store, the cost ledger, the stat server, the session API server, and the reloader itself are all process-scoped — they live from startup to shutdown. A change to `session.enabled`, `cost_ledger.enabled`, `stats.address`, `listener.session_api_addr`, or the reloader's own knobs (drain window, debounce) requires a pod restart. `session.*`, `cost_ledger.*` and `listener.*` are refused outright, per the table above; `stats.address` and the reloader's own knobs are read once at construction, so an edit there is simply not seen.
+**Non-reloadable choices elsewhere.** The in-memory session store, the cost ledger, the stat server, the session API server, and the reloader itself are all process-scoped — they live from startup to shutdown. A change to `session.enabled`, `cost_ledger.enabled`, `stats.address`, `listener.session_api_addr`, or the reloader's own knobs (drain window, debounce) requires a pod restart. `session.*`, `cost_ledger.*`, `listener.*` and `mtls.*` are refused outright, per the table above; `stats.address` and the reloader's own knobs are read once at construction, so an edit there is simply not seen.
 
 ---
 
