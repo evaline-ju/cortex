@@ -2,14 +2,18 @@ package forwardproxy
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rossoctl/cortex/core/memstore"
 	"github.com/rossoctl/cortex/core/pipeline"
+	"github.com/rossoctl/cortex/core/plugins/inferenceparser"
 	"github.com/rossoctl/cortex/core/plugins/inferencerouter"
 	"github.com/rossoctl/cortex/core/session"
 )
@@ -115,5 +119,102 @@ func TestConnectBridge_TheRoutersKeyGoesOnlyToItsServer(t *testing.T) {
 	}
 	if !routed {
 		t.Errorf("ete saw %v, want a GET carrying Bearer %s", eteSeen.all(), key)
+	}
+}
+
+// keyOrigin is a plain-http origin that records the Authorization of every request
+// it serves, and answers with its name.
+func keyOrigin(t *testing.T, name string) (*httptest.Server, *seen) {
+	t.Helper()
+	s := &seen{}
+	srv := httptest.NewServer(s.record(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(name))
+	})))
+	t.Cleanup(srv.Close)
+	return srv, s
+}
+
+// The documented first setup, through the listener: a Claude Code session is
+// already talking to ete when the router is first added and claude-code routed to
+// glm, and sends nothing in between. The router has never seen that session, so it
+// holds no pin; the session store's history does, and the next turn stays on ete,
+// with ete's key, rather than moving to glm mid-conversation. A session that starts
+// afterwards goes to glm. Both servers are plain http on loopback, which the router
+// sends to without a TLS bridge; 127.0.0.1 and localhost are two hosts to it.
+func TestForwardProxy_ASessionRunningBeforeRoutingWasConfiguredStaysOnItsServer(t *testing.T) {
+	ete, eteSeen := keyOrigin(t, "FROM-ETE")
+	glm, glmSeen := keyOrigin(t, "FROM-GLM")
+	eteURL := ete.URL
+	glmURL := strings.Replace(glm.URL, "127.0.0.1", "localhost", 1)
+
+	parserOnly, err := pipeline.New([]pipeline.Plugin{inferenceparser.NewInferenceParser()})
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	holder := pipeline.NewHolder(parserOnly)
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	shared := memstore.New()
+	defer shared.Close()
+	srv := &Server{
+		OutboundPipeline: holder,
+		Sessions:         store,
+		Shared:           shared,
+		SessionIDHeaders: []string{session.ClaudeCodeSessionHeader},
+		Client:           http.DefaultClient,
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	turn := func(sessionID string) string {
+		t.Helper()
+		body := `{"model":"claude-opus-5-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+		req, err := http.NewRequest(http.MethodPost, eteURL+"/v1/messages", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "claude-cli/2.1.286 (external, cli)")
+		req.Header.Set("Authorization", "Bearer client-key")
+		req.Header.Set(session.ClaudeCodeSessionHeader, sessionID)
+		resp, err := proxyClient(proxy, nil).Do(req)
+		if err != nil {
+			t.Fatalf("request through the proxy: %v", err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+
+	// Before the router: the session talks to ete with its own key.
+	if got := turn("running"); got != "FROM-ETE" {
+		t.Fatalf("first turn reached %q, want ete", got)
+	}
+
+	// agentop server add ete, add glm, use glm --agent claude-code: one reload.
+	router := inferencerouter.New()
+	if err := router.Configure(json.RawMessage(`{
+		"servers": {"ete": {"url": "` + eteURL + `", "key": "ete-key"}, "glm": {"url": "` + glmURL + `", "key": "glm-key"}},
+		"agents": {"claude-code": "glm"}
+	}`)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	routed, err := pipeline.New([]pipeline.Plugin{inferenceparser.NewInferenceParser(), router})
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	holder.Store(routed)
+
+	if got := turn("running"); got != "FROM-ETE" {
+		t.Errorf("the running session's next turn reached %q, want ete: it moved mid-conversation", got)
+	}
+	if got := turn("fresh"); got != "FROM-GLM" {
+		t.Errorf("a new session reached %q, want glm", got)
+	}
+	if got, want := eteSeen.all(), []string{"POST Bearer client-key", "POST Bearer ete-key"}; !slices.Equal(got, want) {
+		t.Errorf("ete saw %q, want %q: the running session keeps its server and gets that server's key", got, want)
+	}
+	if got, want := glmSeen.all(), []string{"POST Bearer glm-key"}; !slices.Equal(got, want) {
+		t.Errorf("glm saw %q, want only the new session's %q", got, want)
 	}
 }

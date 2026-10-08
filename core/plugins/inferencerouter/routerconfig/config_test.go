@@ -116,23 +116,6 @@ func TestParseURL_Normalises(t *testing.T) {
 	}
 }
 
-func TestNormalHost_DropsOnlyTheSchemesDefaultPort(t *testing.T) {
-	for _, tc := range []struct{ scheme, hostport, want string }{
-		{"https", "ete.example.com", "ete.example.com"},
-		{"https", "ETE.example.com:443", "ete.example.com"},
-		{"http", "localhost:80", "localhost"},
-		{"https", "x.example:80", "x.example:80"},
-		{"http", "x.example:443", "x.example:443"},
-		{"https", "x.example:8443", "x.example:8443"},
-		{"https", "[::1]:443", "[::1]"},
-		{"http", "[::1]:4000", "[::1]:4000"},
-	} {
-		if got := NormalHost(tc.scheme, tc.hostport); got != tc.want {
-			t.Errorf("NormalHost(%q, %q) = %q, want %q", tc.scheme, tc.hostport, got, tc.want)
-		}
-	}
-}
-
 func TestHostname_StripsThePortAndCase(t *testing.T) {
 	for in, want := range map[string]string{
 		"ete.example.com":      "ete.example.com",

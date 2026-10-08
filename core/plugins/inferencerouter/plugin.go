@@ -33,6 +33,27 @@
 // started under observe to a server it never used, and turning enforce on would then
 // move it there mid-conversation, which is the switch the pin exists to prevent.
 //
+// The first request the router sees is not always a session's first. A session
+// already running when routing is first configured, quiet while it was, has no pin,
+// and neither has one whose pin lapsed. The session store's history tells such a
+// session from a new one: on a pin miss for a routed agent, the latest earlier
+// inference request that agent sent in the session decides. One that went to a
+// server's host keeps the session on that server; one that went to any other host
+// leaves it not routed; only a session with no such request is new and goes to its
+// agent's current server. Without this, the documented first setup — add the
+// servers, then route Claude Code — would move every conversation that sent nothing
+// between the router's arrival and the route to the new server on its next turn.
+// Only a non-empty history is evidence: a view is empty for a session the store has
+// recorded nothing of yet. After a restart the store holds nothing from before it,
+// and the pins, which live in memory, are gone too, so a running session's next
+// request then looks new and can move.
+//
+// A pin is its agent's. The session id is the listener's answer, and another
+// agent's request can be filed under it — the ActiveSession fallback with client
+// affinity off, or a header id two clients share. Such a request is decided as if
+// the session were unpinned, from its own agent's history and choice, and leaves the
+// pin alone. Honouring the pin for it would hand it the session's server and key.
+//
 // The listener's synthetic sessions are never pinned: the default bucket, and the
 // pending:<agent> buckets an agent's calls collect in before its session is known.
 // Each holds many conversations rather than one, so a pin would hold every later
@@ -78,7 +99,7 @@ const (
 const (
 	pinNew      = "new"      // this request pinned the session
 	pinExisting = "existing" // the session was already pinned
-	pinNone     = "none"     // nothing was pinned: no session, a synthetic one, no store, or a failed redirect
+	pinNone     = "none"     // nothing was pinned: no session, a synthetic one, no store, a failed redirect, or another agent's pin
 )
 
 // route is one configured server, ready to redirect to.
@@ -95,9 +116,9 @@ func (r route) target() *url.URL {
 
 // Router is the plugin. Built by Configure; the zero value routes nothing.
 type Router struct {
-	servers   map[string]route  // by server name
-	hostnames map[string]bool   // every server's Endpoint.Hostname
-	agents    map[string]string // agent name to server name
+	servers map[string]route  // by server name
+	byHost  map[string]string // every server's Endpoint.Hostname, to its name
+	agents  map[string]string // agent name to server name
 
 	// noStore makes the "pins are off" warning once per instance rather than once
 	// per request.
@@ -135,7 +156,7 @@ func (p *Router) Configure(raw json.RawMessage) error {
 		return fmt.Errorf("inference-router config: %w", err)
 	}
 	servers := make(map[string]route, len(c.Servers))
-	hostnames := make(map[string]bool, len(c.Servers))
+	byHost := make(map[string]string, len(c.Servers)) // one name per host: Decode refuses two servers on one
 	for name, s := range c.Servers {
 		ep, err := routerconfig.ParseURL(s.URL)
 		if err != nil { // Decode already accepted it; kept so a drift between the two fails here
@@ -147,9 +168,9 @@ func (p *Router) Configure(raw json.RawMessage) error {
 				"server", name, "url", ep.URL())
 		}
 		servers[name] = route{endpoint: ep, key: s.Key}
-		hostnames[ep.Hostname] = true
+		byHost[ep.Hostname] = name
 	}
-	p.servers, p.hostnames, p.agents = servers, hostnames, c.Agents
+	p.servers, p.byHost, p.agents = servers, byHost, c.Agents
 	return nil
 }
 
@@ -166,7 +187,7 @@ func (p *Router) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.A
 	}
 	// Every path on a server's host is handled — /v1/messages, count_tokens,
 	// /v1/models — because they all belong to the server the session is on.
-	if !p.hostnames[routerconfig.Hostname(pctx.Host)] {
+	if _, ok := p.byHost[routerconfig.Hostname(pctx.Host)]; !ok {
 		pctx.Skip("not_an_inference_server")
 		return cont
 	}
@@ -223,12 +244,20 @@ func (p *Router) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Act
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
+// pin is a session's pin as the shared store holds it: the agent whose session it
+// is, and the server the session is on, "" for not routed.
+type pin struct {
+	agent  string
+	server string
+}
+
 // pinning is one request's session pin: how it was decided, and for a
 // session's first request where to store the outcome once OnRequest knows it.
 type pinning struct {
 	state string // pinNew, pinExisting or pinNone
 	store pipeline.SharedStore
 	key   string
+	agent string
 }
 
 // settle pins a session on its first request to where that request went: server
@@ -236,7 +265,7 @@ type pinning struct {
 // session already pinned keeps its pin, which serverFor renewed.
 func (pn *pinning) settle(server string) {
 	if pn.state == pinNew {
-		pn.store.Put(pn.key, server, pinTTL)
+		pn.store.Put(pn.key, pin{agent: pn.agent, server: server}, pinTTL)
 	}
 }
 
@@ -251,18 +280,21 @@ func (pn *pinning) forgo() {
 // serverFor is the server the request's session uses, "" for not routed, and the
 // session's pin.
 //
-// A session already pinned uses its pin, "not routed" included, so routing an agent
-// later does not move the sessions it already has running; every request renews the
-// pin. Otherwise the agent's current choice applies, and the pin comes back pinNew
-// for OnRequest to settle by where the request went (see the package doc). Without a
-// session to pin, whether none, a synthetic one or no store, the choice applies and
-// nothing is pinned.
+// A session its agent already pinned uses its pin, "not routed" included, so routing
+// an agent later does not move the sessions it already has running; every request
+// renews the pin. Otherwise the session is decided by unpinned, and the pin comes
+// back pinNew for OnRequest to settle by where the request went (see the package
+// doc) — except when the pin is another agent's, which this request must neither
+// follow nor overwrite, so it comes back pinNone. Without a session to pin, whether
+// none, a synthetic one or no store, the agent's choice applies and nothing is
+// pinned: a synthetic session's history is many conversations', not this one's.
 //
 // Two first requests of one session racing can both miss and both store; they store
 // the same outcome unless a reload lands between them, which is the case the pin
 // cannot rule out and does not need to.
 func (p *Router) serverFor(pctx *pipeline.Context) (string, pinning) {
-	choice := p.agents[agentOf(pctx)]
+	agent := agentOf(pctx)
+	choice := p.agents[agent]
 	if pctx.Session == nil || pctx.Session.ID == "" || synthetic(pctx.Session.ID) {
 		return choice, pinning{state: pinNone}
 	}
@@ -275,12 +307,51 @@ func (p *Router) serverFor(pctx *pipeline.Context) (string, pinning) {
 	}
 	key := pinPrefix + pctx.Session.ID
 	if v, ok := pctx.Shared.Get(key); ok {
-		if s, ok := v.(string); ok {
-			pctx.Shared.Put(key, s, pinTTL)
-			return s, pinning{state: pinExisting}
+		if pn, ok := v.(pin); ok {
+			if pn.agent != agent {
+				return p.unpinned(pctx.Session, agent, choice), pinning{state: pinNone}
+			}
+			pctx.Shared.Put(key, pn, pinTTL)
+			return pn.server, pinning{state: pinExisting}
 		}
 	}
-	return choice, pinning{state: pinNew, store: pctx.Shared, key: key}
+	return p.unpinned(pctx.Session, agent, choice), pinning{state: pinNew, store: pctx.Shared, key: key, agent: agent}
+}
+
+// unpinned is the server for a request in a session its agent holds no pin on: the
+// one the session's history shows it already uses, or for a new session the agent's
+// current choice. An agent that is not routed is left alone, whatever its history.
+func (p *Router) unpinned(s *pipeline.SessionView, agent, choice string) string {
+	if choice == "" {
+		return ""
+	}
+	if server, ok := p.wentTo(s.Events, agent); ok {
+		return server
+	}
+	return choice
+}
+
+// wentTo is the server the latest earlier inference request agent sent in events
+// went to, "" when it went to a host no server has; ok is false when there is no
+// such request, which is what makes a session new.
+//
+// Only an outbound request row a parser read as inference counts. A tunnel row, a
+// count_tokens or a /v1/models request no parser claimed, and a denied request,
+// which went nowhere, say nothing about where the conversation is. Another agent's
+// row says nothing about this agent's conversation, and following it would hand this
+// request that agent's server and key. A row's Host is where the bytes went, the
+// server's host for a routed request, because the listener records it after the
+// redirect.
+func (p *Router) wentTo(events []pipeline.SessionEvent, agent string) (server string, ok bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		e := &events[i]
+		if e.Direction != pipeline.Outbound || e.Phase != pipeline.SessionRequest || e.Inference == nil ||
+			pipeline.AgentName(e.Client.Label()) != agent {
+			continue
+		}
+		return p.byHost[routerconfig.Hostname(e.Host)], true
+	}
+	return "", false
 }
 
 // synthetic reports a session id the listener files traffic under when it knows no

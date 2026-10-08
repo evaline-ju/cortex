@@ -131,14 +131,20 @@ func assertRouted(t *testing.T, pctx *pipeline.Context, host, key string) {
 	}
 }
 
+// pinOf is the server session is pinned to, "" for not routed, and whether it is
+// pinned at all. A pin is its agent's, and every pin these tests make is
+// claude-code's but where a test checks the agent itself.
 func pinOf(t *testing.T, store *memstore.Store, session string) (string, bool) {
 	t.Helper()
 	v, ok := store.Get(pinPrefix + session)
 	if !ok {
 		return "", false
 	}
-	s, _ := v.(string)
-	return s, true
+	pn, ok := v.(pin)
+	if !ok {
+		t.Fatalf("pin for %s is a %T, want a pin", session, v)
+	}
+	return pn.server, true
 }
 
 func TestRouter_IgnoresAHostThatIsNoServer(t *testing.T) {
@@ -296,7 +302,7 @@ func TestRouter_ASessionlessRequestFollowsTheCurrentChoiceUnpinned(t *testing.T)
 
 func TestRouter_APinToARemovedServerIsA503(t *testing.T) {
 	store := newStore(t)
-	store.Put(pinPrefix+"s1", "east", pinTTL)
+	store.Put(pinPrefix+"s1", pin{agent: "claude-code", server: "east"}, pinTTL)
 	p := build(t, routerConfig(`"claude-code": "glm"`))
 	pctx := request(store, eteHost, claudeUA, "s1")
 	a := run(t, p, pctx)
@@ -546,4 +552,170 @@ func TestRouter_IsRefusedWhereTheListenerCannotRedirect(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "WritesDestination") {
 		t.Fatalf("err = %v, want a refusal naming WritesDestination", err)
 	}
+}
+
+// sent is a request row the forward proxy recorded in a session: an outbound
+// inference request from the agent with User-Agent ua, which went to host.
+func sent(host, ua string) pipeline.SessionEvent {
+	return pipeline.SessionEvent{
+		Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: host,
+		Inference: &pipeline.InferenceExtension{Model: "claude-opus-5-5"}, Client: pipeline.ParseUserAgent(ua),
+	}
+}
+
+// withHistory gives pctx's session the events the store recorded before it.
+func withHistory(pctx *pipeline.Context, events ...pipeline.SessionEvent) *pipeline.Context {
+	pctx.Session.Events = events
+	return pctx
+}
+
+// The reviewer's probe. A Claude Code session already running on ete, but quiet
+// while routing was first configured, has no pin: the router never saw it. Its next
+// turn is not a new session's first request, and the store's history says so: it
+// keeps going where it already went, with ete's key, rather than moving to glm in
+// the middle of a conversation.
+func TestRouter_ARunningSessionTheRouterHasNotSeenStaysWhereItWent(t *testing.T) {
+	store := newStore(t)
+	p := build(t, routerConfig(`"claude-code": "glm"`))
+	pctx := withHistory(request(store, eteHost, claudeUA, "running"), sent(eteHost, claudeUA))
+	run(t, p, pctx)
+
+	assertRouted(t, pctx, eteHost, "ete-key")
+	assertRedirectedTo(t, pctx, "https", eteHost)
+	assertRecord(t, pctx, pipeline.ActionModify, "routed", map[string]string{"server": "ete", "pin": pinNew})
+	if v, _ := store.Get(pinPrefix + "running"); v != (pin{agent: "claude-code", server: "ete"}) {
+		t.Errorf("pin = %#v, want claude-code's session pinned to ete", v)
+	}
+
+	// Pinned now: the next request needs no history to stay.
+	next := request(store, eteHost, claudeUA, "running")
+	run(t, p, next)
+	assertRouted(t, next, eteHost, "ete-key")
+	assertRecord(t, next, pipeline.ActionModify, "routed", map[string]string{"server": "ete", "pin": pinExisting})
+}
+
+// A running session whose requests went to a host no server has is pinned as not
+// routed: it was not on any server, and moving it to one now is still a switch.
+func TestRouter_ARunningSessionThatWentToNoServerIsNotRouted(t *testing.T) {
+	store := newStore(t)
+	p := build(t, routerConfig(`"claude-code": "glm"`))
+	pctx := withHistory(request(store, eteHost, claudeUA, "running"), sent("api.anthropic.com", claudeUA))
+	run(t, p, pctx)
+
+	assertUntouched(t, pctx, eteHost)
+	assertRecord(t, pctx, pipeline.ActionSkip, "not_routed", map[string]string{"pin": pinNew})
+
+	next := request(store, eteHost, claudeUA, "running")
+	run(t, p, next)
+	assertUntouched(t, next, eteHost)
+	assertRecord(t, next, pipeline.ActionSkip, "not_routed", map[string]string{"pin": pinExisting})
+}
+
+// Only the latest earlier inference request decides, so a session is held to
+// where it went last.
+func TestRouter_TheLatestEarlierInferenceRequestDecides(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		history []pipeline.SessionEvent
+		want    string // the server's host, or "" for not routed
+	}{
+		{"elsewhere, then ete", []pipeline.SessionEvent{sent("api.anthropic.com", claudeUA), sent(eteHost, claudeUA)}, eteHost},
+		{"ete, then elsewhere", []pipeline.SessionEvent{sent(eteHost, claudeUA), sent("api.anthropic.com", claudeUA)}, ""},
+		{"ete, then glm with its port", []pipeline.SessionEvent{sent(eteHost, claudeUA), sent("GLM.example.com:8443", claudeUA)}, glmHost},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := build(t, routerConfig(`"claude-code": "ete"`))
+			pctx := withHistory(request(newStore(t), eteHost, claudeUA, "running"), tc.history...)
+			run(t, p, pctx)
+			if tc.want == "" {
+				assertUntouched(t, pctx, eteHost)
+				return
+			}
+			assertRedirectedTo(t, pctx, "https", tc.want)
+		})
+	}
+}
+
+// A view can be empty, or hold no inference request, for a session that exists,
+// so only an earlier inference request this agent sent and the proxy sent on is
+// evidence of a running conversation. Each row here is not, and the session is new:
+// it goes to the agent's current server.
+func TestRouter_ASessionWithNoEarlierInferenceRequestIsNew(t *testing.T) {
+	tunnel := pipeline.SessionEvent{Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: eteHost + ":443",
+		Tunnel: true, HTTPMethod: http.MethodConnect, Client: pipeline.ParseUserAgent(claudeUA)}
+	denied := sent(eteHost, claudeUA)
+	denied.Phase = pipeline.SessionDenied
+	response := sent(eteHost, claudeUA)
+	response.Phase = pipeline.SessionResponse
+	inbound := sent(eteHost, claudeUA)
+	inbound.Direction = pipeline.Inbound
+	unparsed := sent(eteHost, claudeUA)
+	unparsed.Inference = nil
+	for _, tc := range []struct {
+		name    string
+		history []pipeline.SessionEvent
+	}{
+		{"no events", nil},
+		{"only the bridged CONNECT's tunnel row", []pipeline.SessionEvent{tunnel}},
+		{"a denied request", []pipeline.SessionEvent{denied}},
+		{"a response row", []pipeline.SessionEvent{response}},
+		{"an inbound request", []pipeline.SessionEvent{inbound}},
+		{"a request no parser read as inference", []pipeline.SessionEvent{unparsed}},
+		{"another agent's inference request", []pipeline.SessionEvent{sent(eteHost, opencodeUA)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := build(t, routerConfig(`"claude-code": "glm"`))
+			pctx := withHistory(request(newStore(t), eteHost, claudeUA, "s1"), tc.history...)
+			run(t, p, pctx)
+			assertRouted(t, pctx, glmHost, "glm-key")
+			assertRecord(t, pctx, pipeline.ActionModify, "routed", map[string]string{"server": "glm", "pin": pinNew})
+		})
+	}
+}
+
+// The history rule is for an agent that is routed. An unlisted agent is left
+// alone whatever its session did.
+func TestRouter_AnUnlistedAgentsHistoryRoutesNothing(t *testing.T) {
+	p := build(t, routerConfig(`"claude-code": "glm"`))
+	pctx := withHistory(request(newStore(t), eteHost, opencodeUA, "s1"), sent(glmHost, opencodeUA))
+	run(t, p, pctx)
+	assertUntouched(t, pctx, eteHost)
+	assertRecord(t, pctx, pipeline.ActionSkip, "not_routed", nil)
+}
+
+// A session id is the listener's answer, and another agent's request can be filed
+// under one: the ActiveSession fallback with client affinity off, or a header id
+// two clients share. A pin is that agent's and holds for it alone. Another agent's
+// request is decided as if the session were unpinned — by its own choice, or left
+// alone when it is not listed — and never takes the session's server or key, nor
+// disturbs its pin.
+func TestRouter_APinHoldsOnlyForTheAgentItWasMadeFor(t *testing.T) {
+	store := newStore(t)
+	p := build(t, routerConfig(`"claude-code": "glm"`))
+	run(t, p, request(store, eteHost, claudeUA, "s1"))
+	history := sent(glmHost, claudeUA) // where claude-code's request went
+
+	unlisted := withHistory(request(store, eteHost, opencodeUA, "s1"), history)
+	run(t, p, unlisted)
+	assertUntouched(t, unlisted, eteHost)
+	assertRecord(t, unlisted, pipeline.ActionSkip, "not_routed", map[string]string{"pin": pinNone})
+
+	both := build(t, routerConfig(`"claude-code": "glm", "opencode": "ete"`))
+	listed := withHistory(request(store, eteHost, opencodeUA, "s1"), history)
+	run(t, both, listed)
+	assertRouted(t, listed, eteHost, "ete-key")
+	assertRecord(t, listed, pipeline.ActionModify, "routed", map[string]string{"server": "ete", "pin": pinNone})
+
+	// A request with no User-Agent is no agent's, and no pin is its.
+	anonymous := withHistory(request(store, eteHost, "", "s1"), history)
+	run(t, both, anonymous)
+	assertUntouched(t, anonymous, eteHost)
+
+	if v, _ := store.Get(pinPrefix + "s1"); v != (pin{agent: "claude-code", server: "glm"}) {
+		t.Errorf("pin = %#v after other agents' requests, want claude-code's glm pin untouched", v)
+	}
+	owner := request(store, eteHost, claudeUA, "s1")
+	run(t, both, owner)
+	assertRouted(t, owner, glmHost, "glm-key")
+	assertRecord(t, owner, pipeline.ActionModify, "routed", map[string]string{"server": "glm", "pin": pinExisting})
 }

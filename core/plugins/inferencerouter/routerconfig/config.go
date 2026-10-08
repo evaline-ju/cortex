@@ -224,13 +224,6 @@ func Hostname(hostport string) string {
 	return h
 }
 
-// NormalHost is a request's host[:port] in Endpoint.Host's form for the request's
-// scheme: lowercased, the default port dropped.
-func NormalHost(scheme, hostport string) string {
-	h, p := splitHost(hostport)
-	return joinHost(h, withoutDefault(scheme, p))
-}
-
 func splitHost(hostport string) (host, port string) {
 	if h, p, err := net.SplitHostPort(hostport); err == nil {
 		return strings.ToLower(h), p
