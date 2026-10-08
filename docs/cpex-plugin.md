@@ -278,10 +278,17 @@ At least one must appear earlier in the chain so the parser has populated
 content. `Pipeline.Build` rejects misordered chains at boot.
 
 cpex also declares `ReadsBody`, `WritesRequestBody` and `WritesResponseBody`.
-Request-body writers chain, so cpex can share a chain with another request
-mutator (`tool-prune`, say), each seeing the body as the one before it left it.
-A second *response* mutator (`sparc`, say) still fails at boot: at most one
-plugin per pipeline rewrites responses.
+Request-body writers chain, so cpex can share a chain with other request
+writers, each seeing the body as the one before it left it. **Place cpex first
+among them.** It builds its replacement from the parsed client messages
+(`pctx.Extensions`), which describe the request as the client sent it, and
+writes it back into the body by position — message text for inference and A2A —
+or, for MCP, replaces the call's arguments or URI whole. After a writer that
+changed those messages, a changed message count is a drift error (fail-closed
+unless `fail_open`), and an edit that kept the count is overwritten with the
+client's text. Writers after cpex start from its output and are unaffected. A
+second *response* mutator (`sparc`, say) still fails at boot: at most one plugin
+per pipeline rewrites responses.
 
 A typical inbound chain:
 

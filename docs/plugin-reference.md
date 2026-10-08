@@ -134,7 +134,9 @@ a `WARN pipeline: plugin would have denied (shadow)` line, and continues
 the pipeline. The request is not blocked. Body-mutation calls
 (`SetBody` / `SetResponseBody`) likewise record a `Shadow: true`
 invocation but do not alter the in-memory body or the wire bytes —
-downstream plugins and the upstream see the original.
+downstream plugins and the upstream see the body as it was — and return
+`false`, so a plugin that reports its own outcome (applied or only
+measured) can tell without knowing its policy.
 
 The upshot: the same plugin binary, dispatched the same way, is safe to
 ship in `observe` for a week while operators watch shadow metrics,
@@ -732,7 +734,8 @@ entry in `pctx.Extensions.Custom` with length delta + sha256
 before/after (never the raw body). With several request mutators there is one
 entry for the chain: `before` is the bytes the client sent, `after` the bytes
 sent upstream, and `plugins` the writers whose writes took effect, in order
-(`plugin` is the last of them).
+(`plugin` is the last of them) — or, while none has, the observed writer whose
+would-be rewrite the entry describes (its invocation carries `shadow: true`).
 
 > For the full lifecycle — per-listener wire behavior, content-encoding
 > policy, ordering rules, body-size limits — see
@@ -778,7 +781,18 @@ nothing about how the response may be relayed.
 - Request mutators **chain**: any number may share a pipeline. They run in
   chain order, each seeing `pctx.Body` as the one before it left it, and the
   listener sends the last one's bytes — so `tool-prune` and `context-guru` run
-  together, and a plugin that changes the model can follow them.
+  together, and a plugin that changes the model can follow them. Two things
+  follow for a writer that may not be first:
+  - **Derive your edit from `pctx.Body`.** The parser extensions
+    (`pctx.Extensions.Inference` and the rest) are not re-parsed after a write:
+    they describe the client's request — apart from the model, which
+    `pctx.SetRequestModel` keeps current — so an edit built from them can undo
+    an earlier writer's rewrite or land on the wrong element.
+  - **Learn whether your own write applied from `SetBody`'s result**, not from
+    `pctx.BodyMutated()`. `BodyMutated()` is request-wide: once any writer's
+    bytes took effect it is true, including for a later writer whose own call
+    was a shadow under `on_error: observe`. A writer that reports a saving as
+    applied or only measured, or counts it, reads its own result.
 - At most **one** response mutator per pipeline. Nothing needs more, and the
   response pass has an ordering gap of its own (below); `New` rejects a second
   with an error naming both plugins. A request mutator and a response mutator
@@ -809,9 +823,10 @@ nothing about how the response may be relayed.
 
 | Call | Effect |
 |---|---|
-| `pctx.SetBody(newBytes)` | Replace request body; flip `BodyMutated()` flag |
-| `pctx.SetResponseBody(newBytes)` | Replace response body; flip `ResponseBodyMutated()` flag |
-| `pctx.BodyMutated()` / `ResponseBodyMutated()` | Read by the listener to decide whether to emit a wire mutation. Plugins normally don't need these. |
+| `pctx.SetBody(newBytes)` | Replace request body; flip `BodyMutated()` flag. Returns whether **this** write took effect: `false` under `on_error: observe` (a shadow write, body unchanged) and in `OnFinish` |
+| `pctx.SetResponseBody(newBytes)` | Replace response body; flip `ResponseBodyMutated()` flag. Returns whether this write took effect, as `SetBody` does |
+| `pctx.BodyMutated()` / `ResponseBodyMutated()` | Read by the listener to decide whether to emit a wire mutation. Request-wide (response-wide): true once **any** writer's bytes took effect, so not a writer's own outcome. Plugins normally don't need these. |
+| `pctx.RewrittenBodyLen()` | The request body's length as the writes that took effect left it — what the listener sends — and whether any did. For a consumer that calibrates on the bytes sent, as settlement does; a shadow write never counts |
 
 Direct assignment (`pctx.Body = newBytes`) still compiles but the
 listener won't propagate it, no Invocation fires, and the mutation

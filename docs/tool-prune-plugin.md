@@ -58,8 +58,10 @@ therefore **resets its counters** — the same as a process restart.
 `on_error: observe` turns the plugin into a projection: it computes exactly what
 it would remove and counts it, while every byte on the wire stays untouched.
 Nothing in the plugin differs between the modes — under observe `SetBody` is a
-no-op on bytes and leaves `BodyMutated()` false, which is how it knows which
-counter to increment.
+no-op on bytes and answers that this write did not take effect, which is how it
+knows which counter to increment. It asks `SetBody`, not `BodyMutated()`: another
+request writer's bytes make that one true while tool-prune's own prune was only
+measured.
 
 Two occasions worth it:
 
@@ -143,8 +145,9 @@ alternates shows both rows, and the honest headline is a range rather than a
 point.
 
 The bytes-to-tokens ratio is calibrated on your own traffic — prompt tokens over
-request bytes for the same request, both post-pruning so the two sides agree —
-rather than bundling a tokenizer or assuming a constant.
+request bytes for the same request, both counted on the body actually sent so
+the two sides agree (after every request writer, not just tool-prune) — rather
+than bundling a tokenizer or assuming a constant.
 
 ### The figure is gross, not net
 
