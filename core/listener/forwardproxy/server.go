@@ -420,6 +420,22 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, tl *tunne
 	if !skipped {
 		action := s.OutboundPipeline.Run(r.Context(), pctx)
 
+		// Send the request where the pipeline pointed it, before any row is recorded,
+		// so the row names the host the bytes went to. The target comes from
+		// RedirectTarget, the copy Redirect validated, never from pctx.Scheme and
+		// pctx.Host: those are exported, and a later plugin that never declared
+		// WritesDestination could otherwise steer a redirected request. They are
+		// re-asserted to the same values so the request row, the denied row and the
+		// redirect record all agree with the dial. r.URL.Host carries the dial target,
+		// SNI and certificate check, and r.Host the Host header: they move together,
+		// or the upstream sees one host while the transport dials another. The client
+		// choice below does not change — a bridged request still goes through the
+		// bridge's upstream client, which now verifies the new host.
+		if scheme, host, ok := pctx.RedirectTarget(); ok {
+			pctx.Scheme, pctx.Host = scheme, host
+			r.URL.Scheme, r.URL.Host, r.Host = scheme, host, host
+		}
+
 		if action.Type == pipeline.Reject {
 			s.recordOutboundRejectIn(tl, pctx, action, s.recordingSessionID(sessionID, r.Header, chain))
 			// Render as a JSON-RPC error frame when the rejected
@@ -429,18 +445,6 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, tl *tunne
 			// rejection for non-MCP traffic.
 			httpx.WriteRejectionForRequest(w, action, pctx)
 			return
-		}
-
-		// Send the request where the pipeline pointed it, before the request row is
-		// recorded, so the row names the host the bytes went to. r.URL.Host carries the
-		// dial target, SNI and certificate check, and r.Host the Host header: they move
-		// together, or the upstream sees one host while the transport dials another.
-		// The client choice below does not change — a bridged request still goes
-		// through the bridge's upstream client, which now verifies the new host.
-		if pctx.Redirected() {
-			r.URL.Scheme = pctx.Scheme
-			r.URL.Host = pctx.Host
-			r.Host = pctx.Host
 		}
 	}
 

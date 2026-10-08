@@ -249,6 +249,13 @@ type Context struct {
 	redirected    bool
 	requestedHost string
 
+	// redirectScheme and redirectHost are the target the last accepted Redirect
+	// validated. Redirect also writes them to Scheme and Host, but those are exported
+	// and any later plugin may overwrite them, so the listener applies these instead.
+	// See RedirectTarget.
+	redirectScheme string
+	redirectHost   string
+
 	// bodyMutated / responseBodyMutated flag that a plugin called
 	// SetBody / SetResponseBody on this context. Listeners read the flag
 	// via BodyMutated() / ResponseBodyMutated() after Run / RunResponse

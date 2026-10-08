@@ -72,6 +72,22 @@ func (denyPlugin) OnResponse(context.Context, *pipeline.Context) pipeline.Action
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
+// hostWriter writes pctx.Host without declaring WritesDestination, as any plugin can:
+// the field is exported. It must not be able to move a request.
+type hostWriter struct{ host string }
+
+func (hostWriter) Name() string { return "host-writer" }
+func (hostWriter) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{Description: "test"}
+}
+func (w hostWriter) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	pctx.Host = w.host
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (hostWriter) OnResponse(context.Context, *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
 // origin is an httptest server that answers every request with its name and records
 // the Host header and path of each GET. HEADs — the TLS bridge's upstream probe —
 // are answered and not recorded.
@@ -269,6 +285,44 @@ func TestForwardProxy_RedirectSendsAPlainRequestToTheTarget(t *testing.T) {
 		if ev.Host != b.authority() || ev.RequestedHost != a.authority() {
 			t.Errorf("%s row: host %q requested %q, want %q and %q", ev.Phase, ev.Host, ev.RequestedHost, b.authority(), a.authority())
 		}
+	}
+}
+
+// The listener applies the target Redirect validated, not the exported Host a later,
+// undeclared plugin wrote; and the request row names where the bytes went.
+func TestForwardProxy_ALaterHostWriteDoesNotSteerARedirect(t *testing.T) {
+	a := newOrigin(t, "FROM-A", (*httptest.Server).Start)
+	b := newOrigin(t, "FROM-B", (*httptest.Server).Start)
+	c := newOrigin(t, "FROM-C", (*httptest.Server).Start)
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	proxy := newRedirectProxy(t, store, nil, &redirectPlugin{target: b.URL}, hostWriter{host: c.authority()})
+
+	resp, err := proxyClient(proxy, nil).Get(a.URL + "/x")
+	if err != nil {
+		t.Fatalf("GET through the proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK || string(body) != "FROM-B" {
+		t.Fatalf("response = %d %q, want 200 FROM-B: only the redirect may choose the host", resp.StatusCode, body)
+	}
+	if hosts, _ := c.gets(); len(hosts) != 0 {
+		t.Errorf("origin c served %v; an undeclared plugin steered the request", hosts)
+	}
+	var found bool
+	for _, ev := range eventsOf(t, store) {
+		if ev.Phase != pipeline.SessionRequest {
+			continue
+		}
+		found = true
+		if ev.Host != b.authority() || ev.RequestedHost != a.authority() {
+			t.Errorf("request row: host %q requested %q, want %q and %q", ev.Host, ev.RequestedHost, b.authority(), a.authority())
+		}
+	}
+	if !found {
+		t.Error("no request row")
 	}
 }
 

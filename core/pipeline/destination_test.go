@@ -138,6 +138,9 @@ func assertUntouched(t *testing.T, pctx *Context) {
 	if pctx.Redirected() || pctx.RequestedHost() != "" {
 		t.Errorf("Redirected() = %v, RequestedHost() = %q; want false and empty", pctx.Redirected(), pctx.RequestedHost())
 	}
+	if scheme, host, ok := pctx.RedirectTarget(); ok || scheme != "" || host != "" {
+		t.Errorf("RedirectTarget() = %q, %q, %v; want nothing for the listener to apply", scheme, host, ok)
+	}
 }
 
 func TestRedirect_SendsTheRequestToTarget(t *testing.T) {
@@ -190,8 +193,42 @@ func TestRedirect_BackToTheRequestedHostReportsNoRequestedHost(t *testing.T) {
 	if !pctx.Redirected() {
 		t.Error("Redirected() = false; the listener must still apply the final scheme and host")
 	}
+	if scheme, host, ok := pctx.RedirectTarget(); !ok || scheme != "http" || host != "a.example" {
+		t.Errorf("RedirectTarget() = %q, %q, %v; want the final target http, a.example", scheme, host, ok)
+	}
 	if got := pctx.RequestedHost(); got != "" {
 		t.Errorf("RequestedHost() = %q; the request goes where the client asked, so there is nothing to record", got)
+	}
+}
+
+func TestRedirectTarget_NothingToApplyWithoutARedirect(t *testing.T) {
+	_, pctx := runRequest(t, redirector(true, nil), true)
+	assertUntouched(t, pctx)
+}
+
+// Scheme and Host are exported and any later plugin can write them, declared or not.
+// The listener applies RedirectTarget, so such a write must not move the request,
+// and RequestedHost must keep naming the host the client asked for.
+func TestRedirectTarget_IgnoresALaterWriteToTheExportedFields(t *testing.T) {
+	steer := &fnPlugin{
+		name:      "steer",
+		caps:      PluginCapabilities{Description: "test"},
+		onRequest: func(c *Context) { c.Scheme, c.Host = "http", "a.example" },
+	}
+	route := redirector(true, func(c *Context) { _ = c.Redirect(mustURL("https://b.example:8443")) })
+	p, err := New([]Plugin{route, steer})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{Direction: Outbound, Scheme: "http", Host: "a.example"}
+	pctx.MarkRedirectable()
+	p.Run(context.Background(), pctx)
+
+	if scheme, host, ok := pctx.RedirectTarget(); !ok || scheme != "https" || host != "b.example:8443" {
+		t.Errorf("RedirectTarget() = %q, %q, %v; want the validated target https, b.example:8443", scheme, host, ok)
+	}
+	if got := pctx.RequestedHost(); got != "a.example" {
+		t.Errorf("RequestedHost() = %q, want a.example: the request still goes to b.example:8443", got)
 	}
 }
 

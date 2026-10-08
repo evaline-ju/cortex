@@ -35,7 +35,9 @@ func (c *Context) Redirectable() bool { return c.redirectable }
 // the session events, usage, the cost ledger and modelled pricing all key on it, and
 // they must describe where the bytes went. Plugins that run after this one and key on
 // Host see the new host for the same reason. The host the client named stays
-// available as RequestedHost.
+// available as RequestedHost. The validated target is also kept privately, and that
+// copy is what the listener applies (see RedirectTarget): Scheme and Host are any
+// plugin's to write, so a later write to them cannot move the request.
 //
 // The framework records the redirect as a modify/redirected Invocation with "from"
 // and "to" in Details, as SetBody records a body rewrite: a redirect moves the request
@@ -75,22 +77,37 @@ func (c *Context) Redirect(target *url.URL) error {
 		c.requestedHost = c.Host
 		c.redirected = true
 	}
-	c.Scheme = target.Scheme
-	c.Host = target.Host
+	c.redirectScheme, c.redirectHost = target.Scheme, target.Host
+	c.Scheme, c.Host = target.Scheme, target.Host
 	c.Record(Invocation{Action: ActionModify, Reason: "redirected", Details: details})
 	return nil
 }
 
-// Redirected reports whether a Redirect took effect on this request. The listener
-// acts on this, not on RequestedHost: a redirect that changed only the scheme, or
-// that pointed back at the host the client named, still has to be applied.
+// Redirected reports whether a Redirect took effect on this request, and is the ok
+// RedirectTarget reports. The listener keys on that, not on RequestedHost: a redirect
+// that changed only the scheme, or that pointed back at the host the client named,
+// still has to be applied.
 func (c *Context) Redirected() bool { return c.redirected }
+
+// RedirectTarget is the scheme and host the last accepted Redirect validated, with ok
+// exactly when Redirected. Listeners apply this, never the exported Scheme and Host:
+// any plugin may write those, declared or not, so a listener that read them back would
+// let a later plugin steer a redirected request somewhere no WritesDestination plugin
+// chose, and the modify/redirected record would name a host the bytes never went to.
+func (c *Context) RedirectTarget() (scheme, host string, ok bool) {
+	if !c.redirected {
+		return "", "", false
+	}
+	return c.redirectScheme, c.redirectHost, true
+}
 
 // RequestedHost is the host the client named when a redirect sent the request
 // somewhere else, and "" otherwise — including when the redirects ended back at
-// that host. It is what a session event records beside Host.
+// that host. It is what a session event records beside Host. It compares against
+// the target RedirectTarget reports, not the exported Host, so a later write to Host
+// can neither hide a redirect nor invent one.
 func (c *Context) RequestedHost() string {
-	if !c.redirected || strings.EqualFold(c.requestedHost, c.Host) {
+	if !c.redirected || strings.EqualFold(c.requestedHost, c.redirectHost) {
 		return ""
 	}
 	return c.requestedHost
