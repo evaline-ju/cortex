@@ -236,6 +236,19 @@ type Context struct {
 	currentPhase  InvocationPhase
 	currentPolicy ErrorPolicy
 
+	// currentMayRedirect is true while Pipeline.Run dispatches OnRequest into a plugin
+	// that declares WritesDestination — the one dispatch Redirect is accepted from.
+	currentMayRedirect bool
+
+	// redirectable is set by a listener that builds the upstream request from this
+	// context itself, so a redirect can take effect. See MarkRedirectable.
+	redirectable bool
+
+	// redirected says a Redirect took effect; requestedHost is the Host the client
+	// named, remembered by the first one. See Redirect and RequestedHost.
+	redirected    bool
+	requestedHost string
+
 	// bodyMutated / responseBodyMutated flag that a plugin called
 	// SetBody / SetResponseBody on this context. Listeners read the flag
 	// via BodyMutated() / ResponseBodyMutated() after Run / RunResponse
@@ -451,6 +464,7 @@ func (c *Context) clearCurrent() {
 	c.currentPlugin = ""
 	c.currentPhase = ""
 	c.currentPolicy = ""
+	c.currentMayRedirect = false
 }
 
 // RejectingPlugin returns the name of the plugin whose Reject action

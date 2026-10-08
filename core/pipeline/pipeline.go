@@ -26,6 +26,9 @@ type Pipeline struct {
 	plugins       []Plugin
 	policies      []ErrorPolicy
 	finishTimeout time.Duration
+	// redirects[i] is plugins[i]'s WritesDestination, read once at New so Run does
+	// not ask every plugin for its capabilities on every request.
+	redirects []bool
 }
 
 // Option configures pipeline construction.
@@ -78,7 +81,11 @@ func New(plugins []Plugin, opts ...Option) (*Pipeline, error) {
 	if finishTimeout <= 0 {
 		finishTimeout = DefaultFinishTimeout
 	}
-	return &Pipeline{plugins: plugins, policies: policies, finishTimeout: finishTimeout}, nil
+	redirects := make([]bool, len(plugins))
+	for i, plugin := range plugins {
+		redirects[i] = plugin.Capabilities().WritesDestination
+	}
+	return &Pipeline{plugins: plugins, policies: policies, finishTimeout: finishTimeout, redirects: redirects}, nil
 }
 
 // Run executes the request phase of the pipeline sequentially.
@@ -112,6 +119,7 @@ func (p *Pipeline) Run(ctx context.Context, pctx *Context) Action {
 			return Deny("pipeline.cancelled", "request cancelled")
 		}
 		pctx.setCurrent(plugin.Name(), InvocationPhaseRequest, policy)
+		pctx.currentMayRedirect = p.redirectsAt(i)
 		pctx.dispatched = append(pctx.dispatched, i)
 		action := plugin.OnRequest(ctx, pctx)
 		pctx.clearCurrent()
@@ -246,6 +254,12 @@ func (p *Pipeline) policyAt(i int) ErrorPolicy {
 		return p.policies[i].Resolved()
 	}
 	return ErrorPolicyEnforce
+}
+
+// redirectsAt reports whether plugins[i] declares WritesDestination. Bounds-safe,
+// like policyAt, so a Pipeline not built by New never panics.
+func (p *Pipeline) redirectsAt(i int) bool {
+	return i < len(p.redirects) && p.redirects[i]
 }
 
 // markShadowAndLog records the would-have-denied Invocation as
