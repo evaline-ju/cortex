@@ -243,12 +243,14 @@ transparently redirected connection is dialed where the client chose, and is
   `modify/model_rewritten` between `modify/redirected` and `modify/routed`, and the
   inference record's `model` becomes the server's, with `requestedModel` keeping
   Claude Code's: settlement prices the server's model, and agentop's detail pane
-  shows both. A name of another family — `claude-fable-5-1` picked with `/model`,
-  say — or of none, or of two, is `deny/no_model_for_family` with the requested
-  name as `model`, a 400 saying `glm has no model for claude-fable-5-1`. Nothing is
-  guessed, and that includes a name that is already one of the server's own
-  models. A body that names a model the rewrite cannot read — an empty one, one
-  that is not a string, or `model` named twice or only in another letter case — is
+  shows both. A name that is exactly one of the server's own three models — one
+  picked from its model list with `/model`, say — goes as it is, unmapped, since
+  that is what the server serves; this is checked before the family. Any other
+  name without exactly one family word — `claude-fable-5-1`, say, or one naming
+  two — is `deny/no_model_for_family` with the requested name as `model`, a 400
+  saying `glm has no model for claude-fable-5-1`. Nothing is guessed. A body that
+  names a model the rewrite cannot read — an empty one, one that is not a string,
+  or `model` named twice or only in another letter case — is
   `deny/model_rewrite_failed`, a 400 too, since the fix is the client's. A refused
   request carries no server key, and a session whose first request is refused pins
   nothing. A request whose body names no model — `GET /v1/models`, a body that is

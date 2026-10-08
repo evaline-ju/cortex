@@ -123,10 +123,9 @@ func TestRouter_MapsEachFamilyToItsServersModel(t *testing.T) {
 
 // A family the server has no model for — one picked with /model, say — is
 // refused, not guessed, and the server's key never goes on the request. So is a
-// name with no family at all, the server's own model included: the mapping is
-// from Claude Code's names, and nothing is passed through on a guess.
+// name with no one family that is not one of the server's own models either.
 func TestRouter_RefusesAFamilyTheServerHasNoModelFor(t *testing.T) {
-	for _, requested := range []string{"claude-fable-5-1", "glm-big", "claude-opus-haiku"} {
+	for _, requested := range []string{"claude-fable-5-1", "glm-other", "claude-opus-haiku"} {
 		t.Run(requested, func(t *testing.T) {
 			store := newStore(t)
 			p := build(t, mappedConfig(`"claude-code": "glm"`))
@@ -138,6 +137,54 @@ func TestRouter_RefusesAFamilyTheServerHasNoModelFor(t *testing.T) {
 				map[string]string{"server": "glm", "pin": pinNone, "model": requested})
 			assertNotSent(t, pctx, store, messagesBody(requested))
 		})
+	}
+}
+
+// A name that is exactly one of the server's own models — one picked from the
+// server's model list with /model, say — is what the server serves, and goes as it
+// is: mapped, it could only become itself or a model nobody chose.
+func TestRouter_PassesTheServersOwnModelsThrough(t *testing.T) {
+	for _, requested := range []string{"glm-big", "glm-mid", "glm-small"} {
+		t.Run(requested, func(t *testing.T) {
+			p := build(t, mappedConfig(`"claude-code": "glm"`))
+			pctx := withModel(request(newStore(t), eteHost, claudeUA, "s1"), requested)
+			if a := run(t, p, pctx); a.Type != pipeline.Continue {
+				t.Fatalf("action = %+v, want Continue", a)
+			}
+			assertRouted(t, pctx, glmHost, "glm-key")
+			assertOwnModelUntouched(t, pctx, requested)
+		})
+	}
+}
+
+// The own-model check comes before the family: a server whose haiku model has
+// another family's word in its name gets that name as it is, not mapped to the
+// model of the family the word names.
+func TestRouter_AnOwnModelNamingAnotherFamilyIsNotMapped(t *testing.T) {
+	p := build(t, `{"servers": {
+		"ete": {"url": "https://ete.example.com", "key": "ete-key"},
+		"glm": {"url": "https://glm.example.com:8443", "key": "glm-key",
+		        "opus": "glm-big", "sonnet": "glm-mid", "haiku": "fast-sonnet"}},
+		"agents": {"claude-code": "glm"}}`)
+	pctx := withModel(request(newStore(t), eteHost, claudeUA, "s1"), "fast-sonnet")
+	run(t, p, pctx)
+
+	assertRouted(t, pctx, glmHost, "glm-key")
+	assertOwnModelUntouched(t, pctx, "fast-sonnet")
+}
+
+// assertOwnModelUntouched fails unless pctx's request for model went unrewritten,
+// with no model_rewritten record and the parser's record unchanged.
+func assertOwnModelUntouched(t *testing.T, pctx *pipeline.Context, model string) {
+	t.Helper()
+	if got := string(pctx.Body); got != messagesBody(model) || pctx.BodyMutated() {
+		t.Errorf("body = %s, BodyMutated = %v; want it untouched", got, pctx.BodyMutated())
+	}
+	if ext := pctx.Extensions.Inference; ext.Model != model || ext.RequestedModel != "" {
+		t.Errorf("Model = %q, RequestedModel = %q; want %q and none", ext.Model, ext.RequestedModel, model)
+	}
+	if got, want := outboundReasons(pctx), []string{"modify/redirected", "modify/routed"}; !slices.Equal(got, want) {
+		t.Errorf("timeline = %v, want %v", got, want)
 	}
 }
 
