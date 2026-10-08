@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -313,6 +314,35 @@ func TestServerUse_RefusesABadAgentName(t *testing.T) {
 		if code, _, _ := runServerCmd(t, "", "use", "ete", "--agent", agent, "--config", path); code != 2 {
 			t.Errorf("--agent %q: exit %d, want 2", agent, code)
 		}
+	}
+}
+
+// use and remove check the server name first, as add does: a name no server can
+// have is a usage error (exit 2) before any config is read, and the refusal quotes
+// it, so a control sequence typed or pasted into the argument never reaches the
+// terminal raw. Every later message names a server that passed the check.
+func TestServerUseAndRemove_RefuseABadServerNameFirst(t *testing.T) {
+	path := serverEnv(t, newFakeStats(t, 0).addr(), routerBlock)
+	before := readConfig(t, path)
+	missing := filepath.Join(t.TempDir(), "no-such-config.yaml")
+	for _, args := range [][]string{
+		{"use", "ETE", "--agent", "claude-code", "--config", path},
+		{"use", "a\x1b[2Jb", "--agent", "claude-code", "--config", path},
+		{"use", "a\x1b[2Jb", "--agent", "claude-code", "--config", missing},
+		{"remove", "ETE", "--config", path},
+		{"remove", "a\x1b[2Jb", "--config", path},
+		{"remove", "a\x1b[2Jb", "--config", missing},
+	} {
+		code, out, errOut := runServerCmd(t, "", args...)
+		if code != 2 || !strings.Contains(errOut, "is not a server name") {
+			t.Errorf("%q: exit %d, want 2 and the name refused; stderr:\n%s", args, code, errOut)
+		}
+		if strings.ContainsRune(out+errOut, '\x1b') {
+			t.Errorf("%q: a raw ESC reached the output:\n%q", args, out+errOut)
+		}
+	}
+	if readConfig(t, path) != before {
+		t.Error("the config was written")
 	}
 }
 

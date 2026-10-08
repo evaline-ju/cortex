@@ -153,6 +153,12 @@ func serverRemove(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := pos[0]
+	// First, as add does: every message below echoes name, and a name CheckName
+	// accepts carries nothing a terminal would act on. Its own refusal quotes it.
+	if err := routerconfig.CheckName(name); err != nil {
+		fmt.Fprintf(stderr, "agentop server remove: %v\n", err)
+		return 2
+	}
 	cfg, path, statsURL, err := serverTarget(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "agentop server remove: %v\n", err)
@@ -212,6 +218,11 @@ func serverUse(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := pos[0]
+	// First, as add does: see serverRemove.
+	if err := routerconfig.CheckName(name); err != nil {
+		fmt.Fprintf(stderr, "agentop server use: %v\n", err)
+		return 2
+	}
 	if err := routerconfig.CheckAgent(*agent); err != nil {
 		fmt.Fprintf(stderr, "agentop server use: %v\n", err)
 		return 2
