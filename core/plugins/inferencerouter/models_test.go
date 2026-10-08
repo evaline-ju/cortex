@@ -121,11 +121,11 @@ func TestRouter_MapsEachFamilyToItsServersModel(t *testing.T) {
 	}
 }
 
-// A family the server has no model for — one picked with /model, say — is
-// refused, not guessed, and the server's key never goes on the request. So is a
-// name with no one family that is not one of the server's own models either.
-func TestRouter_RefusesAFamilyTheServerHasNoModelFor(t *testing.T) {
-	for _, requested := range []string{"claude-fable-5-1", "glm-other", "claude-opus-haiku"} {
+// A Claude model name of no family the server maps — claude-fable-5-1 picked with
+// /model, say, or a name naming two families — is refused, not guessed, and the
+// server's key never goes on the request.
+func TestRouter_RefusesAClaudeModelOfNoMappedFamily(t *testing.T) {
+	for _, requested := range []string{"claude-fable-5-1", "claude-opus-haiku", "anthropic/claude-fable-5-1"} {
 		t.Run(requested, func(t *testing.T) {
 			store := newStore(t)
 			p := build(t, mappedConfig(`"claude-code": "glm"`))
@@ -157,10 +157,49 @@ func TestRouter_PassesTheServersOwnModelsThrough(t *testing.T) {
 	}
 }
 
-// The own-model check comes before the family: a server whose haiku model has
-// another family's word in its name gets that name as it is, not mapped to the
-// model of the family the word names.
-func TestRouter_AnOwnModelNamingAnotherFamilyIsNotMapped(t *testing.T) {
+// A name that is neither Claude's nor one of the server's own models is the
+// client's to choose and the server's to answer: OpenCode asking a GLM server for
+// glm-4.6, which the router's three models do not list, goes as it is, with the
+// server's key. Refusing it would break a harness that names models itself.
+func TestRouter_PassesANonClaudeNameThrough(t *testing.T) {
+	for _, requested := range []string{"glm-4.6", "glm-other"} {
+		t.Run(requested, func(t *testing.T) {
+			p := build(t, mappedConfig(`"claude-code": "glm"`))
+			pctx := withModel(request(newStore(t), eteHost, claudeUA, "s1"), requested)
+			if a := run(t, p, pctx); a.Type != pipeline.Continue {
+				t.Fatalf("action = %+v, want Continue", a)
+			}
+			assertRouted(t, pctx, glmHost, "glm-key")
+			assertOwnModelUntouched(t, pctx, requested)
+		})
+	}
+}
+
+// The family decides first, so a server's models may themselves be Claude's: a
+// downgrader that sends opus requests to sonnet and sonnet to haiku maps
+// claude-sonnet-5 to claude-haiku-4-5, though claude-sonnet-5 is one of its own
+// models (opus's). Read the other way round, the own-model rule would pass it
+// through and the downgrade would not happen.
+func TestRouter_TheFamilyDecidesBeforeTheServersOwnModels(t *testing.T) {
+	p := build(t, `{"servers": {
+		"ete": {"url": "https://ete.example.com", "key": "ete-key"},
+		"glm": {"url": "https://glm.example.com:8443", "key": "glm-key",
+		        "opus": "claude-sonnet-5", "sonnet": "claude-haiku-4-5", "haiku": "claude-haiku-4-5"}},
+		"agents": {"claude-code": "glm"}}`)
+	pctx := withModel(request(newStore(t), eteHost, claudeUA, "s1"), "claude-sonnet-5")
+	run(t, p, pctx)
+
+	assertRouted(t, pctx, glmHost, "glm-key")
+	if got := string(pctx.Body); got != messagesBody("claude-haiku-4-5") {
+		t.Errorf("body = %s, want %s", got, messagesBody("claude-haiku-4-5"))
+	}
+}
+
+// The price of the family deciding first: a server's own model whose name holds a
+// family word is read as that family. Asked for by name, the haiku model
+// fast-sonnet is mapped as a sonnet request, to glm-mid. Name a server's models
+// without Claude's family words to have them pass through as themselves.
+func TestRouter_AnOwnModelNamingAFamilyIsMappedAsThatFamily(t *testing.T) {
 	p := build(t, `{"servers": {
 		"ete": {"url": "https://ete.example.com", "key": "ete-key"},
 		"glm": {"url": "https://glm.example.com:8443", "key": "glm-key",
@@ -170,7 +209,39 @@ func TestRouter_AnOwnModelNamingAnotherFamilyIsNotMapped(t *testing.T) {
 	run(t, p, pctx)
 
 	assertRouted(t, pctx, glmHost, "glm-key")
-	assertOwnModelUntouched(t, pctx, "fast-sonnet")
+	if got := string(pctx.Body); got != messagesBody("glm-mid") {
+		t.Errorf("body = %s, want %s", got, messagesBody("glm-mid"))
+	}
+}
+
+// The rule is the router's, not Claude Code's: an OpenCode request routed to a
+// server with models goes through the same four steps. A Claude family name is
+// mapped, a Claude name of no family is refused, and the server's own names, or
+// any other, pass through.
+func TestRouter_AppliesTheSameRuleToEveryAgent(t *testing.T) {
+	for requested, want := range map[string]string{
+		"claude-sonnet-4-5": "glm-mid",
+		"glm-big":           "glm-big",
+		"glm-4.6":           "glm-4.6",
+		"claude-fable-5-1":  "", // refused
+	} {
+		t.Run(requested, func(t *testing.T) {
+			p := build(t, mappedConfig(`"opencode": "glm"`))
+			pctx := withModel(request(newStore(t), eteHost, opencodeUA, "s1"), requested)
+			a := run(t, p, pctx)
+			if want == "" {
+				assertRefused(t, a, http.StatusBadRequest, "glm has no model for "+requested)
+				return
+			}
+			if a.Type != pipeline.Continue {
+				t.Fatalf("action = %+v, want Continue", a)
+			}
+			assertRouted(t, pctx, glmHost, "glm-key")
+			if got := string(pctx.Body); got != messagesBody(want) {
+				t.Errorf("body = %s, want %s", got, messagesBody(want))
+			}
+		})
+	}
 }
 
 // assertOwnModelUntouched fails unless pctx's request for model went unrewritten,

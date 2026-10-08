@@ -161,9 +161,9 @@ LiteLLM, say — is given its own model for each family:
 `agentop server add glm <url> --opus glm-5.3 --sonnet glm-5.3 --haiku glm-5.3`.
 Claude Code still asks for Claude's names, and each request is sent for the
 server's model of its family, so the conversation, auto mode's classifier and the
-background calls can each have one of their own. A model of another family —
-`claude-fable-5-1` picked with `/model`, say — is refused with a 400 naming it,
-rather than sent to a model nobody chose.
+background calls can each have one of their own. A Claude model of no family the
+server maps — `claude-fable-5-1` picked with `/model`, say — is refused with a 400
+naming it, rather than sent to a model nobody chose.
 
 The key is the server's: on a routed request the router puts the configured
 server's key in the header Claude Code sent its own in, `X-Api-Key` for
@@ -201,10 +201,11 @@ server, and start a new session there.
 **`/model` may list a server's own names.** If Claude Code asks the gateway for its
 model list, that request is routed like the rest, so the picker can show, say,
 `glm-5.3`. Routing is unaffected, since Claude Code keeps sending its own names,
-but choosing such a name there breaks the rule above. A name that is one of the
-server's three models goes to it as it is; any other belongs to no family, and a
-server with models of its own refuses it with a 400. If Claude Code saves that
-choice as `model` in `~/.claude/settings.json`, `agentop server` reports it.
+but choosing such a name there breaks the rule above. A name from that list goes
+to the server as it is — one of its three models, or any other that is not a
+Claude name and has no family word — and the server answers for it. If Claude
+Code saves that choice as `model` in `~/.claude/settings.json`, `agentop server`
+reports it.
 
 ## Verified depth
 

@@ -52,8 +52,9 @@ Claude Code asks for Claude's model names whichever server it talks to. For a
 server that serves other names, --opus, --sonnet and --haiku name its model for
 each of Claude Code's families: all three, or none when the server serves Claude
 Code's own names. Each request is then sent for its family's model, and one that
-already names one of the three goes as it is; any other, such as a model picked
-with /model, is refused rather than guessed.
+already names one of the three goes as it is. A Claude model of no mapped family,
+such as claude-fable-5-1, is refused rather than guessed; any other name passes
+through, for the server to answer.
 
 Every change is written to ~/.cortex/config.yaml, or to --config PATH, and returns
 once the proxy has reloaded it. Nothing restarts. Flags go after the action.

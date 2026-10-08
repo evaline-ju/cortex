@@ -70,18 +70,21 @@
 // Claude Code keeps its own model names whichever server it talks to. A server
 // that serves other names says which of its models stands for each of Claude
 // Code's families — opus, sonnet and haiku, all three or none — and a request
-// routed there is sent for the model of its family, found as a word of the name it
-// asked for, through pctx.SetRequestModel. A name that is already one of the
-// server's own models goes as it is, since that is what the server serves; any
-// other name without exactly one family — claude-fable-5-1, say — is refused with a
-// 400, never guessed. So is a body
-// that names a model the rewrite cannot read: empty, not a string, or "model" named
-// twice or only in another letter case. A server that names no models gets every
-// name as it was sent, and so does a request whose body names no model — no body,
-// one that is not JSON, or JSON with no "model" key. A refused request reached no
-// server: it pins nothing and never carries the server's key. The rewrite is why
-// the router declares WritesRequestBody, and why the framework's reader rule holds
-// it after every body reader in the chain.
+// routed there, from any agent, is decided in this order. A name with one family
+// word is sent for the server's model of that family, through
+// pctx.SetRequestModel. Otherwise a name that is one of the server's own models
+// goes as it is. Otherwise a Claude model name — claude-fable-5-1, say — is refused
+// with a 400, never guessed: it asked for one of Claude's models, and the server
+// has none for it. Any other name goes as it is, since it is the client's to choose
+// and the server's to answer: OpenCode asking a GLM server for glm-4.6 is served.
+// A body that names a model the rewrite cannot read — empty, not a string, or
+// "model" named twice or only in another letter case — is refused with a 400 too. A
+// server that names no models gets every name as it was sent, and so does a
+// request whose body names no model — no body, one that is not JSON, or JSON with
+// no "model" key. A refused request reached no server: it pins nothing and never
+// carries the server's key. The rewrite is why the router declares
+// WritesRequestBody, and why the framework's reader rule holds it after every body
+// reader in the chain.
 package inferencerouter
 
 import (
@@ -293,10 +296,11 @@ func (p *Router) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.A
 	return cont
 }
 
-// mapModel sends a request routed to the server name, whose models are models, for
-// its family's model. refused is true, with the refusal to return, when the request
-// must not go; a request whose body names no model, or names one of models, goes
-// as it is.
+// mapModel decides a request routed to the server name, whose models are models,
+// by the order the package doc gives: a family is mapped, one of models goes as it
+// is, a Claude name of no family is refused, and any other name goes as it is.
+// refused is true, with the refusal to return, when the request must not go; a
+// request whose body names no model goes as it is.
 //
 // A refusal leaves a session's existing pin alone, and a first request pins
 // nothing: the request reached no server, and the session's next request can
@@ -317,18 +321,24 @@ func mapModel(pctx *pipeline.Context, name string, models map[string]string,
 			`inference-router could not give this request %s's model: its body must name the model once, `+
 				`as a non-empty string under "model" in lowercase`, name)), true
 	}
-	// One of the server's own models — picked from its model list with /model, say —
-	// is what the server serves: mapped, it could only become itself or a model
-	// nobody chose. Checked before the family, since an own model's name may hold
-	// another family's word.
-	for _, own := range models {
-		if requested == own {
-			return pipeline.Action{}, false
-		}
-	}
+	// The family decides first, so a server whose models are Claude's own — a
+	// downgrader sending opus to sonnet — still maps a name that is also one of its
+	// models. SetRequestModel changes nothing when the name is already the model.
 	model := models[routerconfig.Family(requested)]
 	if model == "" {
-		// Not guessed: the user picked a model this server has nothing for.
+		// One of the server's own models — picked from its model list with /model,
+		// say — is what the server serves.
+		for _, own := range models {
+			if requested == own {
+				return pipeline.Action{}, false
+			}
+		}
+		// Any name that is not Claude's is the client's to choose and the server's to
+		// answer: OpenCode asking a GLM server for glm-4.6.
+		if !routerconfig.IsClaudeName(requested) {
+			return pipeline.Action{}, false
+		}
+		// Not guessed: the user asked for a Claude model this server has nothing for.
 		pin.forgo()
 		d := details()
 		d["model"] = requested

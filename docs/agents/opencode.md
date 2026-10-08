@@ -274,8 +274,13 @@ providers, each with its own base URL and key, and OpenCode switches provider an
 model inside a session. Cortex's `inference-router` therefore leaves OpenCode
 alone unless `agentop server use <name> --agent opencode` lists it. Listing it
 sends OpenCode's new sessions that address one of the configured servers to the
-chosen one, whatever provider was picked in OpenCode, so it works only between
-servers that serve the model names OpenCode asks for. A session that used another
+chosen one, whatever provider was picked in OpenCode, so the server must serve
+the model names OpenCode asks for. A server with models of its own (`agentop
+server add --opus --sonnet --haiku`) gets the same rule as every routed agent: a
+name with a Claude family word, `claude-sonnet-4-5` say, is sent for the server's
+model of that family; a Claude name of no family, `claude-fable-5-1`, is refused
+with a 400; and any other name — `glm-4.6`, or one of the server's three models —
+goes as it is, for the server to answer. A session that used another
 provider first is still new to the router when it addresses a server: only a
 request to a configured server says which server a session is on. The reason to do it is to
 keep keys out of `opencode.json`: on a routed request the router puts the

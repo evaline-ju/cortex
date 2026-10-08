@@ -243,14 +243,25 @@ transparently redirected connection is dialed where the client chose, and is
   `modify/model_rewritten` between `modify/redirected` and `modify/routed`, and the
   inference record's `model` becomes the server's, with `requestedModel` keeping
   Claude Code's: settlement prices the server's model, and agentop's detail pane
-  shows both. A name that is exactly one of the server's own three models — one
-  picked from its model list with `/model`, say — goes as it is, unmapped, since
-  that is what the server serves; this is checked before the family. Any other
-  name without exactly one family word — `claude-fable-5-1`, say, or one naming
-  two — is `deny/no_model_for_family` with the requested name as `model`, a 400
-  saying `glm has no model for claude-fable-5-1`. Nothing is guessed. A body that
-  names a model the rewrite cannot read — an empty one, one that is not a string,
-  or `model` named twice or only in another letter case — is
+  shows both. Every routed agent's request is decided in this order, Claude
+  Code's and OpenCode's alike:
+  1. A name with one family word is mapped to the server's model for that family,
+     even when it is also one of the server's own models — so a server whose models
+     are Claude's own, a downgrader with `opus: claude-sonnet-5` say, works. The
+     cost is that a server model whose own name holds a family word is read as that
+     family.
+  2. Otherwise a name that is exactly one of the server's three models — one picked
+     from its model list with `/model`, say — goes as it is.
+  3. Otherwise a Claude model name, one with `claude` as a word — `claude-fable-5-1`,
+     say, or one naming two families — is `deny/no_model_for_family` with the
+     requested name as `model`, a 400 saying `glm has no model for
+     claude-fable-5-1`. It asked for a Claude model the server has none for, and
+     nothing is guessed.
+  4. Any other name goes as it is, the client's to choose and the server's to
+     answer: OpenCode asking a GLM server for `glm-4.6` is served.
+
+  A body that names a model the rewrite cannot read — an empty one, one that is
+  not a string, or `model` named twice or only in another letter case — is
   `deny/model_rewrite_failed`, a 400 too, since the fix is the client's. A refused
   request carries no server key, and a session whose first request is refused pins
   nothing. A request whose body names no model — `GET /v1/models`, a body that is

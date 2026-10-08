@@ -253,6 +253,28 @@ func TestFamily(t *testing.T) {
 	}
 }
 
+// A Claude model name has "claude" as a word, split as Family splits: so a
+// provider's prefixed or dated id is one, and a name that merely contains the
+// letters is not.
+func TestIsClaudeName(t *testing.T) {
+	for model, want := range map[string]bool{
+		"claude-fable-5-1":                  true,
+		"claude-opus-5-5":                   true,
+		"us.anthropic.claude-opus-4-1-v1:0": true,
+		"anthropic/claude-haiku-4-5":        true,
+		"Claude-Fable-5-1[1m]":              true,
+		"glm-4.6":                           false,
+		"glm-5.3":                           false,
+		"claudette-7b":                      false,
+		"fable":                             false,
+		"":                                  false,
+	} {
+		if got := IsClaudeName(model); got != want {
+			t.Errorf("IsClaudeName(%q) = %v, want %v", model, got, want)
+		}
+	}
+}
+
 func TestCheckModels_AllThreeOrNone(t *testing.T) {
 	const tail = "; give all three, or none if it serves Claude Code's own names"
 	for _, tc := range []struct {

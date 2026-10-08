@@ -105,10 +105,7 @@ func joinWords(words []string, conj string) string {
 // those rather than guess.
 func Family(model string) string {
 	found := ""
-	words := strings.FieldsFunc(strings.ToLower(model), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-	})
-	for _, w := range words {
+	for _, w := range nameWords(model) {
 		if !slices.Contains(Families, w) || w == found {
 			continue
 		}
@@ -118,6 +115,25 @@ func Family(model string) string {
 		found = w
 	}
 	return found
+}
+
+// IsClaudeName reports whether model is a Claude model name: "claude" is a word of
+// it, split as Family splits, so claude-fable-5-1, a provider's prefixed
+// anthropic/claude-haiku-4-5 or a dated Bedrock id is one, and claudette-7b is not.
+//
+// The router refuses such a name when it has no family the server maps, since it
+// was asked for one of Claude's models and the server serves none of them; any
+// other name is the client's to choose and the server's to answer.
+func IsClaudeName(model string) bool {
+	return slices.Contains(nameWords(model), "claude")
+}
+
+// nameWords is model lowercased and split at anything that is not a letter or a
+// digit: the words Family and IsClaudeName read.
+func nameWords(model string) []string {
+	return strings.FieldsFunc(strings.ToLower(model), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
 }
 
 // Decode reads raw, the entry's config: block as JSON, refusing unknown fields, and
