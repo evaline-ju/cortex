@@ -37,7 +37,8 @@ var allProfiles = []ProfileName{
 // Artifact contents:
 //
 //	local  desktop cortex — the three parsers + tool-prune
-//	full   authbridge image, Kubernetes proxy-sidecar — all thirteen
+//	full   authbridge image, Kubernetes proxy-sidecar, release tarballs,
+//	       make dev-install — all fourteen
 //	lite   authbridge-lite image — sidecar minimum
 //	envoy  authbridge-envoy image
 //	cpex   authbridge-cpex image
@@ -52,6 +53,12 @@ var membership = map[PluginName][]ProfileName{
 	"tokenbroker": {ProfileFull, ProfileEnvoy, ProfileCpex},
 	"lineage":     {ProfileFull, ProfileEnvoy},
 	"opa":         {ProfileFull, ProfileEnvoy},
+
+	// Full only. Its redirect needs the forward proxy, so cortex-envoy would refuse
+	// it at build time, and only cmd/cortex registers it. Full is what the release
+	// tarballs and make dev-install build, so it reaches laptops; it changes no
+	// traffic until an agent is routed.
+	"inferencerouter": {ProfileFull},
 
 	// The credential and identity plugins lite exists for, plus budget tracking.
 	"jwtvalidation":       {ProfileFull, ProfileLite, ProfileEnvoy, ProfileCpex},

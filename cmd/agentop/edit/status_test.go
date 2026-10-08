@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,5 +86,35 @@ func TestPollUntilReloaded_HTTPError(t *testing.T) {
 	res := PollUntilReloaded(ctx, srv.URL, time.Now(), "")
 	if res.Status != PollTimeout {
 		t.Fatalf("status = %v, want PollTimeout", res.Status)
+	}
+}
+
+// A refusal and an endpoint that stopped answering are both PollFailure; only the
+// second is Unreachable, which is what lets a caller say which happened.
+func TestPollUntilReloaded_MarksAnEndpointThatStoppedAnsweringUnreachable(t *testing.T) {
+	shortenPollSchedule(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			_ = json.NewEncoder(w).Encode(ReloadStatus{})
+			return
+		}
+		http.Error(w, "gone", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	res := PollUntilReloaded(context.Background(), srv.URL, time.Now(), "")
+	if res.Status != PollFailure || !res.Unreachable || !strings.Contains(res.LastError, "unreachable") {
+		t.Fatalf("result = %+v, want an Unreachable PollFailure", res)
+	}
+
+	var polls atomic.Int32
+	refused := makeStatusServer(t, func() ReloadStatus {
+		if polls.Add(1) == 1 {
+			return ReloadStatus{ReloadsFailed: 0}
+		}
+		return ReloadStatus{ReloadsFailed: 1, LastError: "bad"}
+	})
+	if res := PollUntilReloaded(context.Background(), refused.URL, time.Now(), ""); res.Status != PollFailure || res.Unreachable {
+		t.Fatalf("refusal = %+v, want a PollFailure that is not Unreachable", res)
 	}
 }

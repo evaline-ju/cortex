@@ -25,7 +25,7 @@ func TestTags_Local(t *testing.T) {
 
 // TestTags_ReproduceTodaysDefaults is the invariant for this refactor: the
 // convention change must not alter what any published artifact contains. Each
-// want list is the set that binary links today — proxy's 13 default-on tagged
+// want list is the set that binary links today — proxy's 14 default-on tagged
 // plugins, and envoy's and cpex's tagged-plus-unconditional imports. If one of
 // these drifts, a shipped artifact silently gained or lost a plugin.
 func TestTags_ReproduceTodaysDefaults(t *testing.T) {
@@ -34,7 +34,7 @@ func TestTags_ReproduceTodaysDefaults(t *testing.T) {
 		want    []string
 	}{
 		{"full", []string{
-			"a2aparser", "ibac", "inferenceparser", "jwtvalidation", "lineage",
+			"a2aparser", "ibac", "inferenceparser", "inferencerouter", "jwtvalidation", "lineage",
 			"litellm_budgettrack", "mcpparser", "opa", "sparc", "staticinject",
 			"tokenbroker", "tokenexchange", "toolprune",
 		}},

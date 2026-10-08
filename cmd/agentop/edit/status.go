@@ -31,6 +31,11 @@ const (
 type PollResult struct {
 	Status    PollResultStatus
 	LastError string // populated when Status == PollFailure
+	// Unreachable marks a PollFailure that is no refusal: /reload/status stopped
+	// answering, and LastError is the synthesized "unreachable" text. A caller
+	// telling the user what happened needs the difference — the proxy refused the
+	// change, or it went away and nobody knows whether it took it.
+	Unreachable bool
 }
 
 // baselineFailedSentinel marks the "baseline not yet captured" state for
@@ -38,15 +43,19 @@ type PollResult struct {
 // current value so we only react to NEW failures after our apply.
 const baselineFailedSentinel int64 = -1
 
-// pollInterval is the cadence between /reload/status fetches. 1s balances
-// user-visible spinner progress with not hammering the cluster on slow
-// reloads.
-const pollInterval = 1 * time.Second
+// The poll schedule. Vars, not consts, only so a test can shorten them: the
+// unreachable path below waits out the whole backoff, about 16s, before it gives up.
+var (
+	// pollInterval is the cadence between /reload/status fetches. 1s balances
+	// user-visible spinner progress with not hammering the cluster on slow
+	// reloads.
+	pollInterval = 1 * time.Second
 
-// pollMaxBackoff caps the exponential backoff applied to consecutive
-// transport errors. Keeps a flapping endpoint from getting hammered
-// without making the user wait too long once it recovers.
-const pollMaxBackoff = 5 * time.Second
+	// pollMaxBackoff caps the exponential backoff applied to consecutive
+	// transport errors. Keeps a flapping endpoint from getting hammered
+	// without making the user wait too long once it recovers.
+	pollMaxBackoff = 5 * time.Second
+)
 
 // unreachableThreshold is the number of consecutive transport-layer
 // failures (network errors, non-200) after which the poller gives up
@@ -124,8 +133,9 @@ func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Tim
 			consecErrors++
 			if consecErrors >= unreachableThreshold {
 				return PollResult{
-					Status:    PollFailure,
-					LastError: "reload status endpoint unreachable (" + unreachableHint + ")",
+					Status:      PollFailure,
+					LastError:   "reload status endpoint unreachable (" + unreachableHint + ")",
+					Unreachable: true,
 				}
 			}
 			if wait < pollMaxBackoff {

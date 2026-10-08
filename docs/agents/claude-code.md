@@ -121,6 +121,83 @@ proposes the tools you have not called, and writes them to the `tool-prune` plug
 list. Claude Code is the only agent it can build a list for. See
 [Cut token cost](../laptop-token-savings.md).
 
+## Switching inference servers
+
+With more than one LiteLLM server, `agentop server` chooses which one Claude
+Code's **new** sessions use, with one Claude Code configuration and without
+restarting anything. A running conversation stays on the server it started on,
+with the exceptions below.
+See [Choosing an inference server](../../cmd/agentop/README.md#choosing-an-inference-server-agentop-server).
+
+That one configuration is:
+
+- **`ANTHROPIC_BASE_URL` at one of the configured servers.** Cortex routes only
+  requests addressed to a configured server, so Claude Code pointed anywhere else
+  is not routed. An `https` base URL is routed only when the TLS bridge decrypts
+  it, which needs its port in `tls_bridge.ports`, 443 and 8443 unless set. On
+  another port, such as `:4000`, the request stays an opaque `CONNECT` tunnel and
+  is not routed, although `agentop server`'s check, which matches by host alone,
+  shows ✓.
+  An `http` base URL reaches the router only if Claude Code sends it through the
+  proxy, and `agentop configure claude-code enable` sets `HTTPS_PROXY` only. The
+  server named must be up even for sessions routed elsewhere: the proxy dials the
+  `CONNECT` target before it sees the request inside. And a routed request keeps
+  its path, so a base URL with a path needs that same path on every server.
+- **No model settings**, or only Claude's own names in them: the top-level
+  `model` setting and the variables `ANTHROPIC_MODEL`,
+  `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`,
+  `ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL`. Claude's own names
+  are its aliases — `default`, `best`, `opus`, `opusplan`, `sonnet`, `haiku` and
+  `fable`, with or without a suffix such as `[1m]` — and any model id with `claude`
+  in it. Claude Code then asks for Claude's model names whichever server it talks
+  to — the conversation, auto mode's classifier and the background calls each
+  under its own family's name. A configuration that names one server model for
+  every family leaves nothing to tell them apart, and Claude Code shapes its
+  requests for the model it believes it is using.
+
+`agentop server` checks both. For now a server must serve Claude's model names, as
+a LiteLLM gateway in front of Claude does; mapping them to another server's models
+is not built yet.
+
+The key is the server's: on a routed request the router puts the configured
+server's key in the header Claude Code sent its own in, `X-Api-Key` for
+`ANTHROPIC_API_KEY` and `Authorization` for `ANTHROPIC_AUTH_TOKEN`, so either can
+stay as it is. Those two headers are all it replaces: a credential in any other
+header, such as one set through `ANTHROPIC_CUSTOM_HEADERS`, reaches the server
+unchanged.
+
+Claude Code keeps naming the model it asked for, so agentop is where the server
+shows: the events table's host is where each request went, and the detail pane's
+`redirected:` line names the host Claude Code asked for when it was another.
+
+A session is pinned on the first request the router sees from it, so switch
+**before** `/clear` or a new `claude`, not after. A conversation already running
+when you first route Claude Code keeps the server its requests were going to, even
+if it sent nothing while you ran `agentop server`: Cortex reads which server its
+last request reached from the session's history, and from then on sends it there
+with that server's key. That history is in the proxy's memory, which keeps the most
+recently used sessions (100 by default), so a conversation quiet long enough to be
+dropped before you route Claude Code is taken for a new session. A proxy restart
+forgets the pins and that history, so a running conversation's next request after a
+restart is taken for a new session's and goes to Claude Code's current server; see
+[Known issues](#known-issues). A conversation
+carried to a new session id is pinned as new, to its agent's current server, which
+happens in three ways: Claude Code's continued-in hand-off copies a live
+conversation to a new id; `claude daemon` starts background jobs with
+`--session-id <new> --fork-session --resume <parent>`; and `/clear` with background
+subagents running moves their traffic to the new id.
+
+Nothing fails over. When a session's server is down its requests fail, with a 502
+from the proxy when the server cannot be reached; route the agent to another
+server, and start a new session there.
+
+**`/model` may list a server's own names.** If Claude Code asks the gateway for its
+model list, that request is routed like the rest, so the picker can show, say,
+`glm-5.3`. Routing is unaffected, since Claude Code keeps sending its own names,
+but choosing such a name there breaks the rule above. If Claude Code saves that
+choice as `model` in `~/.claude/settings.json`, `agentop server` reports it.
+
 ## Verified depth
 
 Tested live on 2026-10-05 with Claude Code 2.1.286 on macOS 26.6.2 (arm64), Cortex built
@@ -141,7 +218,9 @@ Sonnet 5 and Claude Haiku 4.5. This was exercised:
 
 Not exercised: Linux; `install.sh --claude-code`; Claude Code talking to
 `api.anthropic.com` directly rather than through a gateway; Amazon Bedrock and Google
-Vertex AI.
+Vertex AI; routing through `inference-router` with a live Claude Code, which so far is
+covered by unit and listener tests and by scratch-`HOME` runs of `agentop server`
+against a fake stats server.
 
 ## Known issues
 
@@ -154,6 +233,14 @@ Vertex AI.
 - **`disable` discards hand-edits.** If you change one of the seven keys by hand after
   `enable`, `disable` still puts back the value from before `enable`, without a warning
   ([#1289](https://github.com/rossoctl/cortex/issues/1289)).
+- **A proxy restart can move a running conversation to another server.** Cortex
+  keeps a conversation on its server by a pin and by the session's history, and
+  both live in the proxy's memory; the session archive on disk is not read for it.
+  After a restart, a conversation's next request looks like a new session's and
+  goes to the server Claude Code is routed to now, so one started on a different
+  server moves, mid-conversation. To keep it where it was, route Claude Code back
+  to that server with `agentop server use <name> --agent claude-code` before
+  continuing it, and switch again once it has sent a request, which pins it there.
 - **A continued conversation can show twice.** Claude Code sometimes moves a live
   conversation to a new session id. agentop then shows two rows with the same title, and
   the older row keeps the copied title. Cortex does not yet read Claude Code's record of

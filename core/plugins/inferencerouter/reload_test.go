@@ -1,0 +1,53 @@
+package inferencerouter
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/rossoctl/cortex/core/config"
+	"github.com/rossoctl/cortex/core/pipeline"
+	"github.com/rossoctl/cortex/core/plugins"
+)
+
+// entries is the outbound chain a config file with only the router would build.
+func entries(routerConfig string) []config.PluginEntry {
+	return []config.PluginEntry{{Name: Name, Config: json.RawMessage(routerConfig)}}
+}
+
+// reloadBuild builds the chain the way cmd/cortex does on startup and on every
+// reload: through the registry, for a listener that honors redirects.
+func reloadBuild(t *testing.T, routerConfig string) *pipeline.Pipeline {
+	t.Helper()
+	p, err := plugins.BuildWithDeps(entries(routerConfig),
+		plugins.Deps{Listener: pipeline.ListenerSupport{Listener: "forward proxy", Destination: true}})
+	if err != nil {
+		t.Fatalf("BuildWithDeps: %v", err)
+	}
+	return p
+}
+
+// TestPinsSurviveAReload is the claim switching rests on. The reloader builds a new
+// pipeline from the edited file and swaps it in; the process store the listener
+// holds is not rebuilt, so the new router instance reads the old one's pins. A
+// running session keeps its server, routed or not, and only a new session sees the
+// edit.
+func TestPinsSurviveAReload(t *testing.T) {
+	store := newStore(t)
+	before := reloadBuild(t, routerConfig(`"claude-code": "glm"`))
+	run(t, before, request(store, eteHost, claudeUA, "routed"))
+	run(t, before, request(store, eteHost, opencodeUA, "unrouted"))
+
+	after := reloadBuild(t, routerConfig(`"claude-code": "ete", "opencode": "glm"`))
+
+	routed := request(store, eteHost, claudeUA, "routed")
+	run(t, after, routed)
+	assertRouted(t, routed, glmHost, "glm-key")
+
+	unrouted := request(store, eteHost, opencodeUA, "unrouted")
+	run(t, after, unrouted)
+	assertUntouched(t, unrouted, eteHost)
+
+	fresh := request(store, eteHost, opencodeUA, "fresh")
+	run(t, after, fresh)
+	assertRouted(t, fresh, glmHost, "glm-key")
+}

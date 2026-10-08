@@ -40,7 +40,7 @@ var version = "dev"
 // One list rather than two: the unknown-subcommand error used to hardcode its own
 // copy, so adding a subcommand meant editing both and forgetting one left a typo
 // getting an incomplete list. A test holds the usage block to this slice.
-var dispatchableSubcommands = []string{"observe", "setup", "doctor", "uninstall", "service", "configure", "claude-code", "exec", "tools", "pipeline", "pricing", "cost", "experimental"}
+var dispatchableSubcommands = []string{"observe", "setup", "doctor", "uninstall", "service", "configure", "claude-code", "exec", "server", "tools", "pipeline", "pricing", "cost", "experimental"}
 
 // unknownSubcommandMessage is the error for an unrecognised first argument.
 func unknownSubcommandMessage(name string) string {
@@ -66,6 +66,8 @@ Usage:
                                bobshell, codex, opencode
   agentop exec -- CMD [ARG...] run CMD with Cortex's proxy and CA in its
                                environment, for tools with no settings file
+  agentop server [<action>]    the inference server each agent's new sessions
+                               use: add, remove, use, reset; alone, list them
   agentop tools <action>       tool-definition costs: scan
   agentop pipeline <action>    the plugin pipeline in effect: get
   agentop pricing              show the model rates in effect (--host <gateway>)
@@ -122,6 +124,8 @@ func main() {
 			os.Exit(runClaudeCode(os.Args[2:], os.Stdout, os.Stderr))
 		case "exec":
 			os.Exit(runExec(os.Args[2:], os.Stdout, os.Stderr))
+		case "server":
+			os.Exit(runServer(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 		case "service":
 			os.Exit(runService(os.Args[2:], os.Stdout, os.Stderr))
 		case "observe":

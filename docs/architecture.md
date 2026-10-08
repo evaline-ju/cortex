@@ -458,7 +458,7 @@ declarative profile per shipped artifact and emits its tags:
 | Profile | Artifact | Plugins |
 |---------|----------|---------|
 | `local` | desktop `cortex` | the three parsers + `tool-prune` |
-| `full` | `authbridge` image, Kubernetes proxy-sidecar | all thirteen |
+| `full` | `authbridge` image, Kubernetes proxy-sidecar | all fourteen |
 | `lite` | `authbridge-lite` image | sidecar minimum: jwt-validation, token-exchange, litellm-budget-track, static-inject |
 | `envoy` | `authbridge-envoy` image | envoy-sidecar set |
 | `cpex` | `authbridge-cpex` image | cpex set |

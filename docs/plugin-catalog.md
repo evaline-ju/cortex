@@ -27,6 +27,7 @@ AuthBridge pipeline YAML, not whether it is compiled into the binary
 | [`cpex`](#cpex) | APL DSL + named [CPEX](https://github.com/contextforge-org/cpex) plugins (Cedar, PII, audit, …) over a single chain step. | Opt-in | Outbound | No |
 | [`ibac`](#ibac) | LLM-judge intent-based access control for outbound tool calls. | Alpha | Outbound | No |
 | [`inference-parser`](#inference-parser) | Parses LLM completions into `pctx.Extensions.Inference`. | Alpha | Outbound | No |
+| [`inference-router`](#inference-router) | Sends each coding agent's new sessions to the inference server chosen for it; a session stays on the server it started on. | Alpha | Outbound | No |
 | [`jwt-validation`](#jwt-validation) | Inbound JWT validation (signature, issuer, audience) against JWKS. | Ready | Inbound | YES |
 | [`lineage-telemetry`](#lineage-telemetry) | Emits two facts-only OTel lineage spans per HTTP exchange, parented across pods through one `tracestate` member. | Alpha | Both | No |
 | [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` (with `-original` fallback) and enforces a daily budget limit. Place on whichever chain carries LLM traffic — inbound when fronting the LLM endpoint, outbound when hosting an agent via `authbridge exec`. | Alpha | Both | No |
@@ -144,6 +145,104 @@ is published as a cost record keyed `cost` on the session event (see
 No configuration — no config struct, does not implement `Configurable`. Rates arrive by
 injection from the top-level [`pricing:`](pricing.md#overriding-in-config) section; with none configured the parser
 still parses and reports the traffic as unpriced.
+
+## `inference-router`
+
+Sends a coding agent's new sessions to the inference server chosen for it — a
+LiteLLM gateway, say, with its own URL and key — and keeps every session on the
+server it started on. Routing is opt-in per agent: an agent not listed under
+`agents` is not routed, and its requests, keys included, pass untouched. Manage it
+with [`agentop server`](../cmd/agentop/README.md#choosing-an-inference-server-agentop-server);
+the config stays hand-editable. Built for the laptop: it needs a listener that
+honors a redirect, so `cortex-envoy` and a config with an `mtls:` block refuse it
+at startup, and in-cluster use has not been examined.
+
+- `servers` (map, required) — inference servers by name: lowercase letters, digits, `.`, `_` and `-`. Each has:
+  - `url` (string, required) — `scheme://host[:port]`, `http` or `https`, no path, query or fragment. A port must be 1–65535; the scheme's default is dropped, so `https://x:443` is `x`. No two servers may share a host, compared without port or case: a session's server is named from the host its requests went to. A plain-`http` server on another machine logs a WARN at load, since routed requests would cross the network decrypted.
+  - `key` (string, required) — the API key sent to this server in place of the client's, in the header the client used: `X-Api-Key` when it sent one, `Authorization: Bearer` otherwise, both when it sent both. Those two are the only headers replaced: a credential the client sends in any other header, such as one Claude Code's `ANTHROPIC_CUSTOM_HEADERS` sets, reaches the server unchanged. Printable ASCII, no spaces. `/config` and `/v1/pipeline` redact it.
+  - `opus`, `sonnet`, `haiku` — reserved for mapping Claude Code's model families to a server's own models, and refused until that lands.
+- `agents` (map) — agent name, as agentop shows it (`claude-code`, `opencode`), to a server name. Each value must name a listed server. `unknown`, the name for requests with no User-Agent, cannot be routed.
+
+```yaml
+      - name: inference-router
+        config:
+          servers:
+            ete:
+              url: https://ete-litellm.example.com
+              key: sk-…
+            glm:
+              url: https://glm-litellm.example.com
+              key: sk-…
+          agents:
+            claude-code: glm     # only agents listed here are routed
+```
+
+**What it does to a request.** Only a request the forward proxy re-sends — a plain
+proxied one, or one decrypted by the TLS bridge — can be routed. A `CONNECT` or a
+transparently redirected connection is dialed where the client chose, and is
+`skip/not_redirectable`. A request to a host no server has is
+`skip/not_an_inference_server`. On a server's host every path is handled,
+`/v1/models` and `count_tokens` included, and the session decides:
+
+- The first request the router sees from a session pins it, in the process store,
+  to where that request went: a server when the redirect took effect, or "not
+  routed" when the request stayed where the client sent it — because the agent is
+  not routed, or because the router runs under `on_error: observe`, even for an
+  agent with a server. A session started under observe therefore stays unrouted
+  after a switch to enforce. A first request whose redirect failed pins nothing,
+  and the next one decides again. Every request renews the pin, which lapses 30
+  days after the last.
+- Where that request goes is decided by the session's history, for a routed
+  agent: a session already running when routing was first configured, quiet while
+  it was, has no pin but is not new. The latest earlier inference request that
+  agent sent in the session to a server's host, as the session store holds it,
+  keeps the session on that server, from then with that server's key. A session
+  with no such request is new and goes to its agent's current server. A request to
+  any other host is no evidence, since the router never routes one: an OpenCode
+  session that used another provider first is new when it addresses a server.
+  The history is read from the `inference` record `inference-parser` puts on each
+  request, so the rule needs `inference-parser` in the outbound chain; without it, a
+  session the router has not pinned is always treated as new.
+- A pin is its agent's. A request from another agent filed under the same session
+  id — by process attribution, which files a command an agent runs under that
+  agent's session and is on by default on a laptop; by the active-session fallback
+  with client affinity off; or by a header id two clients share — is decided as if
+  the session were unpinned, from that agent's own history and server, and leaves
+  the pin alone.
+- Changing `agents` therefore moves only new sessions while the proxy runs: the
+  pins and the history survive a hot reload. A restart loses both — the router reads
+  the store's history in memory, not the session archive on disk — so a running
+  session's next request after a restart is treated as a new session's, and moves
+  if its agent's server is another. The store also drops quiet sessions while the
+  proxy runs — `session.max_sessions` (100 by default) evicts the least recently
+  used, and a configured `session.ttl` expires them — and a session dropped before
+  the router pinned it is treated as new too; a pin outlives that. A request with no session follows its agent's
+  current server, unpinned, and so does one filed under a synthetic session — the
+  `default` bucket or a `pending:<agent>` id — since each holds many conversations,
+  not one.
+- Not routed: `skip/not_routed`, and the request is left as the client sent it.
+- Pinned to a server since removed: `deny/pinned_server_removed`, a 503 asking for
+  a new session. The conversation is never moved to another server.
+- Otherwise the request is redirected to the server, and the key is replaced only
+  once the redirect has taken effect, so it goes to the server and nowhere else.
+  Every routed request is redirected, even one that already names the server's
+  host: the `Host` header is the client's word, and a TLS-bridged request is
+  otherwise dialed to the host the client `CONNECT`ed to, which need not be the
+  same. Each therefore carries the framework's `modify/redirected` record — with
+  `from` equal to `to` when the agent's base URL (`ANTHROPIC_BASE_URL`, for Claude
+  Code) already names the server — followed by the router's `modify/routed` with
+  `server` and `pin` (`new`, `existing` or `none`).
+- A redirect the listener refuses: `deny/redirect_failed`, a 503.
+- Under `on_error: observe` nothing moves and the client's key stays. The timeline
+  shows two rows: the framework's shadow `modify/redirected`, and the router's
+  `observe/would_route`.
+
+**Put it last in the outbound chain**, where `agentop server add` puts it. A
+redirect moves `pctx.Host`, so the plugins before the router decide on the host
+the client asked for, and a plugin after it would see the server's instead; put
+nothing after it that keys on the host. Session events, usage and cost follow the
+server's host, and each event's `requestedHost` keeps the one asked for when it
+differs.
 
 ## `jwt-validation`
 
