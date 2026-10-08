@@ -24,6 +24,20 @@
 // redirect took effect. Under on_error: observe, Redirect returns nil and moves
 // nothing, so a key set on the strength of that nil would go to the host the client
 // named.
+//
+// A session is pinned by where its first request went, not by the choice made for
+// it: to the server when the request was redirected there; to "not routed" when it
+// stayed where the client sent it, because the agent is not routed or because the
+// router runs under on_error: observe; and not at all when the redirect failed, so
+// the session's next request decides again. A pin by choice would hold a session
+// started under observe to a server it never used, and turning enforce on would then
+// move it there mid-conversation, which is the switch the pin exists to prevent.
+//
+// The listener's synthetic sessions are never pinned: the default bucket, and the
+// pending:<agent> buckets an agent's calls collect in before its session is known.
+// Each holds many conversations rather than one, so a pin would hold every later
+// conversation filed there to the first one's server. Their requests follow the
+// agent's current server, unpinned, as a request with no session does.
 package inferencerouter
 
 import (
@@ -33,12 +47,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/rossoctl/cortex/core/pipeline"
 	"github.com/rossoctl/cortex/core/plugins"
 	"github.com/rossoctl/cortex/core/plugins/inferencerouter/routerconfig"
+	"github.com/rossoctl/cortex/core/session"
 )
 
 // Name is the plugin's registered name.
@@ -62,7 +78,7 @@ const (
 const (
 	pinNew      = "new"      // this request pinned the session
 	pinExisting = "existing" // the session was already pinned
-	pinNone     = "none"     // no session, or no store: nothing was pinned
+	pinNone     = "none"     // nothing was pinned: no session, a synthetic one, no store, or a failed redirect
 )
 
 // route is one configured server, ready to redirect to.
@@ -158,16 +174,19 @@ func (p *Router) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.A
 	name, pin := p.serverFor(pctx)
 	if name == "" {
 		// Not routed: the request, its key included, stays exactly as the client sent it.
+		pin.settle("")
 		pctx.Record(pipeline.Invocation{Action: pipeline.ActionSkip, Reason: "not_routed",
-			Details: map[string]string{"pin": pin}})
+			Details: map[string]string{"pin": pin.state}})
 		return cont
 	}
-	details := map[string]string{"server": name, "pin": pin}
+	// Built where each record is made, since a failed redirect changes the pin.
+	details := func() map[string]string { return map[string]string{"server": name, "pin": pin.state} }
 	srv, ok := p.servers[name]
 	if !ok {
-		// Removed by a hand edit since the session was pinned. Moving the conversation
-		// to whatever the agent uses now is the switch this plugin exists to prevent.
-		pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "pinned_server_removed", Details: details})
+		// Removed since the session was pinned, by agentop server remove or a hand edit.
+		// Moving the conversation to whatever the agent uses now is the switch this
+		// plugin exists to prevent.
+		pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "pinned_server_removed", Details: details()})
 		return pipeline.Deny(codeUnavailable, fmt.Sprintf(
 			"this session is pinned to inference server %q, which is no longer configured; add it back, or start a new session", name))
 	}
@@ -176,7 +195,11 @@ func (p *Router) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.A
 	// dials the redirect target, and without one it dials what the client chose,
 	// which on a bridged request is the CONNECT authority and not the Host header.
 	if err := pctx.Redirect(srv.target()); err != nil {
-		pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "redirect_failed", Details: details})
+		// The request went nowhere, so a first request pins nothing: pinning the server
+		// would hold the session to one it never reached, and the next request can
+		// decide again.
+		pin.forgo()
+		pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "redirect_failed", Details: details()})
 		return pipeline.Deny(codeUnavailable, fmt.Sprintf("inference-router could not send this request to %q: %v", name, err))
 	}
 	// Redirect returns nil under on_error: observe without moving anything. The
@@ -184,11 +207,15 @@ func (p *Router) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.A
 	// sent it. Redirected is the signal that it moved, and it is this router's
 	// redirect: a pipeline admits one WritesDestination plugin.
 	if !pctx.Redirected() {
-		pctx.Record(pipeline.Invocation{Action: pipeline.ActionObserve, Reason: "would_route", Details: details})
+		// The request stayed put, so that is what a first request pins: a session that
+		// started under observe stays put once enforce is on.
+		pin.settle("")
+		pctx.Record(pipeline.Invocation{Action: pipeline.ActionObserve, Reason: "would_route", Details: details()})
 		return cont
 	}
+	pin.settle(name)
 	setKey(pctx, srv.key)
-	pctx.Record(pipeline.Invocation{Action: pipeline.ActionModify, Reason: "routed", Details: details})
+	pctx.Record(pipeline.Invocation{Action: pipeline.ActionModify, Reason: "routed", Details: details()})
 	return cont
 }
 
@@ -196,38 +223,71 @@ func (p *Router) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Act
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// serverFor is the server the request's session uses, "" for not routed, and how
-// that was decided.
+// pinning is one request's session pin: how it was decided, and for a
+// session's first request where to store the outcome once OnRequest knows it.
+type pinning struct {
+	state string // pinNew, pinExisting or pinNone
+	store pipeline.SharedStore
+	key   string
+}
+
+// settle pins a session on its first request to where that request went: server
+// when it was redirected there, "" when it stayed where the client sent it. A
+// session already pinned keeps its pin, which serverFor renewed.
+func (pn *pinning) settle(server string) {
+	if pn.state == pinNew {
+		pn.store.Put(pn.key, server, pinTTL)
+	}
+}
+
+// forgo leaves a session unpinned after a first request that went nowhere, so its
+// next request decides again. A session already pinned keeps its pin.
+func (pn *pinning) forgo() {
+	if pn.state == pinNew {
+		pn.state = pinNone
+	}
+}
+
+// serverFor is the server the request's session uses, "" for not routed, and the
+// session's pin.
 //
-// A session's first request pins the agent's choice at that moment, "not routed"
-// included, so routing an agent later does not move the sessions it already has
-// running. Every request renews the pin. Without a session there is nothing to pin
-// and the agent's current choice applies.
+// A session already pinned uses its pin, "not routed" included, so routing an agent
+// later does not move the sessions it already has running; every request renews the
+// pin. Otherwise the agent's current choice applies, and the pin comes back pinNew
+// for OnRequest to settle by where the request went (see the package doc). Without a
+// session to pin, whether none, a synthetic one or no store, the choice applies and
+// nothing is pinned.
 //
 // Two first requests of one session racing can both miss and both store; they store
-// the same choice unless a reload lands between them, which is the case the pin
+// the same outcome unless a reload lands between them, which is the case the pin
 // cannot rule out and does not need to.
-func (p *Router) serverFor(pctx *pipeline.Context) (server, pin string) {
+func (p *Router) serverFor(pctx *pipeline.Context) (string, pinning) {
 	choice := p.agents[agentOf(pctx)]
-	if pctx.Session == nil || pctx.Session.ID == "" {
-		return choice, pinNone
+	if pctx.Session == nil || pctx.Session.ID == "" || synthetic(pctx.Session.ID) {
+		return choice, pinning{state: pinNone}
 	}
 	if pctx.Shared == nil {
 		p.noStore.Do(func() {
 			slog.Warn("inference-router: this binary wires no process store, so sessions are not pinned: " +
 				"each request follows its agent's current server, and changing it moves running sessions")
 		})
-		return choice, pinNone
+		return choice, pinning{state: pinNone}
 	}
 	key := pinPrefix + pctx.Session.ID
 	if v, ok := pctx.Shared.Get(key); ok {
 		if s, ok := v.(string); ok {
 			pctx.Shared.Put(key, s, pinTTL)
-			return s, pinExisting
+			return s, pinning{state: pinExisting}
 		}
 	}
-	pctx.Shared.Put(key, choice, pinTTL)
-	return choice, pinNew
+	return choice, pinning{state: pinNew, store: pctx.Shared, key: key}
+}
+
+// synthetic reports a session id the listener files traffic under when it knows no
+// one conversation: the default bucket, or an agent's pending bucket. See the
+// package doc for why those are never pinned.
+func synthetic(id string) bool {
+	return id == session.DefaultSessionID || strings.HasPrefix(id, session.PendingPrefix)
 }
 
 // agentOf is the request's agent as the session store and agentop name it, or ""

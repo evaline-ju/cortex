@@ -13,6 +13,7 @@ import (
 	"github.com/rossoctl/cortex/core/pipeline"
 	"github.com/rossoctl/cortex/core/plugins"
 	"github.com/rossoctl/cortex/core/plugins/inferencerouter/routerconfig"
+	"github.com/rossoctl/cortex/core/session"
 )
 
 const (
@@ -369,6 +370,86 @@ func TestRouter_APlaintextRequestOnAnHTTPSServersHostIsRedirectedToHTTPS(t *test
 	}
 	if got := pctx.Headers.Get("Authorization"); got != "Bearer ete-key" {
 		t.Errorf("Authorization = %q, want Bearer ete-key", got)
+	}
+}
+
+// A session is pinned by where its first request went, not by the choice. Under
+// observe that request stays on the host the client named, so the session is pinned
+// as not routed; turning enforce on later must not move it to a server it never
+// used, which is the mid-conversation switch the pin exists to prevent.
+func TestRouter_ASessionStartedUnderObserveStaysPutUnderEnforce(t *testing.T) {
+	store := newStore(t)
+	observe := build(t, routerConfig(`"claude-code": "glm"`), pipeline.WithPolicies(pipeline.ErrorPolicyObserve))
+	first := request(store, eteHost, claudeUA, "s1")
+	run(t, observe, first)
+	assertRecord(t, first, pipeline.ActionObserve, "would_route", map[string]string{"server": "glm", "pin": pinNew})
+	if pin, ok := pinOf(t, store, "s1"); !ok || pin != "" {
+		t.Fatalf("pin = %q, %v; want the session pinned as not routed (\"\"), since it went nowhere else", pin, ok)
+	}
+
+	enforce := build(t, routerConfig(`"claude-code": "glm"`))
+	next := request(store, eteHost, claudeUA, "s1")
+	run(t, enforce, next)
+	assertUntouched(t, next, eteHost)
+	assertRecord(t, next, pipeline.ActionSkip, "not_routed", map[string]string{"pin": pinExisting})
+}
+
+// undeclared is the router without WritesDestination, so the pipeline refuses its
+// Redirect: the one way to make a redirect fail from a test.
+type undeclared struct{ *Router }
+
+func (u undeclared) Capabilities() pipeline.PluginCapabilities {
+	caps := u.Router.Capabilities()
+	caps.WritesDestination = false
+	return caps
+}
+
+// A first request whose redirect failed went nowhere, so it pins nothing: the next
+// request decides again rather than inheriting a server the session never reached.
+func TestRouter_AFailedRedirectPinsNothing(t *testing.T) {
+	store := newStore(t)
+	r := New()
+	if err := r.Configure(json.RawMessage(routerConfig(`"claude-code": "glm"`))); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	failing, err := pipeline.New([]pipeline.Plugin{undeclared{r}})
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	pctx := request(store, eteHost, claudeUA, "s1")
+	if a := run(t, failing, pctx); a.Type != pipeline.Reject {
+		t.Fatalf("action = %+v, want Reject", a)
+	}
+	assertRecord(t, pctx, pipeline.ActionDeny, "redirect_failed", map[string]string{"server": "glm", "pin": pinNone})
+	assertUntouched(t, pctx, eteHost)
+	if pin, ok := pinOf(t, store, "s1"); ok {
+		t.Fatalf("pin = %q after a failed redirect, want none", pin)
+	}
+
+	next := request(store, eteHost, claudeUA, "s1")
+	run(t, build(t, routerConfig(`"claude-code": "glm"`)), next)
+	assertRouted(t, next, glmHost, "glm-key")
+	assertRecord(t, next, pipeline.ActionModify, "routed", map[string]string{"server": "glm", "pin": pinNew})
+}
+
+// The listener's synthetic sessions are shared buckets, not conversations: default
+// collects traffic it cannot attribute, and pending:<agent> an agent's calls before
+// its session is known. Pinning one would hold every later conversation filed there
+// to the first one's server, so they route by the agent's current choice, unpinned.
+func TestRouter_NeverPinsTheListenersSyntheticSessions(t *testing.T) {
+	for _, id := range []string{session.DefaultSessionID, session.PendingPrefix + "claude-code"} {
+		t.Run(id, func(t *testing.T) {
+			store := newStore(t)
+			p := build(t, routerConfig(`"claude-code": "glm"`))
+			pctx := request(store, eteHost, claudeUA, id)
+			run(t, p, pctx)
+
+			assertRouted(t, pctx, glmHost, "glm-key")
+			assertRecord(t, pctx, pipeline.ActionModify, "routed", map[string]string{"server": "glm", "pin": pinNone})
+			if pin, ok := pinOf(t, store, id); ok {
+				t.Errorf("pin = %q, want no pin for the synthetic session %q", pin, id)
+			}
+		})
 	}
 }
 
