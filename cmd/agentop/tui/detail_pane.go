@@ -104,7 +104,9 @@ func redirectHeader(e *pipeline.SessionEvent) string {
 	if e.RequestedHost == "" {
 		return ""
 	}
-	return fmt.Sprintf("redirected:  %s → %s", e.RequestedHost, e.Host)
+	// RequestedHost is the client's Host header, and Host can be too: both pass
+	// sanitizeLabel, as every caller-supplied label agentop prints does.
+	return fmt.Sprintf("redirected:  %s → %s", sanitizeLabel(e.RequestedHost), sanitizeLabel(e.Host))
 }
 
 // modelHeader names both models of a request a plugin sent for another model: the
@@ -116,7 +118,9 @@ func modelHeader(e *pipeline.SessionEvent) string {
 	if e.Inference == nil || e.Inference.RequestedModel == "" {
 		return ""
 	}
-	return fmt.Sprintf("model:       %s → %s", e.Inference.RequestedModel, e.Inference.Model)
+	// RequestedModel is the client's model name, and the session API is
+	// unauthenticated: both names pass sanitizeLabel before they reach the terminal.
+	return fmt.Sprintf("model:       %s → %s", sanitizeLabel(e.Inference.RequestedModel), sanitizeLabel(e.Inference.Model))
 }
 
 // rewriteHeader is what plugins changed about a request's destination and model,

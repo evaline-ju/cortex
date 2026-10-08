@@ -185,6 +185,23 @@ func TestModelHeader_NamesBothModels(t *testing.T) {
 	}
 }
 
+// Both headers print what the client sent — the model it asked for, the host it
+// named — and what the upstream echoed, so a control character in either must not
+// reach the terminal: an escape sequence there could recolour or rewrite the pane.
+// Each becomes U+FFFD, as everywhere else agentop prints a caller-supplied label.
+func TestRewriteHeader_NeutralisesControlCharacters(t *testing.T) {
+	got := rewriteHeader(&pipeline.SessionEvent{
+		Host:          "glm\x1b[2Jlitellm.example.com",
+		RequestedHost: "ete\x07litellm.example.com",
+		Inference:     &pipeline.InferenceExtension{Model: "glm\u202e5.3", RequestedModel: "claude\x1b]0;x\x07opus"},
+	})
+	want := "redirected:  ete\uFFFDlitellm.example.com → glm\uFFFD[2Jlitellm.example.com\n" +
+		"model:       claude\uFFFD]0;x\uFFFDopus → glm\uFFFD5.3"
+	if got != want {
+		t.Errorf("rewriteHeader = %q, want %q", got, want)
+	}
+}
+
 // What a router changed is one block: where the request went, then what it was
 // sent for, each line only when it applies.
 func TestRewriteHeader_StacksTheRedirectAndTheModel(t *testing.T) {
