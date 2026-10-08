@@ -86,6 +86,18 @@ func TestSetRequestModel_RefusesABodyItCannotRewrite(t *testing.T) {
 		"not a string":      `{"model": 5}`,
 		"not an object":     `[{"model": "claude-opus-5-5"}]`,
 		"named twice":       `{"model": "claude-opus-5-5", "model": "claude-haiku-4-5"}`,
+		// encoding/json matches a key in any letter case and keeps the last, so the
+		// parser and a Go server read claude-haiku-4-5 while sjson changes the first.
+		"named twice, differing in case": `{"model": "claude-opus-5-5", "Model": "claude-haiku-4-5"}`,
+		// "\x5c" is a backslash: the second key spells its m as a JSON escape, which
+		// gjson and encoding/json both decode to "model".
+		"named twice, once escaped": "{\"model\": \"claude-opus-5-5\", \"\x5cu006dodel\": \"claude-haiku-4-5\"}",
+		// RequestedModel cannot hold an empty name, so a second change would record
+		// the first plugin's choice as the client's.
+		"an empty model": `{"model": ""}`,
+		// sjson finds no "model" here and would append one, making a body that names
+		// it twice in different cases.
+		"only a different case": `{"Model": "claude-opus-5-5"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var err error
@@ -103,10 +115,14 @@ func TestSetRequestModel_RefusesABodyItCannotRewrite(t *testing.T) {
 // it would refuse, so a plugin deciding on the model and the rewrite never disagree.
 func TestRequestModel_ReadsWhatSetRequestModelWouldReplace(t *testing.T) {
 	for body, want := range map[string]string{
-		`{"max_tokens": 10, "model": "claude-sonnet-5"}`: "claude-sonnet-5",
-		`{"model": "claude-opus-5-5", "model": "x"}`:     "",
-		`{"metadata": {"model": "inner"}}`:               "",
-		`{"model": "claude-opus-5-5"`:                    "",
+		`{"max_tokens": 10, "model": "claude-sonnet-5"}`:             "claude-sonnet-5",
+		`{"model": "claude-opus-5-5", "model": "x"}`:                 "",
+		`{"metadata": {"model": "inner"}}`:                           "",
+		`{"model": "claude-opus-5-5"`:                                "",
+		`{"model": "claude-opus-5-5", "Model": "x"}`:                 "",
+		"{\"model\": \"claude-opus-5-5\", \"\x5cu006dodel\": \"x\"}": "",
+		`{"model": ""}`:                "",
+		`{"Model": "claude-opus-5-5"}`: "",
 	} {
 		got, ok := (&Context{Body: []byte(body)}).RequestModel()
 		if got != want || ok != (want != "") {

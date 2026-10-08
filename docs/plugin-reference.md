@@ -921,7 +921,9 @@ from `OnRequest`. Do not edit the body's `model` yourself, and do not write
 ```go
 if name, ok := pctx.RequestModel(); ok && strings.Contains(name, "opus") {
     if err := pctx.SetRequestModel("glm-5.3"); err != nil {
-        return pctx.DenyAndRecord("model_rewrite_failed", "upstream.unreachable", err.Error())
+        // A refusal is about the client's body, so it is the client's error: a 400.
+        pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "model_rewrite_failed"})
+        return pipeline.DenyStatus(http.StatusBadRequest, "inference.model-rewrite-failed", err.Error())
     }
 }
 ```
@@ -946,9 +948,14 @@ Under `on_error: observe` nothing changes — not the body, not the record — a
 both rows are shadows. A name equal to the current model changes nothing and
 records nothing. `SetRequestModel` is refused, with nothing changed, from a plugin
 that does not declare `WritesRequestBody`, outside `OnRequest`, and for a body
-with no top-level string `model`, one that is not valid JSON, or one that names
-`model` more than once — gjson and sjson read the first, encoding/json and most
-servers the last, so changing one would leave the other serving.
+with no top-level string `model`, one whose `model` is empty, one that is not
+valid JSON, or one that names `model` more than once, in any letter case. gjson and sjson read the
+first key spelled exactly `model`, while encoding/json — the parser, and most
+servers — reads the last key that matches it in any case, so `{"model": "a",
+"Model": "b"}` is served as `b`, and changing one would leave the other serving.
+The value is read only from the key spelled exactly `model`: a body whose only
+match is `Model` names no model to change. An empty `model` is refused because
+`requestedModel` could not record it as the client's name.
 
 ## Finishing requests (stateful plugins)
 

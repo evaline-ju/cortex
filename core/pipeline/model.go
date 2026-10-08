@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -12,7 +13,8 @@ import (
 // RequestModel is the model the request body asks for: its top-level "model"
 // string, exactly as SetRequestModel would find and replace it. ok is false where
 // SetRequestModel would refuse the body — none, not valid JSON, no top-level
-// string "model", or "model" named more than once.
+// string "model", an empty one, or "model" named more than once in any letter
+// case.
 //
 // A plugin that decides on the model reads it here rather than parsing the body
 // itself, so the name it decides on is the name SetRequestModel replaces.
@@ -95,29 +97,44 @@ func (c *Context) SetRequestModel(name string) error {
 // requestModel is body's top-level "model" string. Its errors name the problem and
 // quote nothing from the body, which can carry a prompt.
 //
-// A body naming "model" twice is refused, not read: gjson and sjson take the first,
-// encoding/json — the parser, and most servers — the last, so a change to one would
-// leave the other serving.
+// A body naming "model" twice is refused, not read: gjson and sjson take the first
+// key spelled exactly "model", while encoding/json — the parser, and most servers —
+// takes the last key that matches it in any letter case. So "Model" and "MODEL"
+// count as a second "model", and a change to one would leave the other serving.
+// Keys are compared decoded, so one spelled with a JSON escape counts too.
+//
+// The value is read only from the key spelled exactly "model", the one sjson
+// replaces: for a body whose only match is "Model", sjson would add a "model"
+// beside it rather than change it, so that body names no model to change.
+//
+// An empty "model" is refused too: RequestedModel cannot hold the client's name
+// when that name is empty, so a second change would record the first one's.
 func requestModel(body []byte) (string, error) {
 	if !gjson.ValidBytes(body) {
 		return "", errors.New("pipeline: the request body is not JSON, so it names no model to change")
 	}
 	var model gjson.Result
-	n := 0
+	exact, anyCase := 0, 0
 	gjson.ParseBytes(body).ForEach(func(key, value gjson.Result) bool {
-		if key.Type == gjson.String && key.String() == "model" {
+		if key.Type != gjson.String || !strings.EqualFold(key.String(), "model") {
+			return true
+		}
+		anyCase++
+		if key.String() == "model" {
 			model = value
-			n++
+			exact++
 		}
 		return true
 	})
 	switch {
-	case n == 0:
+	case anyCase > 1:
+		return "", errors.New(`pipeline: the request body names "model" more than once, in any letter case, so which one is served is not clear`)
+	case exact == 0:
 		return "", errors.New(`pipeline: the request body has no top-level "model" to change`)
-	case n > 1:
-		return "", errors.New(`pipeline: the request body names "model" more than once, so which one is served is not clear`)
 	case model.Type != gjson.String:
 		return "", errors.New(`pipeline: the request body's "model" is not a string`)
+	case model.String() == "":
+		return "", errors.New(`pipeline: the request body's "model" is empty, so it names no model to change`)
 	}
 	return model.String(), nil
 }
