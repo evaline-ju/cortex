@@ -277,7 +277,7 @@ func TestServer_ChecksEveryWayClaudeCodePicksAModel(t *testing.T) {
 // url.URL.Redacted would not stop it: it masks a password but not a username.
 func TestServer_ListsNoURLCredentials(t *testing.T) {
 	router := strings.NewReplacer(
-		"https://ete.example.com", "https://sk-SECRET-ETE@ete.example.com",
+		"https://ete.example.com", "https://sk-SECRET-ETE@ete.example.com/sk-SECRET-PATH",
 		"https://glm.example.com:8443", "https://user:sk-SECRET-GLM@glm.example.com:8443",
 	).Replace(routerBlock)
 	path := serverEnv(t, closedAddr(t), router)
@@ -302,7 +302,7 @@ func TestServer_ChecksPrintNoURLCredentials(t *testing.T) {
 		name, baseURL, want string
 	}{
 		{"elsewhere, key as username", "https://sk-SECRET@api.anthropic.com/v1",
-			"✗ Claude Code points at https://api.anthropic.com/v1, which is not one of these servers"},
+			"✗ Claude Code points at https://api.anthropic.com, which is not one of these servers"},
 		{"elsewhere, key as password", "https://user:sk-SECRET@api.anthropic.com",
 			"✗ Claude Code points at https://api.anthropic.com, which is not one of these servers"},
 		{"a server, with user info", "https://user:sk-SECRET@ete.example.com",
@@ -312,9 +312,13 @@ func TestServer_ChecksPrintNoURLCredentials(t *testing.T) {
 		{"no slashes", "https:user:sk-SECRET@api.anthropic.com",
 			"✗ ANTHROPIC_BASE_URL in ~/.claude/settings.json is not a URL with a host"},
 		{"elsewhere, key in the query", "https://other.example.com/?key=sk-SECRET",
-			"✗ Claude Code points at https://other.example.com/, which is not one of these servers"},
+			"✗ Claude Code points at https://other.example.com, which is not one of these servers"},
 		{"elsewhere, key in the fragment", "https://other.example.com/v1#sk-SECRET",
-			"✗ Claude Code points at https://other.example.com/v1, which is not one of these servers"},
+			"✗ Claude Code points at https://other.example.com, which is not one of these servers"},
+		{"elsewhere, key as a path segment", "https://other.example.com/v1/sk-SECRET",
+			"✗ Claude Code points at https://other.example.com, which is not one of these servers"},
+		{"elsewhere, with a port", "https://other.example.com:8443/v1/sk-SECRET",
+			"✗ Claude Code points at https://other.example.com:8443, which is not one of these servers"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := serverEnv(t, closedAddr(t), routerBlock)

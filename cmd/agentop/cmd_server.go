@@ -299,8 +299,9 @@ func baseURLCheck(raw, shown string, c routerconfig.Config) settingsCheck {
 	if raw == "" {
 		return settingsCheck{false, fmt.Sprintf("%s sets no ANTHROPIC_BASE_URL, so Claude Code talks to Anthropic and nothing is routed. Point it at one of the servers above.", shown)}
 	}
-	// raw is never quoted: user info, a query and a fragment are where a key gets
-	// pasted, and a URL that does not parse cannot have them taken out.
+	// raw is never quoted, and of a URL that parses only scheme://host[:port] is: a
+	// pasted key can sit in the user info, path, query or fragment. url.Parse admits
+	// only digits after the host's colon, so u.Host carries nothing else.
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return settingsCheck{false, fmt.Sprintf("ANTHROPIC_BASE_URL in %s is not a URL with a host, so nothing is routed. Point it at one of the servers above.", shown)}
@@ -311,10 +312,7 @@ func baseURLCheck(raw, shown string, c routerconfig.Config) settingsCheck {
 			return settingsCheck{true, fmt.Sprintf("Claude Code points at %s (%s)", name, shown)}
 		}
 	}
-	u.User = nil
-	u.RawQuery, u.ForceQuery = "", false
-	u.Fragment, u.RawFragment = "", ""
-	return settingsCheck{false, fmt.Sprintf("Claude Code points at %s, which is not one of these servers, so nothing is routed (ANTHROPIC_BASE_URL in %s). Point it at one of the servers above.", u, shown)}
+	return settingsCheck{false, fmt.Sprintf("Claude Code points at %s://%s, which is not one of these servers, so nothing is routed (ANTHROPIC_BASE_URL in %s). Point it at one of the servers above.", u.Scheme, u.Host, shown)}
 }
 
 // modelChecks checks model, the settings' top-level "model" key, and env's model

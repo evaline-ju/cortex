@@ -181,55 +181,40 @@ func (e Endpoint) PlaintextRemote() bool {
 // from 1 to 65535, and the scheme's default port is dropped, so a server at
 // https://x:443 is the host a request for x names, and the redirect a routed request
 // for x still gets records no requested host.
+//
+// Its errors are fixed text that names the problem and quotes no part of raw, not
+// even redacted. They reach the logs and the unauthenticated /reload/status, and a
+// key pasted into a mistyped URL can land anywhere in it: user info, query,
+// fragment, a path segment, or the path or port url.Parse files it under when the
+// "//" is wrong. Redacting shape by shape kept missing one.
 func ParseURL(raw string) (Endpoint, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		// *url.Error quotes the raw URL, which can carry credentials.
-		// Extract and return only the inner error.
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			return Endpoint{}, fmt.Errorf("not a valid URL: %w", ue.Err)
-		}
-		return Endpoint{}, err
+		// Not even url.Parse's inner error, which quotes a bad port or escape.
+		return Endpoint{}, errors.New("not a valid URL")
 	}
 	switch {
 	case u.Scheme != "http" && u.Scheme != "https":
-		return Endpoint{}, fmt.Errorf("%q: the scheme must be http or https", shownURL(u))
+		return Endpoint{}, errors.New("the URL's scheme must be http or https")
 	case u.Opaque != "" || u.Hostname() == "":
-		return Endpoint{}, fmt.Errorf("%q has no host", shownURL(u))
+		return Endpoint{}, errors.New("the URL has no host")
 	case u.User != nil:
-		return Endpoint{}, fmt.Errorf("%q carries user info; the key belongs in key", shownURL(u))
+		return Endpoint{}, errors.New("the URL carries user info; the key is given separately, never in the URL")
 	case u.Path != "" && u.Path != "/":
-		return Endpoint{}, fmt.Errorf("%q has a path; give scheme://host[:port] only, since a routed request keeps its own path", shownURL(u))
+		return Endpoint{}, errors.New("the URL has a path; give scheme://host[:port] only, since a routed request keeps its own path")
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
-		return Endpoint{}, fmt.Errorf("%q has a query or fragment", shownURL(u))
+		return Endpoint{}, errors.New("the URL has a query or fragment")
 	}
 	port := ""
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 {
-			return Endpoint{}, fmt.Errorf("%q: the port must be a number from 1 to 65535", shownURL(u))
+			return Endpoint{}, errors.New("the URL's port must be a number from 1 to 65535")
 		}
 		port = strconv.Itoa(n)
 	}
 	hostname := strings.ToLower(u.Hostname())
 	return Endpoint{Scheme: u.Scheme, Host: joinHost(hostname, withoutDefault(u.Scheme, port)), Hostname: hostname}, nil
-}
-
-// shownURL is u as an error may quote it: re-serialised with no user info, query
-// or fragment, the three places a pasted key sits (https://key@host, ?key=,
-// #token). Not url.URL.Redacted, which masks only a password and so quotes a key
-// given as the username intact. An opaque URL (https:key@host, slashes forgotten)
-// parses with no user info at all, so what precedes its last '@' goes too.
-func shownURL(u *url.URL) string {
-	c := *u
-	c.User = nil
-	c.RawQuery, c.ForceQuery = "", false
-	c.Fragment, c.RawFragment = "", ""
-	if i := strings.LastIndexByte(c.Opaque, '@'); i >= 0 {
-		c.Opaque = c.Opaque[i+1:]
-	}
-	return c.String()
 }
 
 // Hostname is a request's host[:port], lowercased and without the port: what the

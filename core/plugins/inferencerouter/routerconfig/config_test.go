@@ -58,7 +58,7 @@ func TestValidate_RefusesEachBrokenRule(t *testing.T) {
 		{"query", `{"servers": {"e": {"url": "https://e.example?x=1", "key": "k"}}}`, "query or fragment"},
 		{"fragment", `{"servers": {"e": {"url": "https://e.example#x", "key": "k"}}}`, "query or fragment"},
 		{"user info", `{"servers": {"e": {"url": "https://u:p@e.example", "key": "k"}}}`, "user info"},
-		{"non-numeric port", `{"servers": {"e": {"url": "https://e.example:abc", "key": "k"}}}`, "invalid port"},
+		{"non-numeric port", `{"servers": {"e": {"url": "https://e.example:abc", "key": "k"}}}`, "servers.e.url: not a valid URL"},
 		{"port zero", `{"servers": {"e": {"url": "https://e.example:0", "key": "k"}}}`, "port must be a number from 1 to 65535"},
 		{"port too high", `{"servers": {"e": {"url": "https://e.example:65536", "key": "k"}}}`, "port must be a number from 1 to 65535"},
 		{"shared host, port and case ignored", `{"servers": {
@@ -166,71 +166,58 @@ func TestPlaintextRemote(t *testing.T) {
 	}
 }
 
-// ParseURL must not expose credentials in its error messages, since errors
-// go to logs and the unauthenticated /reload/status endpoint.
-func TestParseURL_KeepsCredentialsOutOfErrors(t *testing.T) {
-	testCases := []struct {
-		name, url string
-	}{
-		{"bad port with userinfo", "https://user:pw@example.com:abc"},
-		{"bad percent-escape with userinfo", "https://user:pw%ZZ@example.com"},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParseURL(tc.url)
-			if err == nil {
-				t.Fatal("ParseURL accepted invalid URL")
-			}
-			if strings.Contains(err.Error(), "pw") {
-				t.Errorf("error exposes password: %v", err)
-			}
-			if strings.Contains(err.Error(), "user") {
-				t.Errorf("error exposes username: %v", err)
-			}
-		})
-	}
-}
-
-// User info is where a pasted key sits, and it may be the username alone, which
-// url.URL.Redacted leaves intact. Every error a URL with user info can reach must
-// drop it whole, and still name the host so the message points somewhere.
-func TestParseURL_KeepsUserInfoOutOfEveryError(t *testing.T) {
-	for _, tc := range []struct {
-		name, url, want string
-	}{
-		{"key as the username", "https://sk-SECRET@h.example.com", `"https://h.example.com" carries user info`},
-		{"key as the password", "https://u:sk-SECRET@h.example.com", `"https://h.example.com" carries user info`},
-		{"wrong scheme", "ftp://u:sk-SECRET@h.example.com", `"ftp://h.example.com": the scheme must be http or https`},
-		{"no host", "https://u:sk-SECRET@", "has no host"},
-		{"no slashes", "https:u:sk-SECRET@h.example.com", `"https:h.example.com" has no host`},
+// No ParseURL error quotes any part of the URL. Errors reach the logs and the
+// unauthenticated /reload/status, and a key can land anywhere in a mistyped URL —
+// user info, query, fragment, a path segment, or wherever url.Parse files it when
+// the "//" is wrong — so redacting shape by shape kept missing one. Each error is
+// fixed text naming the problem; this table is every input that once leaked.
+func TestParseURL_QuotesNoPartOfTheURL(t *testing.T) {
+	const (
+		invalid = "not a valid URL"
+		scheme  = "the URL's scheme must be http or https"
+		noHost  = "the URL has no host"
+		user    = "the URL carries user info"
+		path    = "the URL has a path"
+		query   = "the URL has a query or fragment"
+	)
+	for _, tc := range []struct{ url, want string }{
+		// User info, query and fragment.
+		{"https://sk-SECRET@h.example.com", user},
+		{"https://u:sk-SECRET@h.example.com", user},
+		{"ftp://u:sk-SECRET@h.example.com", scheme},
+		{"https://u:sk-SECRET@", noHost},
+		{"https:u:sk-SECRET@h.example.com", noHost},
+		{"https://h.example.com/?key=sk-SECRET", query},
+		{"https://h.example.com/#sk-SECRET", query},
+		{"https://h.example.com/?a=1#sk-SECRET", query},
+		{"ftp://h.example.com/?key=sk-SECRET", scheme},
+		// A mistyped "//" files the key under the path.
+		{"https:/u:sk-SECRET@h.example.com", noHost},
+		{"https:///u:sk-SECRET@h.example.com", noHost},
+		{"https//u:sk-SECRET@h.example.com", scheme},
+		{"sk-SECRET@h.example.com", scheme},
+		// url.Parse's own errors quote the bad port, or the escape.
+		{"https://u:sk-SECRET/x@h.example.com", invalid},
+		{"https://u:sk-SECRET#x@h.example.com", invalid},
+		{"https://u:sk-SECRET?x@h.example.com", invalid},
+		{"https://h.example.com:sk-SECRET", invalid},
+		{"https://[::1]:sk-SECRET", invalid},
+		{"https://u:sk-SECRET@h.example.com:abc", invalid},
+		{"https://u:sk-SECRET%ZZ@h.example.com", invalid},
+		// A key as a path segment.
+		{"https://h.example.com/sk-SECRET", path},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParseURL(tc.url)
-			if err == nil {
-				t.Fatal("ParseURL accepted a URL with user info")
-			}
-			if msg := err.Error(); strings.Contains(msg, "sk-SECRET") || strings.Contains(msg, "u:") || !strings.Contains(msg, tc.want) {
-				t.Errorf("error = %q, want %q in it and no user info", msg, tc.want)
-			}
-		})
-	}
-}
-
-// A query or fragment can carry a key as surely as user info can
-// (?key=..., #token), so neither reaches an error either.
-func TestParseURL_KeepsQueryAndFragmentOutOfErrors(t *testing.T) {
-	for _, raw := range []string{
-		"https://h.example.com/?key=sk-SECRET",
-		"https://h.example.com/#sk-SECRET",
-		"https://h.example.com/?a=1#sk-SECRET",
-		"ftp://h.example.com/?key=sk-SECRET",
-	} {
-		_, err := ParseURL(raw)
+		_, err := ParseURL(tc.url)
 		if err == nil {
-			t.Fatalf("ParseURL(%q) accepted a query or fragment", raw)
+			t.Errorf("ParseURL(%q) accepted it", tc.url)
+			continue
 		}
-		if msg := err.Error(); strings.Contains(msg, "sk-SECRET") || !strings.Contains(msg, "h.example.com") {
-			t.Errorf("ParseURL(%q) error = %q, want the host named and no query or fragment", raw, msg)
+		msg := err.Error()
+		if strings.Contains(msg, "sk-SECRET") || strings.Contains(msg, "u:") || strings.Contains(msg, "example.com") || strings.Contains(msg, "::1") {
+			t.Errorf("ParseURL(%q) error quotes the URL: %q", tc.url, msg)
+		}
+		if !strings.Contains(msg, tc.want) {
+			t.Errorf("ParseURL(%q) error = %q, want %q", tc.url, msg, tc.want)
 		}
 	}
 }
