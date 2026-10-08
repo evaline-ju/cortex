@@ -338,6 +338,20 @@ func TestConnectBridge_RedirectSendsTheDecryptedRequestToTheTarget(t *testing.T)
 	}
 }
 
+// The inference router's local-gateway case — a bridged https request sent to a
+// plaintext http server — and the only test that pins the listener's scheme copy.
+func TestConnectBridge_RedirectToAPlaintextTargetChangesTheScheme(t *testing.T) {
+	a := newOrigin(t, "FROM-A", (*httptest.Server).StartTLS)
+	b := newOrigin(t, "FROM-B", (*httptest.Server).Start) // plaintext
+	engine := redirectBridge(t, portOf(a.authority()), certPEM(a.Server))
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	proxy := newRedirectProxy(t, store, engine, &redirectPlugin{target: b.URL})
+	if status, body := bridgedGet(t, proxy, engine.CAPEM, a.authority(), "/v1/messages"); status != 200 || body != "FROM-B" {
+		t.Fatalf("got %d %q, want 200 FROM-B", status, body)
+	}
+}
+
 func TestConnectBridge_RedirectVerifiesTheTargetsCertificate(t *testing.T) {
 	a := newOrigin(t, "FROM-A", (*httptest.Server).StartTLS)
 	// b presents a certificate from a CA the bridge's upstream client does not trust.
