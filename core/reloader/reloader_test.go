@@ -1,6 +1,7 @@
 package reloader
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -645,6 +646,45 @@ func TestReloader_AnAcceptedReloadCommitsOnce(t *testing.T) {
 	}
 	if gotMode != "envoy-sidecar" {
 		t.Errorf("hook saw Mode %q, want the config that took effect", gotMode)
+	}
+}
+
+// mtls needs a restart: the TLS dialer is constructed once in main and handed to the
+// forward proxy listener, and nothing re-reads it. More critically, a reload that removes
+// the mtls block while adding a WritesDestination plugin would let that plugin through on
+// an mTLS proxy that was built with the opposite constraint — so validateReloadable blocks
+// any change to mtls.* (present↔absent or field change), exactly like cost_ledger and session.
+func TestValidateReloadable_RefusesMTLSEdit(t *testing.T) {
+	// Test 1: adding an mtls block to a config that had none
+	active := &config.Config{MTLS: nil}
+	next := &config.Config{MTLS: &config.MTLSConfig{Mode: "strict"}}
+	if err := validateReloadable(active, next); err == nil {
+		t.Fatal("adding an mtls block was accepted")
+	} else if !bytes.Contains([]byte(err.Error()), []byte("mtls.*")) {
+		t.Errorf("error doesn't mention mtls.*: %v", err)
+	}
+
+	// Test 2: removing an mtls block from a config that had one
+	active = &config.Config{MTLS: &config.MTLSConfig{Mode: "strict"}}
+	next = &config.Config{MTLS: nil}
+	if err := validateReloadable(active, next); err == nil {
+		t.Fatal("removing an mtls block was accepted")
+	} else if !bytes.Contains([]byte(err.Error()), []byte("mtls.*")) {
+		t.Errorf("error doesn't mention mtls.*: %v", err)
+	}
+
+	// Test 3: unchanged mtls block should be accepted
+	active = &config.Config{MTLS: &config.MTLSConfig{Mode: "strict"}}
+	next = &config.Config{MTLS: &config.MTLSConfig{Mode: "strict"}}
+	if err := validateReloadable(active, next); err != nil {
+		t.Errorf("unchanged mtls block was refused: %v", err)
+	}
+
+	// Test 4: nil mtls in both should be accepted
+	active = &config.Config{MTLS: nil}
+	next = &config.Config{MTLS: nil}
+	if err := validateReloadable(active, next); err != nil {
+		t.Errorf("nil mtls in both was refused: %v", err)
 	}
 }
 

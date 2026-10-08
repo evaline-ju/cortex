@@ -422,6 +422,15 @@ func validateReloadable(active, next *config.Config) error {
 	if !reflect.DeepEqual(active.Session, next.Session) {
 		diffs = append(diffs, "session.*")
 	}
+	// mtls.* also needs a restart: the TLS dialer is built once in main and handed to
+	// the forward proxy listener. On an mTLS proxy, a reload that removes the mtls block
+	// while adding a WritesDestination plugin would let that plugin through, violating
+	// the TLS-in-TLS constraint forwardproxy.Support is built to enforce. Like cost_ledger
+	// and session, mtls.* is unreloadable in any direction (present↔absent or field change).
+	// Pointer-to-struct, so DeepEqual covers nil↔present as well as field drift.
+	if !reflect.DeepEqual(active.MTLS, next.MTLS) {
+		diffs = append(diffs, "mtls.*")
+	}
 	if len(diffs) > 0 {
 		return fmt.Errorf("unreloadable field changed, pod restart required: %v", diffs)
 	}
