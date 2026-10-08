@@ -29,7 +29,7 @@ const serverUsage = `agentop server — choose the inference server each coding 
 
 Usage:
   agentop server [--config PATH]
-  agentop server add <name> <url> [--key-stdin] [--yes] [--config PATH]
+  agentop server add <name> <url> [--opus M --sonnet M --haiku M] [--key-stdin] [--yes] [--config PATH]
   agentop server remove <name> [--config PATH]
   agentop server use <name> --agent <agent> [--config PATH]
   agentop server reset --agent <agent> [--config PATH]
@@ -45,7 +45,16 @@ treats each one it then sees as new.
 
 "add" reads the server's API key at a prompt that does not echo, or from stdin
 with --key-stdin; it is never an argument. Adding a name that exists asks before
-replacing it (--yes skips the question), which is also how a key is rotated.
+replacing its URL, key and models (--yes skips the question), which is also how a
+key is rotated.
+
+Claude Code asks for Claude's model names whichever server it talks to. For a
+server that serves other names, --opus, --sonnet and --haiku name its model for
+each of Claude Code's families: all three, or none when the server serves Claude
+Code's own names. Each request is then sent for its family's model, and one that
+already names one of the three goes as it is. A Claude model of no mapped family,
+such as claude-fable-5-1, is refused rather than guessed; any other name passes
+through, for the server to answer.
 
 Every change is written to ~/.cortex/config.yaml, or to --config PATH, and returns
 once the proxy has reloaded it. Nothing restarts. Flags go after the action.
@@ -358,7 +367,7 @@ func modelChecks(model string, env map[string]string, shown string) []settingsCh
 	check := func(m, where string) {
 		if m != "" && !isClaudeModel(m) {
 			out = append(out, settingsCheck{false, fmt.Sprintf(
-				"Claude Code asks for %s instead of Claude's models (%s in %s). Cortex can't map that back: remove the line, and route Claude Code only to servers that serve Claude's names.",
+				"Claude Code asks for %s instead of Claude's models (%s in %s). Cortex can't map that back: remove the line, and give the server its models with agentop server add --opus, --sonnet and --haiku instead.",
 				m, where, shown)})
 		}
 	}

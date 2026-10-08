@@ -6,10 +6,10 @@
 // etc.) it replaces the body via pctx.SetBody. OnResponse is a pass-through in
 // v1 — model-driven restoration/expand is a later integration.
 //
-// It is the single outbound WritesRequestBody plugin, so it is mutually exclusive with
-// SPARC on the outbound chain (the pipeline refuses to build with two). It
-// declares RequiresAny: [inference-parser] so a parser establishes the request
-// is an inference call before it runs.
+// It is a request-body writer, and request-body writers chain: it may share the
+// outbound chain with tool-prune or any other, each seeing the body as the one
+// before it left it. It declares RequiresAny: [inference-parser] so a parser
+// establishes the request is an inference call before it runs.
 //
 // LLM-backed engine components (summarize, extract:code) are optional: configure
 // a `model:` block to enable a static cheap model, and the plugin also
@@ -157,7 +157,7 @@ func (p *ContextGuru) Name() string { return "context-guru" }
 func (p *ContextGuru) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
 		ReadsBody:         true,
-		WritesRequestBody: true, // single outbound body-writer slot (mutually exclusive with SPARC)
+		WritesRequestBody: true, // chains with any other request-body writer
 		RequiresAny:       []string{"inference-parser"},
 		Description:       "Compacts the outbound LLM request context before forwarding (context-guru).",
 	}
@@ -252,10 +252,15 @@ func (p *ContextGuru) OnRequest(ctx context.Context, pctx *pipeline.Context) pip
 	before := len(pctx.Body)
 	out, changed := apply.BodyWithModel(ctx, p.pipe, p.store, provider, pctx.Body, sid, false, models)
 	if changed && len(out) > 0 {
-		pctx.SetBody(out)
 		// Per-request byte-level view (the engine's token-level view is logged by
 		// logEmitter.Run). The framework also emits a body-mutation session event.
-		slog.Info("context-guru rewrote request body",
+		// The message follows this plugin's own SetBody result, not BodyMutated: under
+		// on_error: observe the write is a shadow and the client's body goes upstream.
+		msg := "context-guru rewrote request body"
+		if !pctx.SetBody(out) {
+			msg = "context-guru would rewrite request body (on_error: observe, not applied)"
+		}
+		slog.Info(msg,
 			"provider", provider, "path", pctx.Path, "session", sid,
 			"bytesBefore", before, "bytesAfter", len(out), "pctSaved", pct(before, len(out)))
 	}

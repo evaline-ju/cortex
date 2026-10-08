@@ -13,7 +13,9 @@ import (
 // package should not link a plugin. Only the fields needed to price a saving are declared,
 // so tool-prune can change everything else without touching settle.
 type pruneFacts struct {
-	BytesRemoved   int
+	BytesRemoved int
+	// BodyBytesAfter is the body as the component left it. Avoided calibrates on it only
+	// when no write took effect; otherwise on the size the framework recorded as sent.
 	BodyBytesAfter int
 	Projected      bool
 }
@@ -61,6 +63,15 @@ func Avoided(pctx *pipeline.Context, rates pricing.Resolver) []event.Saving {
 	if pctx.Extensions.Inference != nil {
 		model = pctx.Extensions.Inference.Model
 	}
+	// CALIBRATED ON THE BODY THE REQUEST SENT, the one the prompt tokens were counted on.
+	// Request writers chain, so a component's own figure is the body as IT left it, and a
+	// later writer may have shrunk or grown it: dividing by that size mis-states
+	// tokens-per-byte, and every saving priced from it, by the ratio of the two. Once any
+	// write took effect, pctx.Body is the body the listener sent: each applied SetBody
+	// replaces it, a shadow write under on_error: observe leaves it alone, and no listener
+	// changes it after the request pass. With no applied write the body went as the
+	// client sent it, and the component's figure is that size.
+	rewritten := pctx.BodyMutated()
 
 	var out []event.Saving
 	for _, component := range savingComponents {
@@ -72,7 +83,11 @@ func Avoided(pctx *pipeline.Context, rates pricing.Resolver) []event.Saving {
 		if !ok {
 			continue
 		}
-		tokens := pricing.EstimateTokensFromBytes(facts.BytesRemoved, prompt, facts.BodyBytesAfter)
+		bodyBytes := facts.BodyBytesAfter
+		if rewritten {
+			bodyBytes = len(pctx.Body)
+		}
+		tokens := pricing.EstimateTokensFromBytes(facts.BytesRemoved, prompt, bodyBytes)
 		if tokens <= 0 {
 			continue
 		}

@@ -335,8 +335,8 @@ pipeline:
       # leaving every byte on the wire untouched, which settles the question
       # without unconfiguring anything.
       #
-      # Keep it last: it rewrites the request body, and body readers must
-      # precede the mutator so they see the original bytes.
+      # Keep it after every body reader: it rewrites the request body, and a
+      # reader must see the bytes the client sent.
       - name: tool-prune
         on_error: enforce
         config:

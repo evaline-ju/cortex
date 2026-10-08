@@ -421,14 +421,18 @@ wants to register.
 - `core/plugins/` -- The concrete plugins + registry; see [`docs/plugin-reference.md`](docs/plugin-reference.md) for the per-plugin config convention
 
 **Directional body capabilities.** `PluginCapabilities` declares body writes
-per direction: `WritesRequestBody` (calls `pctx.SetBody`) and
-`WritesResponseBody` (calls `pctx.SetResponseBody`). `WritesResponseBody` is the
+per direction: `WritesRequestBody` (calls `pctx.SetBody` or `pctx.SetRequestModel`)
+and `WritesResponseBody` (calls `pctx.SetResponseBody`). `WritesResponseBody` is the
 SSE streaming predicate — both proxy listeners fall back from incremental relay
 to the buffered path only when some plugin declares it. A request-only mutator
 (`tool-prune`, `context-guru`) therefore keeps streaming, because requests are
-never streamed in the first place. `pipeline.New` allows at most one mutator per
-direction, and no mutator of either direction may precede a `ReadsBody`-only
-plugin. See [`docs/plugin-reference.md`](docs/plugin-reference.md#capability-fields).
+never streamed in the first place. `pipeline.New` lets any number of request
+mutators chain — each sees `pctx.Body` as the one before it left it — allows at
+most one response mutator, and lets no mutator of either direction precede a
+`ReadsBody`-only plugin. A writer learns whether its own write applied from
+`SetBody`'s result (false under `on_error: observe`), not from
+`pctx.BodyMutated()`, which is true once any writer's bytes took effect. See
+[`docs/plugin-reference.md`](docs/plugin-reference.md#capability-fields).
 
 **Plugin metrics.** Plugins that implement `pipeline.MetricsProvider` have their
 counters surfaced on `GET /v1/pipeline` and rendered in agentop's plugin pane.
@@ -577,6 +581,7 @@ Every event on `/v1/sessions/{id}` and `/v1/events` carries:
   reports the same situation one layer down as `tunnelReason: "dial-failed"` with
   `error.kind: "dial_failed"`.
 - `requestedHost` — present only when a plugin redirected the request (`pctx.Redirect`): the host the client asked for. `host` is where the request actually went, and usage, the cost ledger and pricing all follow `host`. agentop's detail pane shows both on a `redirected:` line.
+- `inference.requestedModel` — present only when a plugin changed the model (`pctx.SetRequestModel`): the model the client asked for. `inference.model` is the model the request was sent for, which settlement prices; agentop's detail pane shows both on a `model:` line.
 - `tunnel`, `tunnelReason`, `bytesUp`, `bytesDown` — an opaque CONNECT (or transparent-redirect) tunnel records two rows sharing a `requestId`: the open (`phase: "request"`, `tunnelReason` saying why the bytes stayed opaque) and, when the tunnel ends, the close (`phase: "response"`). The close carries the CONNECT's own `statusCode` — 200, or 502 with the dial error in `error` when the destination could not be reached (`tunnelReason: "dial-failed"`) — plus `durationMs` for how long the tunnel stayed open and the bytes it carried each way (up = client to destination). It is not the destination's status: that travels inside the client's end-to-end TLS. A bridged tunnel's open is recorded with its first decrypted request — in that request's session, directly before it, stamped with its time — and records no close, because the request carries its own response; a bridged tunnel that recorded no request gets its open and a close when it ends. Tunnel rows are kept out of `/v1/usage`: a tunnel's lifetime is not a request latency.
 - `httpMethod`, `httpPath` — the HTTP verb and path, so a request no parser recognized is still identifiable rather than showing only a host. Distinct from the `method` inside `a2a` / `mcp`, which is a protocol method name. On an opaque tunnel `httpMethod` is `CONNECT` and `httpPath` is absent — opaque bytes carry no request line. The path is query-stripped and percent-decoded, so query-borne credentials never reach the timeline, but a secret in a path *segment* (a bot token, a webhook path) does survive on this unauthenticated surface — worth knowing before exporting events off-box.
 

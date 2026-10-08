@@ -23,15 +23,23 @@ import (
 type pruneEvent struct {
 	ToolsRemoved []string `json:"toolsRemoved,omitempty"`
 	BytesRemoved int      `json:"bytesRemoved"`
-	// BodyBytesAfter is the size of the body actually SENT upstream, which is
+	// BodyBytesAfter is the size of the body as this plugin left it, which is
 	// not the pruned size under on_error: observe — there SetBody is a no-op and
-	// the original goes out. A consumer divides the response's prompt-token
-	// count by this to get tokens-per-byte, so using the pruned size while the
-	// original was billed would inflate that ratio and overstate the saving.
+	// the body it was handed goes on. A consumer divides the response's
+	// prompt-token count by the bytes sent to get tokens-per-byte, so using the
+	// pruned size while the larger body was billed would inflate that ratio and
+	// overstate the saving.
+	//
+	// It is the bytes sent only when no later writer changes them. Request
+	// writers chain, so cost/settle calibrates on the body sent —
+	// len(pctx.Body) once pctx.BodyMutated() — and falls back to this when
+	// nothing was rewritten.
 	BodyBytesAfter int `json:"bodyBytesAfter"`
 	// Projected marks a saving that was measured but NOT applied — observe mode.
 	// The bytes were not actually removed from the request, so a consumer must
 	// present this as "would have saved", never as money already not spent.
+	// Set from this plugin's own SetBody result, not from BodyMutated, which
+	// another writer's applied bytes would make true.
 	Projected bool   `json:"projected,omitempty"`
 	Model     string `json:"model,omitempty"`
 }

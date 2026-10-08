@@ -607,13 +607,15 @@ mutator now keeps incremental relay.
 
 `pipeline.New` enforces two rules at build time:
 
-1. **At most one mutator per direction per pipeline.** Multiple mutators writing the same bytes would have ambiguous ordering semantics; the error names both plugins so an operator debugging pod logs knows which two to reconcile. A request mutator and a response mutator coexist fine.
+1. **Request mutators chain; at most one response mutator.** Any number of `WritesRequestBody` plugins may share a pipeline: they run in chain order, each seeing `pctx.Body` as the one before it left it, and the listener sends the last one's bytes. A second `WritesResponseBody` plugin is refused with an error naming both — nothing needs two, and the response pass runs in reverse with an ordering gap of its own. A request mutator and a response mutator coexist fine.
 2. **A mutator of either direction cannot precede a `ReadsBody`-only plugin.** A reader expects to see the original bytes; putting a mutator before it would silently feed the reader the post-rewrite content.
 
-**Mutation helpers.** `SetBody` / `SetResponseBody` replace the byte slice and flip an internal `bodyMutated` / `responseBodyMutated` flag that listeners read via `pctx.BodyMutated()` / `pctx.ResponseBodyMutated()`. They also auto-emit:
+**Mutation helpers.** `SetBody` / `SetResponseBody` replace the byte slice and flip an internal `bodyMutated` / `responseBodyMutated` flag that listeners read via `pctx.BodyMutated()` / `pctx.ResponseBodyMutated()`. Each returns whether *its own* write took effect — `false` for a shadow write under `on_error: observe` or a call dropped in `OnFinish` — because the flag is direction-wide: once one writer's bytes took effect it is true for every later writer too, shadow or not. They also auto-emit:
 
 - A `modify`-action Invocation with `Reason: "body_rewritten"`, framework-attributed to the mutating plugin.
-- A plugin-public event under `pctx.Extensions.Custom["body-mutation" + PluginEventSuffix]` with the phase (`request` / `response`), plugin name, byte length before/after, and sha256 before/after. Never the raw body content — the session store is unauthenticated.
+- A plugin-public event under `pctx.Extensions.Custom["body-mutation" + PluginEventSuffix]` with the phase (`request` / `response`), byte length and sha256 before and after, and the writers: `plugins` lists every plugin whose write took effect in that direction, in order — or, while none has, the observed writer whose would-be rewrite this describes (its invocation carries `shadow: true`) — and `plugin` is the last. With several request mutators the event describes the chain — before is the body the client sent, after the body sent upstream — and a write under `on_error: observe` never replaces the record of one that took effect. Never the raw body content — the session store is unauthenticated.
+
+Once `pctx.BodyMutated()` is true, `pctx.Body` is the request body the listener sends: each applied `SetBody` replaces it and a shadow write leaves it alone. Settlement calibrates a byte saving on `len(pctx.Body)` then, not on the published event, which holds a shadow's would-be length while nothing has taken effect and is replaced by a response write.
 
 The flags (not byte-compare) are the source of truth. A rewrite that produces byte-identical output still records the Invocation because "redactor ran, nothing matched" is valid telemetry.
 

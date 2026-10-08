@@ -92,10 +92,9 @@ func TestPipeline_BodyWritePredicates_TruthTable(t *testing.T) {
 	}
 }
 
-// TestValidateCapabilities_Directional: the mutator-exclusivity rule is
-// per-direction, and reader-ordering is triggered by either write flag.
-// Crucially, every combination that exists in-tree today validates exactly
-// as it did before the split.
+// TestValidateCapabilities_Directional: request mutators chain, a response
+// mutator is still exclusive, and reader-ordering is triggered by either write
+// flag. Every combination that validated before chaining still does.
 func TestValidateCapabilities_Directional(t *testing.T) {
 	req := PluginCapabilities{WritesRequestBody: true}
 	resp := PluginCapabilities{WritesResponseBody: true}
@@ -108,9 +107,8 @@ func TestValidateCapabilities_Directional(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "two request writers rejected",
+			name:    "two request writers chain",
 			plugins: []Plugin{&stubPlugin{name: "a", caps: req}, &stubPlugin{name: "b", caps: req}},
-			wantErr: "WritesRequestBody",
 		},
 		{
 			name:    "two response writers rejected",
@@ -122,9 +120,9 @@ func TestValidateCapabilities_Directional(t *testing.T) {
 			plugins: []Plugin{&stubPlugin{name: "a", caps: req}, &stubPlugin{name: "b", caps: resp}},
 		},
 		{
-			name:    "two both-direction writers rejected on the request rule first",
+			name:    "two both-direction writers rejected on the response rule",
 			plugins: []Plugin{&stubPlugin{name: "a", caps: both}, &stubPlugin{name: "b", caps: both}},
-			wantErr: "WritesRequestBody",
+			wantErr: "WritesResponseBody",
 		},
 		{
 			name:    "reader before mutator is fine",
@@ -178,7 +176,7 @@ func TestValidateCapabilities_ResponseAndRequestMutatorsCoexist(t *testing.T) {
 	if err != nil {
 		t.Errorf("[parser, sparc, tool-prune] should build: %v", err)
 	}
-	// Two mutators on the SAME side are still rejected.
+	// Two RESPONSE mutators are still rejected; request mutators chain.
 	if err := validateCapabilities([]Plugin{
 		&stubPlugin{name: "sparc", caps: PluginCapabilities{WritesResponseBody: true}},
 		&stubPlugin{name: "cpex", caps: PluginCapabilities{WritesResponseBody: true}},

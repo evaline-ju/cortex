@@ -25,13 +25,25 @@ type PluginCapabilities struct {
 	ReadsBody bool
 
 	// WritesRequestBody: the plugin may mutate pctx.Body (call
-	// pctx.SetBody). Implies ReadsBody — Normalize() auto-promotes.
-	// Listener propagates the mutation to the wire (ext_proc
-	// BodyMutation, or the outbound http.Request for proxy listeners).
+	// pctx.SetBody or pctx.SetRequestModel). Implies ReadsBody —
+	// Normalize() auto-promotes. Listener propagates the mutation to the
+	// wire (ext_proc BodyMutation, or the outbound http.Request for proxy
+	// listeners).
 	//
-	// Pipeline.New rejects a pipeline that has more than one
-	// WritesRequestBody plugin per direction — mutation ordering would
-	// be ambiguous.
+	// Any number of WritesRequestBody plugins may share a pipeline. They
+	// run in chain order, each seeing pctx.Body as the one before it left
+	// it, and the listener sends the last one's bytes. Pipeline.New rejects
+	// one placed before a ReadsBody-only plugin, which must see the bytes
+	// the client sent.
+	//
+	// A chained writer derives its edit from pctx.Body. The parser
+	// extensions (pctx.Extensions.Inference and the rest) are not re-parsed
+	// after a write: they describe the client's request — apart from the
+	// model, which SetRequestModel keeps current — so an edit built from
+	// them can undo an earlier writer's rewrite or land on the wrong element.
+	// A writer learns whether its own write applied from SetBody's result:
+	// BodyMutated() is true once any writer's bytes took effect, including
+	// for a later writer whose own call was a shadow under on_error: observe.
 	//
 	// Declaring this does NOT cost response streaming. Requests are
 	// never streamed — they arrive complete with a Content-Length and
@@ -49,7 +61,8 @@ type PluginCapabilities struct {
 	// Pipeline.WritesResponseBody.
 	//
 	// Pipeline.New rejects more than one WritesResponseBody plugin per
-	// direction, for the same ordering reason as the request side.
+	// pipeline: nothing needs more, and the response pass, which runs in
+	// reverse, has an ordering gap of its own (see validateCapabilities).
 	WritesResponseBody bool
 
 	// WritesDestination: the plugin may call pctx.Redirect to send the request to a

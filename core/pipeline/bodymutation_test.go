@@ -64,23 +64,6 @@ func TestPipeline_NeedsBody_IncludesWritesRequestBody(t *testing.T) {
 	}
 }
 
-// TestNew_RejectsTwoMutators: two WritesRequestBody plugins in one pipeline
-// have ambiguous mutation ordering; Pipeline.New rejects the build and
-// the error names both plugins so an operator reading pod logs can
-// identify which two to reconcile.
-func TestNew_RejectsTwoMutators(t *testing.T) {
-	_, err := New([]Plugin{
-		&stubPlugin{name: "redactor-a", caps: PluginCapabilities{WritesRequestBody: true}},
-		&stubPlugin{name: "redactor-b", caps: PluginCapabilities{WritesRequestBody: true}},
-	})
-	if err == nil {
-		t.Fatal("expected error for two WritesRequestBody plugins")
-	}
-	if !strings.Contains(err.Error(), "redactor-a") || !strings.Contains(err.Error(), "redactor-b") {
-		t.Errorf("error should name both plugins, got %q", err.Error())
-	}
-}
-
 // TestNew_RejectsReaderAfterMutator: a parser that expects to see the
 // original bytes must not run after a mutator. The validator catches
 // the swapped order at build time instead of silently giving the

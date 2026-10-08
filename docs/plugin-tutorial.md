@@ -239,9 +239,9 @@ for `SetResponseBody`) with a correct `Content-Length` and a cleared
 (never the raw body content).
 
 **Rules enforced by `pipeline.New`:**
-- At most one mutator **per direction** per pipeline. Two request mutators (or
-  two response mutators) = ambiguous ordering → build fails at startup. One of
-  each is fine; they never rewrite the same bytes.
+- Request mutators chain: any number may share a pipeline, each seeing the body
+  as the one before it left it. At most one **response** mutator: a second fails
+  the build at startup. One of each is fine.
 - A mutator must run **after** any `ReadsBody`-only plugin, whichever direction
   it writes. Readers see the original bytes; a mutator in front would silently
   feed them post-rewrite content.

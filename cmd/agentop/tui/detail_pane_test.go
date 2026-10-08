@@ -164,3 +164,77 @@ func TestRedirectHeader_NamesBothHosts(t *testing.T) {
 		t.Errorf("redirectHeader = %q, want %q", got, want)
 	}
 }
+
+func TestModelHeader_EmptyUnlessAPluginChangedTheModel(t *testing.T) {
+	for _, e := range []*pipeline.SessionEvent{
+		{Host: "glm-litellm.example.com"},
+		{Inference: &pipeline.InferenceExtension{Model: "claude-opus-5-5"}},
+	} {
+		if got := modelHeader(e); got != "" {
+			t.Errorf("modelHeader = %q for %+v, want empty", got, e)
+		}
+	}
+}
+
+func TestModelHeader_NamesBothModels(t *testing.T) {
+	got := modelHeader(&pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{
+		Model: "glm-5.3", RequestedModel: "claude-opus-5-5",
+	}})
+	if want := "model:       claude-opus-5-5 → glm-5.3"; got != want {
+		t.Errorf("modelHeader = %q, want %q", got, want)
+	}
+}
+
+// Both headers print what the client sent — the model it asked for, the host it
+// named — and what the upstream echoed, so a control character in either must not
+// reach the terminal: an escape sequence there could recolour or rewrite the pane.
+// Each becomes U+FFFD, as everywhere else agentop prints a caller-supplied label.
+func TestRewriteHeader_NeutralisesControlCharacters(t *testing.T) {
+	got := rewriteHeader(&pipeline.SessionEvent{
+		Host:          "glm\x1b[2Jlitellm.example.com",
+		RequestedHost: "ete\x07litellm.example.com",
+		Inference:     &pipeline.InferenceExtension{Model: "glm\u202e5.3", RequestedModel: "claude\x1b]0;x\x07opus"},
+	})
+	want := "redirected:  ete\uFFFDlitellm.example.com → glm\uFFFD[2Jlitellm.example.com\n" +
+		"model:       claude\uFFFD]0;x\uFFFDopus → glm\uFFFD5.3"
+	if got != want {
+		t.Errorf("rewriteHeader = %q, want %q", got, want)
+	}
+}
+
+// What a router changed is one block: where the request went, then what it was
+// sent for, each line only when it applies.
+func TestRewriteHeader_StacksTheRedirectAndTheModel(t *testing.T) {
+	e := &pipeline.SessionEvent{
+		Host:          "glm-litellm.example.com",
+		RequestedHost: "ete-litellm.example.com",
+		Inference:     &pipeline.InferenceExtension{Model: "glm-5.3", RequestedModel: "claude-opus-5-5"},
+	}
+	want := "redirected:  ete-litellm.example.com → glm-litellm.example.com\n" +
+		"model:       claude-opus-5-5 → glm-5.3"
+	if got := rewriteHeader(e); got != want {
+		t.Errorf("rewriteHeader = %q, want %q", got, want)
+	}
+	e.RequestedHost = ""
+	if got := rewriteHeader(e); got != "model:       claude-opus-5-5 → glm-5.3" {
+		t.Errorf("rewriteHeader with no redirect = %q, want the model line alone", got)
+	}
+	if got := rewriteHeader(&pipeline.SessionEvent{Host: "x"}); got != "" {
+		t.Errorf("rewriteHeader = %q for an event nothing changed, want empty", got)
+	}
+}
+
+// The JSON below the header keeps requestedModel on both phases, beside model.
+func TestFilterForDetail_KeepsRequestedModel(t *testing.T) {
+	wire := []byte(`{"inference":{"model":"glm-5.3","requestedModel":"claude-opus-5-5","completion":"hi"}}`)
+	for _, phase := range []pipeline.SessionPhase{pipeline.SessionRequest, pipeline.SessionResponse} {
+		var got map[string]any
+		if err := json.Unmarshal(filterForDetail(wire, phase), &got); err != nil {
+			t.Fatal(err)
+		}
+		inf, _ := got["inference"].(map[string]any)
+		if inf["requestedModel"] != "claude-opus-5-5" {
+			t.Errorf("phase %s: inference = %v, want requestedModel kept", phase, inf)
+		}
+	}
+}

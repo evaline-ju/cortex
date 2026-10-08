@@ -29,6 +29,9 @@ type Pipeline struct {
 	// redirects[i] is plugins[i]'s WritesDestination, read once at New so Run does
 	// not ask every plugin for its capabilities on every request.
 	redirects []bool
+	// requestWriters[i] is plugins[i]'s WritesRequestBody, read once at New for the
+	// same reason. SetRequestModel is accepted only from a plugin that declares it.
+	requestWriters []bool
 }
 
 // Option configures pipeline construction.
@@ -82,10 +85,14 @@ func New(plugins []Plugin, opts ...Option) (*Pipeline, error) {
 		finishTimeout = DefaultFinishTimeout
 	}
 	redirects := make([]bool, len(plugins))
+	requestWriters := make([]bool, len(plugins))
 	for i, plugin := range plugins {
-		redirects[i] = plugin.Capabilities().WritesDestination
+		caps := plugin.Capabilities()
+		redirects[i] = caps.WritesDestination
+		requestWriters[i] = caps.WritesRequestBody
 	}
-	return &Pipeline{plugins: plugins, policies: policies, finishTimeout: finishTimeout, redirects: redirects}, nil
+	return &Pipeline{plugins: plugins, policies: policies, finishTimeout: finishTimeout,
+		redirects: redirects, requestWriters: requestWriters}, nil
 }
 
 // Run executes the request phase of the pipeline sequentially.
@@ -120,6 +127,7 @@ func (p *Pipeline) Run(ctx context.Context, pctx *Context) Action {
 		}
 		pctx.setCurrent(plugin.Name(), InvocationPhaseRequest, policy)
 		pctx.currentMayRedirect = p.redirectsAt(i)
+		pctx.currentMayWriteRequestBody = p.writesRequestAt(i)
 		pctx.dispatched = append(pctx.dispatched, i)
 		action := plugin.OnRequest(ctx, pctx)
 		pctx.clearCurrent()
@@ -260,6 +268,12 @@ func (p *Pipeline) policyAt(i int) ErrorPolicy {
 // like policyAt, so a Pipeline not built by New never panics.
 func (p *Pipeline) redirectsAt(i int) bool {
 	return i < len(p.redirects) && p.redirects[i]
+}
+
+// writesRequestAt reports whether plugins[i] declares WritesRequestBody. Bounds-safe,
+// like redirectsAt.
+func (p *Pipeline) writesRequestAt(i int) bool {
+	return i < len(p.requestWriters) && p.requestWriters[i]
 }
 
 // markShadowAndLog records the would-have-denied Invocation as
@@ -613,18 +627,19 @@ func (p *Pipeline) dispatchFinish(parent context.Context, name string, f Finishe
 }
 
 // validateCapabilities enforces body-mutation ordering rules and the destination rule:
-//   - At most one WritesRequestBody plugin per pipeline — mutation ordering would
-//     otherwise be ambiguous; downstream readers can't tell which version
-//     they're seeing.
-//   - A body reader (ReadsBody) must not follow a body mutator (WritesRequestBody) —
-//     the reader would silently see mutated bytes instead of the originals.
+//   - Any number of WritesRequestBody plugins may share a pipeline. They run in chain
+//     order, each seeing pctx.Body as the one before it left it, and the listener
+//     sends the last one's bytes.
+//   - At most one WritesResponseBody plugin per pipeline. Nothing needs more, and the
+//     response pass has its own ordering gap (see the KNOWN GAP note below).
+//   - A body reader (ReadsBody) must not follow a body mutator of either direction —
+//     the reader would silently see mutated bytes instead of the originals. This is
+//     what the old one-request-mutator rule protected, and it holds unchanged with
+//     any number of request mutators after the readers.
 //   - At most one WritesDestination plugin per pipeline — a request goes to one
 //     place, and a second redirect would silently override the first.
 func validateCapabilities(plugins []Plugin) error {
-	// Each direction admits at most one mutator. The rules are per-direction
-	// because ordering is only ambiguous between two plugins rewriting the
-	// same bytes; a request mutator and a response mutator never collide.
-	var requestMutator, responseMutator, destinationWriter string
+	var responseMutator, destinationWriter string
 	var firstMutator, readerAfterMutator string
 	for _, plugin := range plugins {
 		caps := plugin.Capabilities().Normalize()
@@ -633,12 +648,6 @@ func validateCapabilities(plugins []Plugin) error {
 				return fmt.Errorf("pipeline: two plugins declare WritesDestination: %q and %q — a request goes to one place; at most one destination writer per pipeline is allowed", destinationWriter, plugin.Name())
 			}
 			destinationWriter = plugin.Name()
-		}
-		if caps.WritesRequestBody {
-			if requestMutator != "" {
-				return fmt.Errorf("pipeline: two plugins declare WritesRequestBody: %q and %q — mutation ordering would be ambiguous; at most one request-body mutator per pipeline is allowed", requestMutator, plugin.Name())
-			}
-			requestMutator = plugin.Name()
 		}
 		if caps.WritesResponseBody {
 			if responseMutator != "" {
@@ -680,7 +689,7 @@ func validateCapabilities(plugins []Plugin) error {
 	}
 	warnResponseReaderOrdering(plugins)
 	if readerAfterMutator != "" {
-		return fmt.Errorf("pipeline: plugin %q reads body after mutator %q — body readers must precede the mutator so they see the original bytes", readerAfterMutator, firstMutator)
+		return fmt.Errorf("pipeline: plugin %q reads body after mutator %q — body readers must precede every mutator so they see the original bytes", readerAfterMutator, firstMutator)
 	}
 	return nil
 }
@@ -696,15 +705,24 @@ func validateCapabilities(plugins []Plugin) error {
 // promised no working configuration starts failing. But the deferral should not
 // be invisible — until now its only record was a code comment, which an operator
 // running the shape would never read.
+//
+// Only a reader with a response mutator AFTER it is warned about: with none
+// there, the response pass hands every reader the bytes the upstream sent. And
+// a reader here is a plugin that declares ReadsBody itself — the raw
+// capability, as NeedsResponseBody reads it. Normalize also counts a
+// request-only writer such as tool-prune or the inference-router as a reader,
+// but it reads no response, and counting it made both warn on every build and
+// reload of a chain with no response mutator at all.
 func warnResponseReaderOrdering(plugins []Plugin) {
-	var respMutator string
-	for _, p := range plugins {
-		caps := p.Capabilities().Normalize()
-		if caps.WritesResponseBody {
-			respMutator = p.Name()
-			continue
+	last := -1 // the last response mutator; New admits one
+	for i, p := range plugins {
+		if p.Capabilities().WritesResponseBody {
+			last = i
 		}
-		if respMutator != "" || !caps.ReadsBody {
+	}
+	for _, p := range plugins[:max(last, 0)] {
+		caps := p.Capabilities()
+		if caps.WritesResponseBody || !caps.ReadsBody {
 			continue
 		}
 		if _, streaming := p.(StreamingResponder); streaming {

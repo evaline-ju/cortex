@@ -75,6 +75,10 @@ func serverAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfgPath := flags.String("config", "", "Cortex config file (default ~/.cortex/config.yaml)")
 	keyStdin := flags.Bool("key-stdin", false, "read the API key from stdin instead of a prompt")
 	yes := flags.Bool("yes", false, "replace an existing server without asking")
+	var models routerconfig.Server
+	flags.StringVar(&models.Opus, "opus", "", "the server's model for Claude Code's opus requests")
+	flags.StringVar(&models.Sonnet, "sonnet", "", "the server's model for Claude Code's sonnet requests")
+	flags.StringVar(&models.Haiku, "haiku", "", "the server's model for Claude Code's haiku requests")
 	pos, code, ok := serverFlags(flags, args, stdout, stderr)
 	if !ok {
 		return code
@@ -92,6 +96,12 @@ func serverAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// and ParseURL's errors quote no part of the URL.
 	ep, err := routerconfig.ParseURL(rawURL)
 	if err != nil {
+		fmt.Fprintf(stderr, "agentop server add: %v\n", err)
+		return 2
+	}
+	// Before anything is read or asked, like the name and URL: a typo in a model
+	// should not cost the user a pasted key.
+	if err := checkModelFlags(name, models); err != nil {
 		fmt.Fprintf(stderr, "agentop server add: %v\n", err)
 		return 2
 	}
@@ -123,8 +133,10 @@ func serverAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	old, replacing := c.Servers[name]
 	if replacing {
-		fmt.Fprintf(stdout, "%s is already configured (%s). Replacing it gives it this URL and key, "+
-			"and the sessions on it use them from their next request.\n", name, serverHost(old))
+		// The whole server is replaced, models included, so the question says what it
+		// will map to: re-adding it without the flags drops its mapping.
+		fmt.Fprintf(stdout, "%s is already configured (%s). Replacing it gives it this URL, key and model mapping (%s), "+
+			"and the sessions on it use them from their next request.\n", name, serverHost(old), mappingText(models))
 		if !*yes && !serverConfirm(stdout) {
 			return exitDeclined
 		}
@@ -149,8 +161,14 @@ func serverAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			"cross the network decrypted, key and prompts included.\n", ep.URL())
 	}
 
+	pairs := []string{"url", ep.URL(), "key", key}
+	if models.Mapped() {
+		for _, f := range routerconfig.Families {
+			pairs = append(pairs, f, models.ModelFor(f))
+		}
+	}
 	ch := edit.ConfigChange{Chain: "outbound", Plugin: routerName, Path: []string{"servers", name},
-		Value: edit.MapValue("url", ep.URL(), "key", key), CreatePlugin: true}
+		Value: edit.MapValue(pairs...), CreatePlugin: true}
 	done := "Added " + name + "."
 	if replacing {
 		done = "Replaced " + name + "."
@@ -160,9 +178,23 @@ func serverAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	return runServerWrite(stdout, stderr, path, statsURL, ch, writeReport{
 		done:      done,
-		unchanged: name + " already has that URL and key; nothing to change.",
+		unchanged: name + " already has that URL, key and models; nothing to change.",
 		note:      routerInactive(cfg, path),
 	})
+}
+
+// checkModelFlags checks add's --opus, --sonnet and --haiku: all three or none,
+// as the router maps them, and no $, which config.Load would expand.
+func checkModelFlags(name string, models routerconfig.Server) error {
+	if err := routerconfig.CheckModels(name, models); err != nil {
+		return err
+	}
+	for _, f := range routerconfig.Families {
+		if strings.Contains(models.ModelFor(f), "$") {
+			return fmt.Errorf("--%s contains $, which Cortex reads as an environment variable when it loads the config", f)
+		}
+	}
+	return nil
 }
 
 func serverRemove(args []string, stdout, stderr io.Writer) int {

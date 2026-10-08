@@ -2,8 +2,8 @@
 #
 # Outbound chain: inference-parser (parses the OpenAI /v1/chat/completions body)
 # -> context-guru (compacts the agent's growing tool-output context before it is
-# forwarded to the LLM). context-guru is the single outbound WritesRequestBody plugin
-# (mutually exclusive with sparc) and requires a parser ahead of it.
+# forwarded to the LLM). context-guru is an outbound WritesRequestBody plugin (it
+# chains with any other request-body writer) and requires a parser ahead of it.
 #
 # THREE MODES via the context-guru entry's `on_error`:
 #   enforce  (default) — compaction is applied to the outbound request.

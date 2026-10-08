@@ -347,7 +347,7 @@ func TestCapabilities(t *testing.T) {
 	}
 	if caps.WritesRequestBody {
 		t.Error("must not declare WritesRequestBody: SPARC never calls pctx.SetBody, " +
-			"and the claim blocks any real request mutator from sharing the chain")
+			"so the claim would misstate what it writes")
 	}
 	if !caps.Normalize().ReadsBody {
 		t.Error("a write flag must promote ReadsBody")

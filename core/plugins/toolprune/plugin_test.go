@@ -1130,3 +1130,125 @@ func TestMetrics_UnknownTierIsNotInput(t *testing.T) {
 		t.Errorf("tier-unknown row = %v, want the tokens counted", unknown.Value)
 	}
 }
+
+// bodyWriter is another request-body writer sharing tool-prune's chain.
+type bodyWriter struct {
+	name    string
+	rewrite func([]byte) []byte
+}
+
+func (w *bodyWriter) Name() string { return w.name }
+func (w *bodyWriter) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{WritesRequestBody: true}
+}
+func (w *bodyWriter) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	pctx.SetBody(w.rewrite(pctx.Body))
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (w *bodyWriter) OnResponse(context.Context, *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// runChain runs plugins as one outbound pipeline, under the given policies.
+func runChain(t *testing.T, pctx *pipeline.Context, policies []pipeline.ErrorPolicy, ps ...pipeline.Plugin) {
+	t.Helper()
+	pipe, err := pipeline.New(ps, pipeline.WithPolicies(policies...))
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	if act := pipe.Run(context.Background(), pctx); act.Type != pipeline.Continue {
+		t.Fatalf("action = %v, want Continue", act.Type)
+	}
+}
+
+func publishedPrune(t *testing.T, pctx *pipeline.Context) pruneEvent {
+	t.Helper()
+	ev, ok := pctx.Extensions.Custom["tool-prune"+pipeline.PluginEventSuffix].(pruneEvent)
+	if !ok {
+		t.Fatalf("no tool-prune event; Custom = %+v", pctx.Extensions.Custom)
+	}
+	return ev
+}
+
+// An observed tool-prune after a writer whose bytes took effect still only measured.
+// BodyMutated says true here — it answers for the request, and the other writer's
+// bytes went upstream — so a plugin reading it for its own outcome published a
+// measured saving as applied, counted it as pruned, and settlement priced it as money
+// not spent. SetBody's own answer is what says the prune did not apply.
+func TestPrune_ObservedAfterAnotherWriterIsStillProjected(t *testing.T) {
+	p := withRates(t, configured(t, "NotebookEdit"), anyEndpoint("*", tierRates(1e-05, 1.25e-05, 1e-06)))
+	pctx := inferenceCtx("/v1/messages", anthropicBody, "Read", "NotebookEdit", "Bash")
+	enforced := &bodyWriter{name: "enforced", rewrite: func(b []byte) []byte {
+		return []byte(strings.Replace(string(b), "run a command", "run a shell command", 1))
+	}}
+	runChain(t, pctx, []pipeline.ErrorPolicy{pipeline.ErrorPolicyEnforce, pipeline.ErrorPolicyObserve},
+		enforced, p.ToolPrune)
+
+	if !strings.Contains(string(pctx.Body), "NotebookEdit") {
+		t.Fatalf("NotebookEdit left the body under observe:\n%s", pctx.Body)
+	}
+	ev := publishedPrune(t, pctx)
+	if !ev.Projected {
+		t.Errorf("event = %+v, want Projected: the prune ran under observe and removed nothing", ev)
+	}
+	if ev.BodyBytesAfter != len(pctx.Body) {
+		t.Errorf("BodyBytesAfter = %d, want %d, the body tool-prune left (the other writer's)",
+			ev.BodyBytesAfter, len(pctx.Body))
+	}
+	if p.m.requestsProjected != 1 || p.m.requestsPruned != 0 {
+		t.Errorf("requestsProjected = %d, requestsPruned = %d; want 1 and 0",
+			p.m.requestsProjected, p.m.requestsPruned)
+	}
+
+	pctx.Extensions.Inference.Model = "claude-opus-5"
+	pctx.Extensions.Inference.CacheWriteTokens = 24701
+	avoided := settle.Avoided(pctx, p.rates)
+	if len(avoided) == 0 {
+		t.Fatal("settlement priced no saving at all; the projection should still be reported")
+	}
+	for _, s := range avoided {
+		if !s.Projected {
+			t.Errorf("settlement priced %+v as applied; nothing was pruned", s)
+		}
+	}
+	p.settle(pctx)
+	p.OnFinish(context.Background(), pctx)
+	for _, m := range p.Metrics() {
+		if m.Name == "$ saved" {
+			t.Errorf("$ saved = %v; the saving was only measured", m.Value)
+		}
+	}
+}
+
+// A later writer that shrinks the body further leaves tool-prune's own BodyBytesAfter
+// describing a body that never went upstream. Settlement calibrates tokens-per-byte on
+// the bytes the request actually sent, so the saving is not understated by the ratio
+// of the two sizes.
+func TestPrune_SettlementCalibratesOnTheBytesALaterWriterSent(t *testing.T) {
+	p := withRates(t, configured(t, "NotebookEdit"), anyEndpoint("*", tierRates(1e-05, 1.25e-05, 1e-06)))
+	pctx := inferenceCtx("/v1/messages", anthropicBody, "Read", "NotebookEdit", "Bash")
+	shrinker := &bodyWriter{name: "shrinker", rewrite: func(b []byte) []byte {
+		return []byte(strings.Replace(string(b), `"description":"run a command",`, "", 1))
+	}}
+	runChain(t, pctx, []pipeline.ErrorPolicy{pipeline.ErrorPolicyEnforce, pipeline.ErrorPolicyEnforce},
+		p.ToolPrune, shrinker)
+
+	ev := publishedPrune(t, pctx)
+	if ev.Projected || ev.BodyBytesAfter <= len(pctx.Body) {
+		t.Fatalf("event = %+v with %d bytes sent; want an applied prune that the shrinker then cut further",
+			ev, len(pctx.Body))
+	}
+	pctx.Extensions.Inference.Model = "claude-opus-5"
+	pctx.Extensions.Inference.CacheWriteTokens = 24701
+	got := settle.Avoided(pctx, p.rates)
+	if len(got) != 1 {
+		t.Fatalf("settlement found %d savings, want 1: %+v", len(got), got)
+	}
+	prompt := pricing.UsageFromInference(pctx.Extensions.Inference).PromptTotal()
+	want := pricing.EstimateTokensFromBytes(ev.BytesRemoved, prompt, len(pctx.Body))
+	if got[0].TokensAvoided != want {
+		t.Errorf("TokensAvoided = %d, want %d calibrated on the %d bytes sent; tool-prune's own "+
+			"%d-byte figure gives %d", got[0].TokensAvoided, want, len(pctx.Body), ev.BodyBytesAfter,
+			pricing.EstimateTokensFromBytes(ev.BytesRemoved, prompt, ev.BodyBytesAfter))
+	}
+}

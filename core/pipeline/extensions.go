@@ -159,6 +159,12 @@ type InferenceExtension struct {
 	Tools       []InferenceTool    `json:"tools,omitempty"`
 	ToolChoice  any                `json:"toolChoice,omitempty"` // "auto" | "none" | {type,function:{name}}
 
+	// RequestedModel is the model the client asked for when a plugin changed it with
+	// Context.SetRequestModel, and empty otherwise. Model is then the model the
+	// request was sent for: what settlement prices and agentop's model column shows.
+	// Set only by SetRequestModel, never by a parser.
+	RequestedModel string `json:"requestedModel,omitempty"`
+
 	// MessageCount and ToolCount are how many Messages and Tools this event HAD, for readers of
 	// a copy that no longer carries them. Set only by sessionapi.summarizeEvent, immediately
 	// before it nils both slices; zero everywhere else, including on every event the store keeps.

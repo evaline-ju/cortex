@@ -2,6 +2,7 @@ package routerconfig
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -69,8 +70,12 @@ func TestValidate_RefusesEachBrokenRule(t *testing.T) {
 		{"agent naming no server", `{"servers": {"e": {"url": "https://e.example", "key": "k"}}, "agents": {"claude-code": "glm"}}`, `"glm" is not a server listed under servers`},
 		{"agent name as a label", `{"servers": {"e": {"url": "https://e.example", "key": "k"}}, "agents": {"Claude Code": "e"}}`, `"Claude Code" is not an agent name`},
 		{"the no-User-Agent bucket", `{"servers": {"e": {"url": "https://e.example", "key": "k"}}, "agents": {"unknown": "e"}}`, `"unknown" cannot be routed`},
-		{"opus", `{"servers": {"e": {"url": "https://e.example", "key": "k", "opus": "glm-5.3"}}}`, "model mapping needs chained body writers (PR 4)"},
-		{"haiku", `{"servers": {"e": {"url": "https://e.example", "key": "k", "haiku": "glm-5.3"}}}`, "model mapping needs chained body writers (PR 4)"},
+		{"one model of three", `{"servers": {"glm": {"url": "https://e.example", "key": "k", "opus": "glm-5.3"}}}`,
+			"servers.glm: glm names a model for opus but not for sonnet or haiku; give all three, or none if it serves Claude Code's own names"},
+		{"two models of three", `{"servers": {"glm": {"url": "https://e.example", "key": "k", "opus": "a", "sonnet": "b"}}}`,
+			"glm names a model for opus and sonnet but not for haiku"},
+		{"haiku alone", `{"servers": {"glm": {"url": "https://e.example", "key": "k", "haiku": "c"}}}`,
+			"glm names a model for haiku but not for opus or sonnet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Decode(json.RawMessage(tc.config))
@@ -201,6 +206,102 @@ func TestParseURL_QuotesNoPartOfTheURL(t *testing.T) {
 		}
 		if !strings.Contains(msg, tc.want) {
 			t.Errorf("ParseURL(%q) error = %q, want %q", tc.url, msg, tc.want)
+		}
+	}
+}
+
+func TestDecode_AcceptsAllThreeModelsOrNone(t *testing.T) {
+	c, err := Decode(json.RawMessage(`{"servers": {
+		"ete": {"url": "https://ete.example.com", "key": "k"},
+		"glm": {"url": "https://glm.example.com", "key": "k", "opus": "glm-big", "sonnet": "glm-mid", "haiku": "glm-small"}}}`))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if ete := c.Servers["ete"]; ete.Mapped() {
+		t.Errorf("ete names no models, but Mapped() = true")
+	}
+	glm := c.Servers["glm"]
+	if !glm.Mapped() || glm.ModelFor("opus") != "glm-big" || glm.ModelFor("sonnet") != "glm-mid" ||
+		glm.ModelFor("haiku") != "glm-small" || glm.ModelFor("fable") != "" {
+		t.Errorf("glm = %+v; want each family mapped to its own model and nothing else", glm)
+	}
+}
+
+// The family is a word of the requested name, so the mapping survives a new
+// version, a dated id, a provider prefix and a context suffix, and a name with no
+// family — or two — has none.
+func TestFamily(t *testing.T) {
+	for model, want := range map[string]string{
+		"claude-opus-5-5":                   "opus",
+		"claude-sonnet-5":                   "sonnet",
+		"claude-haiku-4-5-20251001":         "haiku",
+		"claude-3-5-sonnet-20241022":        "sonnet",
+		"us.anthropic.claude-opus-4-1-v1:0": "opus",
+		"anthropic/claude-haiku-4-5":        "haiku",
+		"claude-opus-4-1@20250805":          "opus",
+		"Claude-Opus-5-5[1m]":               "opus",
+		"opus":                              "opus",
+		"claude-fable-5-1":                  "",
+		"glm-5.3":                           "",
+		"opusplan":                          "",
+		"magnum-opus-sonnet":                "",
+		"":                                  "",
+	} {
+		if got := Family(model); got != want {
+			t.Errorf("Family(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+// A Claude model name has "claude" as a word, split as Family splits: so a
+// provider's prefixed or dated id is one, and a name that merely contains the
+// letters is not.
+func TestIsClaudeName(t *testing.T) {
+	for model, want := range map[string]bool{
+		"claude-fable-5-1":                  true,
+		"claude-opus-5-5":                   true,
+		"us.anthropic.claude-opus-4-1-v1:0": true,
+		"anthropic/claude-haiku-4-5":        true,
+		"Claude-Fable-5-1[1m]":              true,
+		"glm-4.6":                           false,
+		"glm-5.3":                           false,
+		"claudette-7b":                      false,
+		"fable":                             false,
+		"":                                  false,
+	} {
+		if got := IsClaudeName(model); got != want {
+			t.Errorf("IsClaudeName(%q) = %v, want %v", model, got, want)
+		}
+	}
+}
+
+func TestCheckModels_AllThreeOrNone(t *testing.T) {
+	const tail = "; give all three, or none if it serves Claude Code's own names"
+	for _, tc := range []struct {
+		s    Server
+		want string
+	}{
+		{Server{}, ""},
+		{Server{Opus: "a", Sonnet: "b", Haiku: "c"}, ""},
+		{Server{Opus: "a"}, "glm names a model for opus but not for sonnet or haiku" + tail},
+		{Server{Opus: "a", Sonnet: "b"}, "glm names a model for opus and sonnet but not for haiku" + tail},
+		{Server{Haiku: "c"}, "glm names a model for haiku but not for opus or sonnet" + tail},
+	} {
+		err := CheckModels("glm", tc.s)
+		if got := fmt.Sprint(err); (tc.want == "" && err != nil) || (tc.want != "" && got != tc.want) {
+			t.Errorf("CheckModels(%+v) = %v, want %q", tc.s, err, tc.want)
+		}
+	}
+}
+
+func TestServer_ModelFor(t *testing.T) {
+	s := Server{Opus: "glm-big", Sonnet: "glm-mid", Haiku: "glm-small"}
+	if !s.Mapped() || (Server{}).Mapped() {
+		t.Errorf("Mapped() = %v for %+v and %v for none; want true and false", s.Mapped(), s, (Server{}).Mapped())
+	}
+	for family, want := range map[string]string{"opus": "glm-big", "sonnet": "glm-mid", "haiku": "glm-small", "fable": "", "": ""} {
+		if got := s.ModelFor(family); got != want {
+			t.Errorf("ModelFor(%q) = %q, want %q", family, got, want)
 		}
 	}
 }

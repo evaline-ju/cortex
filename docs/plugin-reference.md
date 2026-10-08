@@ -134,7 +134,9 @@ a `WARN pipeline: plugin would have denied (shadow)` line, and continues
 the pipeline. The request is not blocked. Body-mutation calls
 (`SetBody` / `SetResponseBody`) likewise record a `Shadow: true`
 invocation but do not alter the in-memory body or the wire bytes —
-downstream plugins and the upstream see the original.
+downstream plugins and the upstream see the body as it was — and return
+`false`, so a plugin that reports its own outcome (applied or only
+measured) can tell without knowing its policy.
 
 The upshot: the same plugin binary, dispatched the same way, is safe to
 ship in `observe` for a week while operators watch shadow metrics,
@@ -729,7 +731,11 @@ Plugins that need to rewrite request or response bodies declare
 helpers. The framework propagates the rewrite to the wire, emits a
 `modify`-action Invocation, and publishes a `body-mutation/event`
 entry in `pctx.Extensions.Custom` with length delta + sha256
-before/after (never the raw body).
+before/after (never the raw body). With several request mutators there is one
+entry for the chain: `before` is the bytes the client sent, `after` the bytes
+sent upstream, and `plugins` the writers whose writes took effect, in order
+(`plugin` is the last of them) — or, while none has, the observed writer whose
+would-be rewrite the entry describes (its invocation carries `shadow: true`).
 
 > For the full lifecycle — per-listener wire behavior, content-encoding
 > policy, ordering rules, body-size limits — see
@@ -741,14 +747,15 @@ before/after (never the raw body).
 ```go
 type PluginCapabilities struct {
     ReadsBody          bool // plugin reads pctx.Body / pctx.ResponseBody
-    WritesRequestBody  bool // plugin may call pctx.SetBody
+    WritesRequestBody  bool // plugin may call pctx.SetBody and pctx.SetRequestModel
     WritesResponseBody bool // plugin may call pctx.SetResponseBody
 }
 ```
 
 - `ReadsBody`: listener buffers the body; plugin sees bytes.
 - `WritesRequestBody`: implies `ReadsBody`. Listener propagates `pctx.SetBody`
-  rewrites to the upstream.
+  rewrites to the upstream. Required by `pctx.SetRequestModel`, which refuses a
+  plugin that does not declare it.
 - `WritesResponseBody`: implies `ReadsBody`. Listener propagates
   `pctx.SetResponseBody` rewrites to the downstream client.
 
@@ -763,7 +770,7 @@ nothing about how the response may be relayed.
 
 | Plugin shape | Declares | Streams responses? |
 |---|---|---|
-| request-only mutator (`tool-prune`, `context-guru`) | `WritesRequestBody` | yes |
+| request-only mutator (`tool-prune`, `context-guru`, `inference-router`) | `WritesRequestBody` | yes |
 | response mutator | `WritesResponseBody` | no — buffered |
 | response mutator (`sparc`) | `WritesResponseBody` | no — buffered |
 | both (`cpex`) | both | no — buffered |
@@ -771,12 +778,27 @@ nothing about how the response may be relayed.
 
 ### Build-time validation (enforced by `pipeline.New`)
 
-- At most **one** mutator **per direction** per pipeline. Two request mutators
-  (or two response mutators) would produce ambiguous ordering; `New` rejects
-  with an error naming both plugins. One request mutator plus one response
-  mutator is fine — they never rewrite the same bytes.
+- Request mutators **chain**: any number may share a pipeline. They run in
+  chain order, each seeing `pctx.Body` as the one before it left it, and the
+  listener sends the last one's bytes — so `tool-prune` and `context-guru` run
+  together, and a plugin that changes the model can follow them. Two things
+  follow for a writer that may not be first:
+  - **Derive your edit from `pctx.Body`.** The parser extensions
+    (`pctx.Extensions.Inference` and the rest) are not re-parsed after a write:
+    they describe the client's request — apart from the model, which
+    `pctx.SetRequestModel` keeps current — so an edit built from them can undo
+    an earlier writer's rewrite or land on the wrong element.
+  - **Learn whether your own write applied from `SetBody`'s result**, not from
+    `pctx.BodyMutated()`. `BodyMutated()` is request-wide: once any writer's
+    bytes took effect it is true, including for a later writer whose own call
+    was a shadow under `on_error: observe`. A writer that reports a saving as
+    applied or only measured, or counts it, reads its own result.
+- At most **one** response mutator per pipeline. Nothing needs more, and the
+  response pass has an ordering gap of its own (below); `New` rejects a second
+  with an error naming both plugins. A request mutator and a response mutator
+  coexist.
 - A mutator of **either** direction cannot precede a `ReadsBody`-only plugin.
-  The reader must see the original bytes.
+  The reader must see the bytes the client sent, however many mutators follow it.
 
 > **Reader-ordering is validated in request order only.** `RunResponse` iterates
 > the chain in reverse, so on the response pass the rule inverts — a reader needs
@@ -801,9 +823,9 @@ nothing about how the response may be relayed.
 
 | Call | Effect |
 |---|---|
-| `pctx.SetBody(newBytes)` | Replace request body; flip `BodyMutated()` flag |
-| `pctx.SetResponseBody(newBytes)` | Replace response body; flip `ResponseBodyMutated()` flag |
-| `pctx.BodyMutated()` / `ResponseBodyMutated()` | Read by the listener to decide whether to emit a wire mutation. Plugins normally don't need these. |
+| `pctx.SetBody(newBytes)` | Replace request body; flip `BodyMutated()` flag. Returns whether **this** write took effect: `false` under `on_error: observe` (a shadow write, body unchanged) and in `OnFinish` |
+| `pctx.SetResponseBody(newBytes)` | Replace response body; flip `ResponseBodyMutated()` flag. Returns whether this write took effect, as `SetBody` does |
+| `pctx.BodyMutated()` / `ResponseBodyMutated()` | Read by the listener to decide whether to emit a wire mutation. Request-wide (response-wide): true once **any** writer's bytes took effect, so not a writer's own outcome. Plugins normally don't need these. |
 
 Direct assignment (`pctx.Body = newBytes`) still compiles but the
 listener won't propagate it, no Invocation fires, and the mutation
@@ -887,6 +909,52 @@ package supplies:
 A capability some listener cannot honor is added the same way: a field on
 `pipeline.ListenerSupport`, a case in its `Unsupported`, and each listener's
 `Support` saying whether it can.
+
+## Changing the model
+
+A plugin that changes which model serves a request — a router, a downgrader, an
+A/B test — declares `WritesRequestBody: true` and calls `pctx.SetRequestModel`
+from `OnRequest`. Do not edit the body's `model` yourself, and do not write
+`pctx.Extensions.Inference`: that record belongs to the parser.
+
+```go
+if name, ok := pctx.RequestModel(); ok && strings.Contains(name, "opus") {
+    if err := pctx.SetRequestModel("glm-5.3"); err != nil {
+        // A refusal is about the client's body, so it is the client's error: a 400.
+        pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "model_rewrite_failed"})
+        return pipeline.DenyStatus(http.StatusBadRequest, "inference.model-rewrite-failed", err.Error())
+    }
+}
+```
+
+| Call | Effect |
+|---|---|
+| `pctx.RequestModel()` | The body's top-level `model` string, exactly as `SetRequestModel` would replace it; `false` for a body it would refuse. |
+| `pctx.SetRequestModel(name)` | Replaces that one value in place — every other byte stays as the client sent it, which a prompt cache depends on — and sends the result through `SetBody`. |
+
+What it changes besides the bytes:
+
+- **The inference record.** When the parser built `pctx.Extensions.Inference`,
+  `model` becomes the new name and `requestedModel` keeps the one the client sent
+  (`omitempty`, present only while the two differ). Settlement prices `model`, so
+  the cost record and agentop's model column describe the model the request was
+  sent for, and agentop's detail pane shows both. With no extension none is
+  created.
+- **The timeline.** The framework records `modify/model_rewritten` with `from`
+  and `to` in `Details`, after the `modify/body_rewritten` every `SetBody` records.
+
+Under `on_error: observe` nothing changes — not the body, not the record — and
+both rows are shadows. A name equal to the current model changes nothing and
+records nothing. `SetRequestModel` is refused, with nothing changed, from a plugin
+that does not declare `WritesRequestBody`, outside `OnRequest`, and for a body
+with no top-level string `model`, one whose `model` is empty, one that is not
+valid JSON, or one that names `model` more than once, in any letter case. gjson and sjson read the
+first key spelled exactly `model`, while encoding/json — the parser, and most
+servers — reads the last key that matches it in any case, so `{"model": "a",
+"Model": "b"}` is served as `b`, and changing one would leave the other serving.
+The value is read only from the key spelled exactly `model`: a body whose only
+match is `Model` names no model to change. An empty `model` is refused because
+`requestedModel` could not record it as the client's name.
 
 ## Finishing requests (stateful plugins)
 
