@@ -770,7 +770,7 @@ nothing about how the response may be relayed.
 
 | Plugin shape | Declares | Streams responses? |
 |---|---|---|
-| request-only mutator (`tool-prune`, `context-guru`) | `WritesRequestBody` | yes |
+| request-only mutator (`tool-prune`, `context-guru`, `inference-router`) | `WritesRequestBody` | yes |
 | response mutator | `WritesResponseBody` | no — buffered |
 | response mutator (`sparc`) | `WritesResponseBody` | no — buffered |
 | both (`cpex`) | both | no — buffered |

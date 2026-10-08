@@ -160,7 +160,7 @@ at startup, and in-cluster use has not been examined.
 - `servers` (map, required) — inference servers by name: lowercase letters, digits, `.`, `_` and `-`. Each has:
   - `url` (string, required) — `scheme://host[:port]`, `http` or `https`, no path, query or fragment. A port must be 1–65535; the scheme's default is dropped, so `https://x:443` is `x`. No two servers may share a host, compared without port or case: a session's server is named from the host its requests went to. A plain-`http` server on another machine logs a WARN at load, since routed requests would cross the network decrypted.
   - `key` (string, required) — the API key sent to this server in place of the client's, in the header the client used: `X-Api-Key` when it sent one, `Authorization: Bearer` otherwise, both when it sent both. Those two are the only headers replaced: a credential the client sends in any other header, such as one Claude Code's `ANTHROPIC_CUSTOM_HEADERS` sets, reaches the server unchanged. Printable ASCII, no spaces. `/config` and `/v1/pipeline` redact it.
-  - `opus`, `sonnet`, `haiku` — reserved for mapping Claude Code's model families to a server's own models, and refused until that lands.
+  - `opus`, `sonnet`, `haiku` (strings) — this server's own model for each of Claude Code's model families, for a server that does not serve Claude Code's names. All three or none: a partial set is refused, naming the families given and missing. Leave them out for a server that serves Claude Code's names, and every name passes through unchanged.
 - `agents` (map) — agent name, as agentop shows it (`claude-code`, `opencode`), to a server name. Each value must name a listed server. `unknown`, the name for requests with no User-Agent, cannot be routed.
 
 ```yaml
@@ -173,6 +173,9 @@ at startup, and in-cluster use has not been examined.
             glm:
               url: https://glm-litellm.example.com
               key: sk-…
+              opus: glm-5.3       # this server's names for Claude Code's three families
+              sonnet: glm-5.3
+              haiku: glm-5.3
           agents:
             claude-code: glm     # only agents listed here are routed
 ```
@@ -189,9 +192,9 @@ transparently redirected connection is dialed where the client chose, and is
   routed" when the request stayed where the client sent it — because the agent is
   not routed, or because the router runs under `on_error: observe`, even for an
   agent with a server. A session started under observe therefore stays unrouted
-  after a switch to enforce. A first request whose redirect failed pins nothing,
-  and the next one decides again. Every request renews the pin, which lapses 30
-  days after the last.
+  after a switch to enforce. A first request whose redirect failed, or that was
+  refused for its model, pins nothing, and the next one decides again. Every
+  request renews the pin, which lapses 30 days after the last.
 - Where that request goes is decided by the session's history, for a routed
   agent: a session already running when routing was first configured, quiet while
   it was, has no pin but is not new. The latest earlier inference request that
@@ -232,17 +235,37 @@ transparently redirected connection is dialed where the client chose, and is
   `from` equal to `to` when the agent's base URL (`ANTHROPIC_BASE_URL`, for Claude
   Code) already names the server — followed by the router's `modify/routed` with
   `server` and `pin` (`new`, `existing` or `none`).
+- **Models.** On a server with `opus`, `sonnet` and `haiku`, a routed request's
+  `model` is mapped by family — the family is a word of the name it asks for, so
+  `claude-opus-5-5` and `claude-haiku-4-5-20251001` map with no list of ids —
+  through `pctx.SetRequestModel`, which changes that one JSON value and nothing
+  else. The timeline gains the framework's `modify/body_rewritten` and
+  `modify/model_rewritten` between `modify/redirected` and `modify/routed`, and the
+  inference record's `model` becomes the server's, with `requestedModel` keeping
+  Claude Code's: settlement prices the server's model, and agentop's detail pane
+  shows both. A name of another family — `claude-fable-5-1` picked with `/model`,
+  say — or of none, or of two, is `deny/no_model_for_family` with the requested
+  name as `model`, a 400 saying `glm has no model for claude-fable-5-1`. Nothing is
+  guessed, and that includes a name that is already one of the server's own
+  models. A body that names a model the rewrite cannot read — an empty one, one
+  that is not a string, or `model` named twice or only in another letter case — is
+  `deny/model_rewrite_failed`, a 400 too, since the fix is the client's. A refused
+  request carries no server key, and a session whose first request is refused pins
+  nothing. A request whose body names no model — `GET /v1/models`, a body that is
+  not JSON, or JSON with no `model` key — is routed as it is.
 - A redirect the listener refuses: `deny/redirect_failed`, a 503.
-- Under `on_error: observe` nothing moves and the client's key stays. The timeline
-  shows two rows: the framework's shadow `modify/redirected`, and the router's
-  `observe/would_route`.
+- Under `on_error: observe` nothing moves, the client's key stays and no model is
+  mapped or refused. The timeline shows two rows: the framework's shadow
+  `modify/redirected`, and the router's `observe/would_route`.
 
 **Put it last in the outbound chain**, where `agentop server add` puts it. A
 redirect moves `pctx.Host`, so the plugins before the router decide on the host
 the client asked for, and a plugin after it would see the server's instead; put
 nothing after it that keys on the host. Session events, usage and cost follow the
 server's host, and each event's `requestedHost` keeps the one asked for when it
-differs.
+differs. The router also rewrites the request body to map models, so the framework
+holds it after every body reader: a chain with a parser after the router is
+refused, at startup and on reload.
 
 ## `jwt-validation`
 

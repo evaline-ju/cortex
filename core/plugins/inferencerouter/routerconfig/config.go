@@ -40,9 +40,9 @@ type Config struct {
 type Server struct {
 	URL    string `json:"url" required:"true" description:"scheme://host[:port] of the server; no path."`
 	Key    string `json:"key" required:"true" description:"API key sent to this server in place of the client's."`
-	Opus   string `json:"opus" description:"This server's model for Claude Code's opus requests (PR 4)."`
-	Sonnet string `json:"sonnet" description:"This server's model for Claude Code's sonnet requests (PR 4)."`
-	Haiku  string `json:"haiku" description:"This server's model for Claude Code's haiku requests (PR 4)."`
+	Opus   string `json:"opus" description:"This server's model for Claude Code's opus requests. Give opus, sonnet and haiku together, or none when the server serves Claude Code's own names."`
+	Sonnet string `json:"sonnet" description:"This server's model for Claude Code's sonnet requests. Give opus, sonnet and haiku together, or none when the server serves Claude Code's own names."`
+	Haiku  string `json:"haiku" description:"This server's model for Claude Code's haiku requests. Give opus, sonnet and haiku together, or none when the server serves Claude Code's own names."`
 }
 
 // Families are the Claude model families a server maps to models of its own, in
@@ -172,9 +172,8 @@ func (c Config) Validate() error {
 		if err := CheckKey(s.Key); err != nil {
 			return fmt.Errorf("servers.%s.key: %w", name, err)
 		}
-		if s.Opus != "" || s.Sonnet != "" || s.Haiku != "" {
-			return fmt.Errorf("servers.%s: opus, sonnet and haiku are not accepted yet: "+
-				"model mapping needs chained body writers (PR 4)", name)
+		if err := CheckModels(name, s); err != nil {
+			return fmt.Errorf("servers.%s: %w", name, err)
 		}
 	}
 	for _, agent := range slices.Sorted(maps.Keys(c.Agents)) {

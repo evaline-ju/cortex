@@ -529,10 +529,12 @@ func TestConfigure_WarnsOnPlainHTTPToAnotherMachine(t *testing.T) {
 	}
 }
 
-func TestCapabilities_DeclareARedirectAndNoBody(t *testing.T) {
+// The router writes the request body to map models, and never the response, which
+// would cost every routed response its streaming.
+func TestCapabilities_DeclareARedirectAndARequestBodyWrite(t *testing.T) {
 	caps := New().Capabilities()
-	if !caps.WritesDestination || caps.ReadsBody || caps.WritesRequestBody || caps.WritesResponseBody {
-		t.Errorf("caps = %+v, want WritesDestination alone", caps)
+	if !caps.WritesDestination || !caps.WritesRequestBody || caps.WritesResponseBody {
+		t.Errorf("caps = %+v, want WritesDestination and WritesRequestBody, and no response write", caps)
 	}
 	if n := len(caps.Description); n == 0 || n > 80 {
 		t.Errorf("description is %d chars, want 1-80", n)

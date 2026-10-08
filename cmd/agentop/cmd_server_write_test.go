@@ -376,13 +376,13 @@ func TestServerReset_AnAgentThatIsNotRoutedChangesNothing(t *testing.T) {
 
 // Every write is checked against the plugin's own rules before it lands, so a
 // config the proxy would refuse is never written — here, one a hand edit already
-// broke with a model the router does not accept yet.
+// broke with one model of the three.
 func TestServerWrites_NeverWriteAConfigThePluginRefuses(t *testing.T) {
 	broken := strings.Replace(routerBlock, "              key: sk-ete\n", "              key: sk-ete\n              opus: glm-5.3\n", 1)
 	path := serverEnv(t, newFakeStats(t, 0).addr(), broken)
 	before := readConfig(t, path)
 	code, _, errOut := runServerCmd(t, "", "use", "ete", "--agent", "opencode", "--config", path)
-	if code != 1 || !strings.Contains(errOut, "model mapping needs chained body writers") {
+	if code != 1 || !strings.Contains(errOut, "ete names a model for opus but not for sonnet or haiku") {
 		t.Errorf("exit %d, stderr:\n%s", code, errOut)
 	}
 	if readConfig(t, path) != before {

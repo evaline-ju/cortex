@@ -70,8 +70,12 @@ func TestValidate_RefusesEachBrokenRule(t *testing.T) {
 		{"agent naming no server", `{"servers": {"e": {"url": "https://e.example", "key": "k"}}, "agents": {"claude-code": "glm"}}`, `"glm" is not a server listed under servers`},
 		{"agent name as a label", `{"servers": {"e": {"url": "https://e.example", "key": "k"}}, "agents": {"Claude Code": "e"}}`, `"Claude Code" is not an agent name`},
 		{"the no-User-Agent bucket", `{"servers": {"e": {"url": "https://e.example", "key": "k"}}, "agents": {"unknown": "e"}}`, `"unknown" cannot be routed`},
-		{"opus", `{"servers": {"e": {"url": "https://e.example", "key": "k", "opus": "glm-5.3"}}}`, "model mapping needs chained body writers (PR 4)"},
-		{"haiku", `{"servers": {"e": {"url": "https://e.example", "key": "k", "haiku": "glm-5.3"}}}`, "model mapping needs chained body writers (PR 4)"},
+		{"one model of three", `{"servers": {"glm": {"url": "https://e.example", "key": "k", "opus": "glm-5.3"}}}`,
+			"servers.glm: glm names a model for opus but not for sonnet or haiku; give all three, or none if it serves Claude Code's own names"},
+		{"two models of three", `{"servers": {"glm": {"url": "https://e.example", "key": "k", "opus": "a", "sonnet": "b"}}}`,
+			"glm names a model for opus and sonnet but not for haiku"},
+		{"haiku alone", `{"servers": {"glm": {"url": "https://e.example", "key": "k", "haiku": "c"}}}`,
+			"glm names a model for haiku but not for opus or sonnet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Decode(json.RawMessage(tc.config))
@@ -203,6 +207,23 @@ func TestParseURL_QuotesNoPartOfTheURL(t *testing.T) {
 		if !strings.Contains(msg, tc.want) {
 			t.Errorf("ParseURL(%q) error = %q, want %q", tc.url, msg, tc.want)
 		}
+	}
+}
+
+func TestDecode_AcceptsAllThreeModelsOrNone(t *testing.T) {
+	c, err := Decode(json.RawMessage(`{"servers": {
+		"ete": {"url": "https://ete.example.com", "key": "k"},
+		"glm": {"url": "https://glm.example.com", "key": "k", "opus": "glm-big", "sonnet": "glm-mid", "haiku": "glm-small"}}}`))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if ete := c.Servers["ete"]; ete.Mapped() {
+		t.Errorf("ete names no models, but Mapped() = true")
+	}
+	glm := c.Servers["glm"]
+	if !glm.Mapped() || glm.ModelFor("opus") != "glm-big" || glm.ModelFor("sonnet") != "glm-mid" ||
+		glm.ModelFor("haiku") != "glm-small" || glm.ModelFor("fable") != "" {
+		t.Errorf("glm = %+v; want each family mapped to its own model and nothing else", glm)
 	}
 }
 
