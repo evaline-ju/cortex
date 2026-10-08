@@ -121,6 +121,55 @@ proposes the tools you have not called, and writes them to the `tool-prune` plug
 list. Claude Code is the only agent it can build a list for. See
 [Cut token cost](../laptop-token-savings.md).
 
+## Switching inference servers
+
+With more than one LiteLLM server, `agentop server` chooses which one Claude
+Code's **new** sessions use, with one Claude Code configuration and without
+restarting anything. A running conversation finishes on the server it started on.
+See [Choosing an inference server](../../cmd/agentop/README.md#choosing-an-inference-server-agentop-server).
+
+That one configuration is:
+
+- **`ANTHROPIC_BASE_URL` at one of the configured servers.** Cortex routes only
+  requests addressed to a configured server, so Claude Code pointed anywhere else
+  is not routed. That server must be up even for sessions routed elsewhere: Claude
+  Code reaches an `https` server through a `CONNECT` to it, which the proxy dials
+  before it sees the request inside.
+- **No model settings**, or only Claude's own names in them: the `model` setting,
+  which `/model` writes, and the variables `ANTHROPIC_MODEL`,
+  `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`,
+  `ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL`. Claude's own names
+  are its aliases — `default`, `best`, `opus`, `opusplan`, `sonnet`, `haiku` and
+  `fable`, with or without a suffix such as `[1m]` — and any model id with `claude`
+  in it. Claude Code then asks for Claude's model names whichever server it talks
+  to — the conversation, auto mode's classifier and the background calls each
+  under its own family's name. A configuration that names one server model for
+  every family leaves nothing to tell them apart, and Claude Code shapes its
+  requests for the model it believes it is using.
+
+`agentop server` checks both. For now a server must serve Claude's model names, as
+a LiteLLM gateway in front of Claude does; mapping them to another server's models
+is not built yet.
+
+The key is the server's: on a routed request the router replaces whatever key
+Claude Code sends with the configured server's, in the header Claude Code used, so
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` can stay as it is.
+
+Claude Code keeps naming the model it asked for, so agentop is where the server
+shows: the events table's host is where each request went, and the detail pane's
+`redirected:` line names the host Claude Code asked for when it was another.
+
+A session is pinned on its first request, so switch **before** `/clear` or a new
+`claude`, not after. A proxy restart forgets the pins: a running conversation then
+follows its agent's current server from its next request.
+
+**`/model` may list a server's own names.** If Claude Code asks the gateway for its
+model list, that request is routed like the rest, so the picker can show, say,
+`glm-5.3`. Routing is unaffected, since Claude Code keeps sending its own names,
+but choosing such a name there breaks the rule above, and `agentop server` then
+reports the `model` setting.
+
 ## Verified depth
 
 Tested live on 2026-10-05 with Claude Code 2.1.286 on macOS 26.6.2 (arm64), Cortex built

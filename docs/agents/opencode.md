@@ -269,6 +269,17 @@ without being recorded once the service has named a session. Before that, they a
 recorded. See
 [How traffic is grouped into sessions](../laptop-service.md#how-traffic-is-grouped-into-sessions).
 
+**Switching inference servers is OpenCode's own job.** `opencode.json` defines
+providers, each with its own base URL and key, and OpenCode switches provider and
+model inside a session. Cortex's `inference-router` therefore leaves OpenCode
+alone unless `agentop server use <name> --agent opencode` lists it. Listing it
+sends OpenCode's new sessions that address one of the configured servers to the
+chosen one, whatever provider was picked in OpenCode, so it works only between
+servers that serve the model names OpenCode asks for. The reason to do it is to
+keep keys out of `opencode.json`: on a routed request the router puts the
+configured server's key in the `X-Api-Key` or `Authorization` header OpenCode
+sent.
+
 ## Verified depth
 
 Tested live with OpenCode 2.0.21 on macOS 26.6 (arm64) and Cortex built from the change

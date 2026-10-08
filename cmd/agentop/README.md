@@ -652,6 +652,73 @@ service status` fails, the line says it could not check rather than guessing.
 hand, what OpenCode needs to trust Cortex's CA, what Cortex records for it, what was
 verified, and its known issues.
 
+## Choosing an inference server (`agentop server`)
+
+With several LiteLLM servers, each with its own URL and key, `agentop server`
+chooses which one an agent's **new** sessions use, through the
+[`inference-router`](../../docs/plugin-catalog.md#inference-router) plugin. A
+session stays on the server it started on. Routing is opt-in per agent: until an
+agent is given a server, its traffic goes where the agent sends it.
+
+```sh
+agentop server add ete https://ete-litellm.example.com   # asks for the key; it does not echo
+agentop server add glm https://glm-litellm.example.com
+agentop server use glm --agent claude-code                # new claude-code sessions → glm
+agentop server                                            # the servers, and two checks
+agentop server reset --agent claude-code                  # stop routing claude-code
+agentop server remove glm                                 # refused while an agent uses it
+```
+
+With Claude Code's `ANTHROPIC_BASE_URL` at `ete`, the listing after `use` reads:
+
+```
+  ete   ete-litellm.example.com   uses Claude Code's names
+  glm   glm-litellm.example.com   uses Claude Code's names   claude-code
+
+  ✓ Claude Code points at ete (~/.claude/settings.json)
+  ✓ Claude Code asks for Claude's own model names (~/.claude/settings.json)
+```
+
+- **`add <name> <url>`** reads the key at a prompt that does not echo, or from
+  stdin with `--key-stdin`. It is never an argument, so it never reaches shell
+  history. A name that exists is replaced only after a yes (`--yes` skips the
+  question), which is how a key is rotated; with no terminal to ask on, nothing is
+  written. A server on a host another server already has, on any port, is
+  refused. The first `add` creates the plugin's entry, last in the outbound
+  pipeline. A key containing `$` is refused: the config loader would read it as an
+  environment variable.
+- **`use <name> --agent <agent>`** routes the agent's new sessions to the server,
+  including an agent that has not run yet. **`reset --agent <agent>`** stops
+  routing it.
+- **`remove <name>`** refuses while an agent is routed to the server, and names
+  the command that takes the agent off it; it also refuses the last server. A
+  session that started on a removed server gets a 503 asking for a new session
+  until the server is added back, or until the proxy restarts, which forgets
+  which server each session started on.
+- **`agentop server`** lists each server's host (its whole URL when it is plain
+  `http`), its model mapping and the agents routed to it, then checks
+  `~/.claude/settings.json`: that `ANTHROPIC_BASE_URL` names one of the servers,
+  without which nothing is routed, and that neither the `model` setting nor a
+  model variable names a model other than Claude's (see
+  [Switching inference servers](../../docs/agents/claude-code.md#switching-inference-servers)).
+  It reads that one file, so it cannot see a project's settings, a file passed
+  with `claude --settings`, or a variable set in the shell.
+
+Every change is written to `~/.cortex/config.yaml`, keeping its comments, and
+returns once the proxy has reloaded it; nothing restarts. If the proxy refuses the
+reload, the command puts the file back as it was, prints the proxy's error and
+exits 1, and the proxy keeps the configuration it had. If the proxy reports
+neither a reload nor a refusal within 30 seconds, the command exits 1 and leaves
+the file as written. With no proxy running the file is still written, and the
+change applies at the next start. Nothing is written unless the result loads as a Cortex config and
+passes the router's own rules; what only the running proxy can check, such as
+whether its build includes the router, is what a refused reload reports. A change
+that changes nothing writes nothing. `--config PATH` points every form at another
+config, with the stats address read from it: that is how to try this against a
+second Cortex without touching the one every session uses. Flags go after the
+action. Exit codes: 0 done, or nothing to do; 1 refused or failed; 2 a usage
+error, a malformed name, agent or URL included; 3 a replacement declined.
+
 ## Panes
 
 The UI has these panes. `Enter` drills in; `Esc` backs out.
