@@ -421,15 +421,18 @@ wants to register.
 - `core/plugins/` -- The concrete plugins + registry; see [`docs/plugin-reference.md`](docs/plugin-reference.md) for the per-plugin config convention
 
 **Directional body capabilities.** `PluginCapabilities` declares body writes
-per direction: `WritesRequestBody` (calls `pctx.SetBody`) and
-`WritesResponseBody` (calls `pctx.SetResponseBody`). `WritesResponseBody` is the
+per direction: `WritesRequestBody` (calls `pctx.SetBody` or `pctx.SetRequestModel`)
+and `WritesResponseBody` (calls `pctx.SetResponseBody`). `WritesResponseBody` is the
 SSE streaming predicate — both proxy listeners fall back from incremental relay
 to the buffered path only when some plugin declares it. A request-only mutator
 (`tool-prune`, `context-guru`) therefore keeps streaming, because requests are
 never streamed in the first place. `pipeline.New` lets any number of request
 mutators chain — each sees `pctx.Body` as the one before it left it — allows at
 most one response mutator, and lets no mutator of either direction precede a
-`ReadsBody`-only plugin. See [`docs/plugin-reference.md`](docs/plugin-reference.md#capability-fields).
+`ReadsBody`-only plugin. A writer learns whether its own write applied from
+`SetBody`'s result (false under `on_error: observe`), not from
+`pctx.BodyMutated()`, which is true once any writer's bytes took effect. See
+[`docs/plugin-reference.md`](docs/plugin-reference.md#capability-fields).
 
 **Plugin metrics.** Plugins that implement `pipeline.MetricsProvider` have their
 counters surfaced on `GET /v1/pipeline` and rendered in agentop's plugin pane.
