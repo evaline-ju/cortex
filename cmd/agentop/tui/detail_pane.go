@@ -55,7 +55,7 @@ func (m *model) showDetail(r eventRow, resetScroll bool) {
 	if r.tunnel != nil {
 		content = tunnelHeader(r.tunnel) + "\n\n" + content
 	}
-	if header := redirectHeader(e); header != "" {
+	if header := rewriteHeader(e); header != "" {
 		content = header + "\n\n" + content
 	}
 	if header := tlsHeader(e.TLS); header != "" {
@@ -105,6 +105,31 @@ func redirectHeader(e *pipeline.SessionEvent) string {
 		return ""
 	}
 	return fmt.Sprintf("redirected:  %s → %s", e.RequestedHost, e.Host)
+}
+
+// modelHeader names both models of a request a plugin sent for another model: the
+// one the client asked for, then the one it was sent for. The events table's model
+// column already shows the second. Empty when nothing changed the model.
+//
+//	model:       claude-opus-5-5 → glm-5.3
+func modelHeader(e *pipeline.SessionEvent) string {
+	if e.Inference == nil || e.Inference.RequestedModel == "" {
+		return ""
+	}
+	return fmt.Sprintf("model:       %s → %s", e.Inference.RequestedModel, e.Inference.Model)
+}
+
+// rewriteHeader is what plugins changed about a request's destination and model,
+// as one block: redirectHeader's line, then modelHeader's, each only when it
+// applies. Empty when neither does, so the caller can prepend unconditionally.
+func rewriteHeader(e *pipeline.SessionEvent) string {
+	var lines []string
+	for _, line := range []string{redirectHeader(e), modelHeader(e)} {
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // tlsHeader builds a one-block summary of the TLS connection state.
@@ -201,7 +226,7 @@ func filterForDetail(data []byte, phase pipeline.SessionPhase) []byte {
 // ColorizeJSONBytes sorts keys alphabetically for stable display.
 var (
 	inferenceReqKeys = []string{
-		"model", "messages", "temperature", "maxTokens", "topP",
+		"model", "requestedModel", "messages", "temperature", "maxTokens", "topP",
 		"stream", "tools", "toolChoice",
 	}
 	// reasoningTokens is a SUBSET of completionTokens, not a sibling: it is the share
@@ -213,7 +238,7 @@ var (
 	// rather than the shape comes here — which is also why the key needs no
 	// abbreviating: there is room for the whole word, unlike a table column.
 	inferenceRespKeys = []string{
-		"model", "completion", "finishReason", "promptTokens",
+		"model", "requestedModel", "completion", "finishReason", "promptTokens",
 		"completionTokens", "reasoningTokens", "totalTokens", "toolCalls",
 		"cacheWriteTokens", "cacheReadTokens",
 	}
