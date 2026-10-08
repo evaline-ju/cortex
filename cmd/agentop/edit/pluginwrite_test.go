@@ -169,3 +169,106 @@ func TestWritePluginConfig_AppliesChangesInOrder(t *testing.T) {
 		t.Errorf("want the server then the agent:\n%s", got)
 	}
 }
+
+// A refused reload restores the original bytes and mode, and reports RolledBack=true.
+func TestWritePluginConfig_OnRefusedReloadRestoresOriginalAndReportsRolledBack(t *testing.T) {
+	path := writeFixtureContent(t, withRouter, 0o600)
+	before := readFile(t, path)
+	var calls atomic.Int32
+	srv := makeStatusServer(t, func() ReloadStatus {
+		if calls.Add(1) == 1 {
+			// First poll: ReloadsFailed=2 becomes the baseline
+			return ReloadStatus{ReloadsFailed: 2}
+		}
+		// Second poll: ReloadsFailed increments to 3, triggering failure
+		return ReloadStatus{ReloadsFailed: 3, LastError: `configure "inference-router": servers: at least one server is required`}
+	})
+
+	res, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: srv.URL, Changes: []ConfigChange{routeClaudeToGLM()}})
+	if err != nil {
+		t.Fatalf("WritePluginConfig: %v", err)
+	}
+	if res.Outcome != WriteReloadFailed {
+		t.Errorf("outcome = %v, want WriteReloadFailed", res.Outcome)
+	}
+	if !res.RolledBack {
+		t.Error("RolledBack = false, want true")
+	}
+	if readFile(t, path) != before {
+		t.Error("file was not restored to original")
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600 kept", st.Mode().Perm())
+	}
+}
+
+// After a rollback, writing the same change again is NOT reported unchanged.
+func TestWritePluginConfig_AfterRollbackWritingSameChangeIsNotUnchanged(t *testing.T) {
+	path := writeFixtureContent(t, withRouter, 0o600)
+	var calls atomic.Int32
+	srv := makeStatusServer(t, func() ReloadStatus {
+		c := calls.Add(1)
+		if c == 1 {
+			// First poll of first write: ReloadsFailed=2 becomes baseline
+			return ReloadStatus{ReloadsFailed: 2}
+		} else if c == 2 {
+			// Second poll of first write: ReloadsFailed=3, triggers failure
+			return ReloadStatus{ReloadsFailed: 3, LastError: "test refusal"}
+		} else if c == 3 {
+			// First poll of second write: ReloadsFailed=3 becomes new baseline
+			return ReloadStatus{ReloadsFailed: 3}
+		}
+		// Subsequent polls: accept the reload
+		return ReloadStatus{LastSuccess: time.Now()}
+	})
+
+	// First write fails and rolls back
+	res, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: srv.URL, Changes: []ConfigChange{routeClaudeToGLM()}})
+	if err != nil {
+		t.Fatalf("first WritePluginConfig: %v", err)
+	}
+	if res.Outcome != WriteReloadFailed {
+		t.Errorf("first outcome = %v, want WriteReloadFailed", res.Outcome)
+	}
+	if !res.RolledBack {
+		t.Error("first RolledBack = false, want true")
+	}
+
+	// Second write of the same change should NOT be reported unchanged
+	// (the file was rolled back to original, so the change is new again)
+	res2, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: srv.URL, Changes: []ConfigChange{routeClaudeToGLM()}})
+	if err != nil {
+		t.Fatalf("second WritePluginConfig: %v", err)
+	}
+	if res2.Outcome == WriteUnchanged {
+		t.Error("second outcome = WriteUnchanged, want WriteReloaded (file is back to original after rollback)")
+	}
+	if res2.Outcome != WriteReloaded {
+		t.Errorf("second outcome = %v, want WriteReloaded", res2.Outcome)
+	}
+}
+
+// A timed-out reload leaves the file with the new bytes (state is uncertain).
+func TestWritePluginConfig_OnTimeoutLeavesNewBytes(t *testing.T) {
+	path := writeFixtureContent(t, withRouter, 0o600)
+	original := readFile(t, path)
+	srv := makeStatusServer(t, func() ReloadStatus {
+		// Never change status, so poll times out
+		return ReloadStatus{}
+	})
+
+	res, err := WritePluginConfig(context.Background(), ConfigWrite{Path: path, StatsURL: srv.URL, Changes: []ConfigChange{routeClaudeToGLM()}})
+	if err != nil {
+		t.Fatalf("WritePluginConfig: %v", err)
+	}
+	if res.Outcome != WriteReloadTimedOut {
+		t.Errorf("outcome = %v, want WriteReloadTimedOut", res.Outcome)
+	}
+	after := readFile(t, path)
+	if after == original {
+		t.Error("file was restored; on timeout, new bytes should remain")
+	}
+	if !strings.Contains(after, "claude-code: glm") {
+		t.Error("file should still have the new bytes after timeout")
+	}
+}

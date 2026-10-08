@@ -35,14 +35,15 @@ const (
 	WriteUnchanged WriteOutcome = iota
 	// WriteReloaded: written, and the proxy reloaded it.
 	WriteReloaded
-	// WriteReloadFailed: written, and the proxy refused it. It keeps serving the
-	// configuration it had; ReloadError says why.
+	// WriteReloadFailed: written, and the proxy refused it. The file was restored
+	// to what it had; ReloadError says why. RolledBack reports whether the restore
+	// succeeded.
 	WriteReloadFailed
 	// WriteReloadTimedOut: written, and the proxy reported neither a reload nor a
-	// failure within LocalPollDeadline.
+	// failure within LocalPollDeadline. The file is left as written; the reload may
+	// be slow or the state uncertain.
 	WriteReloadTimedOut
-	// WriteNotRunning: written, with no proxy answering at StatsURL. It applies when
-	// the proxy next starts.
+	// WriteNotRunning: StatsURL was empty (no proxy to poll). The file was written.
 	WriteNotRunning
 )
 
@@ -50,6 +51,7 @@ const (
 type WriteResult struct {
 	Outcome     WriteOutcome
 	ReloadError string // set for WriteReloadFailed
+	RolledBack  bool   // set for WriteReloadFailed when the restore succeeded
 }
 
 // WritePluginConfig applies w.Changes to the file at w.Path and waits for the proxy
@@ -94,7 +96,14 @@ func WritePluginConfig(ctx context.Context, w ConfigWrite) (WriteResult, error) 
 	case PollSuccess:
 		return WriteResult{Outcome: WriteReloaded}, nil
 	case PollFailure:
-		return WriteResult{Outcome: WriteReloadFailed, ReloadError: res.LastError}, nil
+		// Restore the original bytes to avoid crash-looping on next start
+		_, rollbackErr := store.Apply(context.Background(), orig)
+		rolledBack := rollbackErr == nil
+		if rollbackErr != nil {
+			// File still holds the refused config and must be fixed by hand
+			return WriteResult{}, fmt.Errorf("restore after refused reload failed; config file must be fixed by hand: %w", rollbackErr)
+		}
+		return WriteResult{Outcome: WriteReloadFailed, ReloadError: res.LastError, RolledBack: rolledBack}, nil
 	default:
 		return WriteResult{Outcome: WriteReloadTimedOut}, nil
 	}
