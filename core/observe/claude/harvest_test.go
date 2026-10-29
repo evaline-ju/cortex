@@ -2864,10 +2864,11 @@ func TestSaveMetadata_FsyncsBeforeRename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var atSync []byte
+	var atPath, atTmp []byte
 	was := syncFile
 	syncFile = func(f *os.File) error {
-		atSync, _ = os.ReadFile(path)
+		atPath, _ = os.ReadFile(path)
+		atTmp, _ = os.ReadFile(f.Name())
 		return f.Sync()
 	}
 	t.Cleanup(func() { syncFile = was })
@@ -2875,8 +2876,15 @@ func TestSaveMetadata_FsyncsBeforeRename(t *testing.T) {
 	if err := SaveMetadata(path, map[string]SessionMetadata{"a": {Title: "t"}}); err != nil {
 		t.Fatal(err)
 	}
-	if string(atSync) != keep {
-		t.Fatalf("at Sync time, path = %q; want the pre-Rename %q", atSync, keep)
+	if string(atPath) != keep {
+		t.Fatalf("at Sync time, path = %q; want the pre-Rename %q", atPath, keep)
+	}
+	var got map[string]SessionMetadata
+	if err := json.Unmarshal(atTmp, &got); err != nil {
+		t.Fatalf("temp at Sync time is invalid: %v (%q)", err, atTmp)
+	}
+	if len(got) != 1 || got["a"].Title != "t" {
+		t.Fatalf("temp at Sync time = %#v; want the new metadata", got)
 	}
 }
 
