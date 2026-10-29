@@ -1978,7 +1978,10 @@ var syncFile = func(f *os.File) error { return f.Sync() }
 // Same mechanics as saveUserConfig, for the same reasons: CreateTemp rather than a
 // fixed path+".tmp" (crash debris at a predictable name wedges every later write, and
 // CreateTemp's unpredictable name passes O_EXCL itself), Rename rather than truncate
-// (a half-written file would be read back as malformed), dir 0700 and file 0600.
+// (a half-written file would be read back as malformed), dir 0700 and file 0600. Plus
+// an fsync between write and rename, so a crash leaves either the old file or the new
+// one. File-level guarantee only: a crash between rename and the directory entry hitting
+// disk still loses the update. #1554 tracks the directory-fsync upgrade across the tree.
 //
 // SECURITY: the residual symlink risk is closed the way saveUserConfig closes it, not with
 // tui's checkYankDir Lstat sweep. An earlier version of this comment argued the sweep was
