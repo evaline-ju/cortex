@@ -1970,7 +1970,7 @@ func recoverConcurrentEntries(path string, meta map[string]SessionMetadata) (add
 // real file does — so the injection point is the only way to reach that path.
 var writeAll = func(w io.Writer, body []byte) (int, error) { return w.Write(body) }
 
-// syncFile flushes f to disk. A test seam, since no real filesystem fails Sync on demand.
+// syncFile flushes f to disk. A test seam that lets a Sync failure be injected.
 var syncFile = func(f *os.File) error { return f.Sync() }
 
 // SaveMetadata writes the map atomically, creating ~/.cortex if needed.

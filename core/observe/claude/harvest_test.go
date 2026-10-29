@@ -2854,8 +2854,8 @@ func TestTitleFromTranscript_CwdIsBounded(t *testing.T) {
 	}
 }
 
-// SaveMetadata fsyncs before Rename, so a crash cannot leave an empty file in place of the
-// good one. Issue #1547.
+// SaveMetadata fsyncs the data to disk before Rename swaps it in, so a crash leaves either
+// the old file or the new one.
 func TestSaveMetadata_FsyncsBeforeRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session-metadata.json")
@@ -2880,7 +2880,7 @@ func TestSaveMetadata_FsyncsBeforeRename(t *testing.T) {
 	}
 }
 
-// A Sync failure keeps the old file: an unflushed write must not be renamed over it.
+// A Sync failure returns an error and leaves the old file in place.
 func TestSaveMetadata_AFailedSyncKeepsTheOldFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session-metadata.json")
