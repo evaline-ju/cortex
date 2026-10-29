@@ -1970,6 +1970,9 @@ func recoverConcurrentEntries(path string, meta map[string]SessionMetadata) (add
 // real file does — so the injection point is the only way to reach that path.
 var writeAll = func(w io.Writer, body []byte) (int, error) { return w.Write(body) }
 
+// syncFile flushes f to disk. A test seam, since no real filesystem fails Sync on demand.
+var syncFile = func(f *os.File) error { return f.Sync() }
+
 // SaveMetadata writes the map atomically, creating ~/.cortex if needed.
 //
 // Same mechanics as saveUserConfig, for the same reasons: CreateTemp rather than a
@@ -2020,6 +2023,9 @@ func SaveMetadata(path string, meta map[string]SessionMetadata) error {
 	// real filesystem produces on demand. cmd/agentop has its own copy of this seam for
 	// saveUserConfig; the duplication is two lines and buys each module its own tripwire.
 	_, err = writeAll(f, body)
+	if err == nil {
+		err = syncFile(f)
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
