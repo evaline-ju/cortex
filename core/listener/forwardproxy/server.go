@@ -515,7 +515,7 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, tl *tunne
 		slog.Info("forward-proxy: destination refused by egress allow list",
 			"host", pipeline.SanitizeLogValue(host),
 			"method", pipeline.SanitizeControlRunes(r.Method),
-			"path", pipeline.SanitizeControlRunes(r.URL.Path))
+			"path", pipeline.SanitizeLogValue(r.URL.Path))
 		httpx.WriteRejection(w, action)
 		return
 	}
@@ -542,7 +542,7 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, tl *tunne
 	pat, skipped := s.SkipHosts.MatchPattern(pctx.Host)
 	if skipped {
 		slog.Info("forward-proxy: skip_hosts match — bypassing pipeline + session recording",
-			"host", pipeline.SanitizeLogValue(pctx.Host), "pattern", pat, "method", r.Method, "path", r.URL.Path)
+			"host", pipeline.SanitizeLogValue(pctx.Host), "pattern", pat, "method", r.Method, "path", pipeline.SanitizeLogValue(r.URL.Path))
 	}
 
 	// The client's process, looked up once per connection; nil when process attribution
@@ -1545,7 +1545,7 @@ func headerListContainsToken(h http.Header, name, token string) bool {
 // does for the 421.
 func (s *Server) declineResponsesWebSocket(w http.ResponseWriter, r *http.Request, pctx *pipeline.Context, tl *tunnelLog, sid string, chain []attribution.Proc) {
 	slog.Debug("forward-proxy: declined a WebSocket upgrade on a Responses path; the client falls back to HTTPS",
-		"host", pipeline.SanitizeLogValue(r.Host), "path", r.URL.Path)
+		"host", pipeline.SanitizeLogValue(r.Host), "path", pipeline.SanitizeLogValue(r.URL.Path))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUpgradeRequired)
 	_, _ = io.WriteString(w, declinedUpgradeBody)

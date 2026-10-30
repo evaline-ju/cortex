@@ -3,21 +3,10 @@ name: cortex CodeQL config
 queries:
   - uses: security-extended
 
-# Path-scoped query suppressions. Each entry must explain WHY the
-# query doesn't apply — future readers should be able to evaluate
-# whether the suppression is still warranted as code evolves.
+# Query suppressions. Each entry must explain WHY the query doesn't
+# apply — future readers should be able to evaluate whether the
+# suppression is still warranted as code evolves.
 query-filters:
-  # go/clear-text-logging fires on the session id reaching slog in
-  # core/session (and core/attribution, where the header is read): CodeQL
-  # treats every request header as sensitive. A session id is an attribution
-  # key the operator needs in the log to answer "which session was this
-  # bucket?", validated at the source before IDHeaderFrom returns it. The
-  # flows the query targets (Authorization, Cookie) are read elsewhere.
-  - exclude:
-      id: go/clear-text-logging
-      paths:
-        - core/session
-        - core/attribution
   # go/disabled-certificate-check fires on InsecureSkipVerify: true
   # in core/tlsconfig/client.go. The flag is required: it lets crypto/tls
   # skip the default chain check so that VerifyPeerCertificate can

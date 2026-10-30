@@ -27,7 +27,7 @@ func LogError(listener string, r *http.Request, read int, limit int64, err error
 	attrs := []any{
 		"host", pipeline.SanitizeLogValue(r.Host),
 		"method", r.Method,
-		"path", r.URL.Path,
+		"path", pipeline.SanitizeLogValue(r.URL.Path),
 		"error", err,
 		"read", read,
 		"limit", limit,

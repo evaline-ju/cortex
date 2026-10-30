@@ -334,7 +334,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if s.transparentInbound {
 		if _, ok := transparentproxy.OrigDstFromContext(r.Context()); !ok {
 			slog.Warn("reverse-proxy: rejecting request with no recovered destination",
-				"remote", r.RemoteAddr, "host", pipeline.SanitizeLogValue(r.Host), "path", r.URL.Path)
+				"remote", r.RemoteAddr, "host", pipeline.SanitizeLogValue(r.Host), "path", pipeline.SanitizeLogValue(r.URL.Path))
 			http.Error(w, "no original destination recovered", http.StatusBadGateway)
 			return
 		}

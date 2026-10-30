@@ -1406,6 +1406,10 @@ func (s *Store) publishLocked(event pipeline.SessionEvent) {
 // since the parsers already log them.
 func logAppended(sessionID string, e *pipeline.SessionEvent) {
 	attrs := []any{
+		// A session id is an attribution key the operator needs in the log to
+		// answer "which session was this bucket?" — validated at the source
+		// before IDHeaderFrom returns it, and the headers the query targets
+		// (Authorization, Cookie) are read elsewhere.
 		"sessionId", sessionID,
 		"direction", e.Direction.String(),
 		"phase", e.Phase.String(),
@@ -1444,7 +1448,8 @@ func logAppended(sessionID string, e *pipeline.SessionEvent) {
 	if e.Error != nil {
 		attrs = append(attrs, "errorKind", e.Error.Kind)
 	}
-	slog.Debug("session: event appended", attrs...)
+	// The session id in attrs is an attribution key — rationale at its comment.
+	slog.Debug("session: event appended", attrs...) // codeql[go/clear-text-logging]
 }
 
 // currenciesOf is SessionSummary.Currencies for one session's unit counts: nil when every priced
