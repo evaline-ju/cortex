@@ -1411,7 +1411,7 @@ func logAppended(sessionID string, e *pipeline.SessionEvent) {
 		"phase", e.Phase.String(),
 	}
 	if e.Host != "" {
-		attrs = append(attrs, "host", e.Host)
+		attrs = append(attrs, "host", pipeline.SanitizeLogValue(e.Host))
 	}
 	if e.StatusCode != 0 {
 		attrs = append(attrs, "status", e.StatusCode)
