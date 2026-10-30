@@ -1448,8 +1448,10 @@ func logAppended(sessionID string, e *pipeline.SessionEvent) {
 	if e.Error != nil {
 		attrs = append(attrs, "errorKind", e.Error.Kind)
 	}
-	// The session id in attrs is an attribution key — rationale at its comment.
-	slog.Debug("session: event appended", attrs...) // codeql[go/clear-text-logging]
+	// The session id in attrs is an attribution key — see the comment on it
+	// where attrs is built.
+	// codeql[go/clear-text-logging]
+	slog.Debug("session: event appended", attrs...)
 }
 
 // currenciesOf is SessionSummary.Currencies for one session's unit counts: nil when every priced
