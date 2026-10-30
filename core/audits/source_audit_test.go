@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"io/fs"
 	"path/filepath"
@@ -73,13 +74,10 @@ func parseAll(t *testing.T) (*token.FileSet, map[string]*ast.File) {
 }
 
 // relPath renders a path relative to the repo root, the form the allowlists key
-// on — stable no matter which module the test runs from.
+// on — stable no matter which module the test runs from. ToSlash first, so the
+// "../../" prefix also matches the separator WalkDir uses on Windows.
 func relPath(path string) string {
-	trimmed := strings.TrimPrefix(path, "../../")
-	if trimmed == path {
-		return path
-	}
-	return filepath.ToSlash(trimmed)
+	return strings.TrimPrefix(filepath.ToSlash(path), "../../")
 }
 
 // ---------------------------------------------------------------- transport
@@ -152,6 +150,9 @@ var renamesWithoutSync = map[string]string{
 	"cmd/agentop/cmd_script.go:writeAtomic": "installed files; reinstall restores them",
 	// Rewritten from the embedded source on the next start that needs it.
 	"core/plugins/script/sdk.go:installSDK": "embedded source; rewritten on next start",
+	// The rename moves a day file the ledger's writer already synced; the
+	// append path below it syncs its own output.
+	"core/cost/ledger/store.go:mergeDayFiles": "moves a file synced where it was written",
 }
 
 func TestRenamesSyncFirst(t *testing.T) {
@@ -159,7 +160,7 @@ func TestRenamesSyncFirst(t *testing.T) {
 	fset, files := parseAll(t)
 	for path, parsed := range files {
 		for _, fn := range functions(parsed) {
-			if !callsSelector(fn, "os", "Rename") || !writesTempFile(fn) || synced(fn) {
+			if !callsSelector(fn, "os", "Rename") || !writesTempFile(fn) || renamesSynced(fset, fn) {
 				continue
 			}
 			key := fmt.Sprintf("%s:%s", relPath(path), fn.Name.Name)
@@ -249,11 +250,85 @@ func writesTempFile(fn *ast.FuncDecl) bool {
 	return false
 }
 
-// synced reports whether fn syncs what it wrote: a .Sync method call, or a
-// call to a local seam like syncFile (an identifier containing "sync"). Loose
-// on purpose — what matters is that a sync happened, not its spelling.
-func synced(fn *ast.FuncDecl) bool {
-	found := false
+// renamesSynced reports whether every os.Rename in fn is preceded by a sync of
+// the file it renames. A sync counts when it appears before the rename and its
+// subject — the receiver of .Sync(), or the argument of a seam like syncFile —
+// denotes the renamed path in one of the shapes the tree uses: the path
+// itself, <file>.Name(), an ident assigned from <file>.Name(), or a file
+// variable opened from the path. That is the honest limit of a parser-only
+// audit: it cannot prove the synced file is the temp file, but it refuses the
+// two easy mistakes — a sync of some other file, and a sync placed after the
+// rename.
+func renamesSynced(fset *token.FileSet, fn *ast.FuncDecl) bool {
+	renames := selectorCalls(fn, "os", "Rename")
+	if len(renames) == 0 {
+		return true
+	}
+	syncs := syncSubjects(fset, fn)
+	if len(syncs) == 0 {
+		return false
+	}
+	nameOf, openedFrom := fileVars(fset, fn)
+	for _, r := range renames {
+		if len(r.args) == 0 {
+			continue
+		}
+		src := exprSource(fset, r.args[0])
+		ok := false
+		for _, s := range syncs {
+			if s.pos >= r.pos {
+				continue
+			}
+			if src == s.subject || src == s.subject+".Name()" ||
+				nameOf[src] == s.subject || openedFrom[s.subject] == src {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// callSite is a call with its position and arguments.
+type callSite struct {
+	pos  token.Pos
+	args []ast.Expr
+}
+
+// selectorCalls returns every <pkg>.<name> call in fn.
+func selectorCalls(fn *ast.FuncDecl, pkg, name string) []callSite {
+	var out []callSite
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != name {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == pkg {
+			out = append(out, callSite{pos: call.Pos(), args: call.Args})
+		}
+		return true
+	})
+	return out
+}
+
+// syncSubject is one sync in a function: where it sits, and the source text of
+// what it syncs.
+type syncSubject struct {
+	pos     token.Pos
+	subject string
+}
+
+// syncSubjects returns every sync in fn — a .Sync() method call or a call to a
+// seam like syncFile — as the expression it syncs.
+func syncSubjects(fset *token.FileSet, fn *ast.FuncDecl) []syncSubject {
+	var out []syncSubject
 	ast.Inspect(fn, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -262,16 +337,47 @@ func synced(fn *ast.FuncDecl) bool {
 		switch fun := call.Fun.(type) {
 		case *ast.SelectorExpr:
 			if fun.Sel.Name == "Sync" {
-				found = true
+				out = append(out, syncSubject{pos: call.Pos(), subject: exprSource(fset, fun.X)})
 			}
 		case *ast.Ident:
-			if strings.Contains(strings.ToLower(fun.Name), "sync") {
-				found = true
+			if strings.Contains(strings.ToLower(fun.Name), "sync") && len(call.Args) > 0 {
+				out = append(out, syncSubject{pos: call.Pos(), subject: exprSource(fset, call.Args[0])})
 			}
 		}
 		return true
 	})
-	return found
+	return out
+}
+
+// fileVars maps identifiers to the paths they denote, for matching a sync's
+// subject against a rename's source: nameOf[X] = F when X was assigned
+// F.Name(); openedFrom[F] = P when F was assigned from a call whose first
+// argument is the path P (os.OpenFile, os.Create, or a local seam like the
+// harvest tests' atPath).
+func fileVars(fset *token.FileSet, fn *ast.FuncDecl) (nameOf, openedFrom map[string]string) {
+	nameOf, openedFrom = map[string]string{}, map[string]string{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) == 0 || len(assign.Rhs) == 0 {
+			return true
+		}
+		id, ok := assign.Lhs[0].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch rhs := assign.Rhs[0].(type) {
+		case *ast.CallExpr: // X := F.Name(), or F := open(P)
+			if sel, ok := rhs.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Name" {
+				nameOf[id.Name] = exprSource(fset, sel.X)
+				break
+			}
+			if len(rhs.Args) > 0 {
+				openedFrom[id.Name] = exprSource(fset, rhs.Args[0])
+			}
+		}
+		return true
+	})
+	return nameOf, openedFrom
 }
 
 // compositeKeySet reports whether lit carries a keyed field named key.
@@ -284,6 +390,16 @@ func compositeKeySet(lit *ast.CompositeLit, key string) bool {
 		}
 	}
 	return false
+}
+
+// exprSource renders e as normalized source text, for comparing expressions by
+// shape.
+func exprSource(fset *token.FileSet, e ast.Expr) string {
+	var buf strings.Builder
+	if err := printer.Fprint(&buf, fset, e); err != nil {
+		return "<unprintable>"
+	}
+	return strings.Join(strings.Fields(buf.String()), " ")
 }
 
 // assertNoStaleEntries fails for allowlist entries that matched nothing: an
