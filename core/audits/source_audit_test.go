@@ -88,6 +88,12 @@ func relPath(path string) string {
 // connections (#1546). Every transport that serves ongoing traffic must raise
 // the pool; the exceptions are one-shot fetches, and each is listed here with
 // its reason so an exemption is a decision someone wrote down.
+//
+// The audit sees Transport composite literals only. The same default reaches
+// the wire through two shapes it does not: an http.Client built without a
+// Transport (it uses DefaultTransport as-is) and a DefaultTransport Clone
+// without MaxIdleConnsPerHost set — today the loopback-only clients in
+// apiclient and local_endpoint, where 2 per host is harmless.
 var transportsWithoutIdlePool = map[string]string{
 	// A single model-list fetch per refresh; no request ever reuses the pool.
 	"core/plugins/inferencerouter/routerconfig/models.go:NewModelsClient": "one-shot fetch; the pool is never reused",
@@ -129,9 +135,15 @@ func TestTransportsSetIdleConnectionPool(t *testing.T) {
 }
 
 // isTransport reports whether e is an http.Transport composite literal type.
+// The package is checked too, so an http2.Transport literal — a type without
+// MaxIdleConnsPerHost — stays outside the rule.
 func isTransport(e ast.Expr) bool {
 	sel, ok := e.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "Transport"
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "http" && sel.Sel.Name == "Transport"
 }
 
 // ------------------------------------------------------------------ rename
@@ -146,8 +158,6 @@ func isTransport(e ast.Expr) bool {
 var renamesWithoutSync = map[string]string{
 	// A restart re-downloads the list when the cache is unreadable.
 	"core/cost/pricing/pricelist/pricelist.go:save": "cache; re-downloaded on a bad read",
-	// A corrupt install is what `agentop script install` exists to redo.
-	"cmd/agentop/cmd_script.go:writeAtomic": "installed files; reinstall restores them",
 	// Rewritten from the embedded source on the next start that needs it.
 	"core/plugins/script/sdk.go:installSDK": "embedded source; rewritten on next start",
 	// The rename moves a day file the ledger's writer already synced; the
